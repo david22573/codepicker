@@ -32,21 +32,19 @@ var askCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		// Create a temp file for context
 		tmpFile, _ := os.CreateTemp("", "agent_context_*.md")
 		tmpPath := tmpFile.Name()
 		tmpFile.Close()
 		defer os.Remove(tmpPath)
 
-		// FIX 1: Set minify to false so the AI receives and generates readable code
+		// CRITICAL FIX: Set minify to FALSE so AI returns clean multi-line code
 		w := writer.NewConcatStrategy(tmpPath, false)
 		w.Init()
 
 		if focusFile != "" {
-			// Fast path: Only scan specific files
 			files := strings.Split(focusFile, ",")
 
-			// FIX 2: Commented out debug print so it doesn't appear in Neovim buffer
+			// CRITICAL FIX: Commented out debug print to prevent "Ghost Lines" in Neovim Diff
 			// fmt.Printf("🔍 Focused Context: %v\n", files)
 
 			for _, f := range files {
@@ -56,7 +54,6 @@ var askCmd = &cobra.Command{
 				}
 			}
 		} else {
-			// Slow path: Scan entire directory
 			absSrc, _ := filepath.Abs(srcDir)
 			cfg := config.NewConfig()
 			if includeExts != "" {
@@ -70,14 +67,12 @@ var askCmd = &cobra.Command{
 		}
 		w.Close()
 
-		// Read the context file
 		contextBytes, err := os.ReadFile(tmpPath)
 		if err != nil {
 			fmt.Printf("Error reading context: %v\n", err)
 			os.Exit(1)
 		}
 
-		// Prepare OpenRouter Client
 		client := openrouter.NewClient(apiKey)
 
 		contextType := "Codebase"
@@ -85,8 +80,10 @@ var askCmd = &cobra.Command{
 			contextType = "Active File"
 		}
 
+		// Prompt updated to strictly forbid minification
 		systemMsg := fmt.Sprintf(
-			"You are an expert coding assistant. Date: %s. Use the provided %s Context to answer.",
+			"You are an expert coding assistant. Date: %s. Use the provided %s Context to answer.\n"+
+				"CRITICAL INSTRUCTION: Output clean, multi-line, properly indented code. DO NOT minify.",
 			time.Now().Format("2006-01-02"), contextType,
 		)
 
