@@ -27,11 +27,7 @@ var copyCmd = &cobra.Command{
 	Use:   "copy",
 	Short: "Copy files to a directory preserving structure",
 	Run: func(cmd *cobra.Command, args []string) {
-		finalOut := outPath
-		if finalOut == "codepicker_context.txt" {
-			finalOut = "codepicker_out"
-		}
-		absOut, _ := filepath.Abs(finalOut)
+		absOut, _ := filepath.Abs(outPath)
 		w := writer.NewCopyStrategy(absOut)
 		runScan(w)
 	},
@@ -341,7 +337,7 @@ type ConcatStrategy struct {
 	OutputPath    string
 	file          *os.File
 	TokenEstimate int
-	Minify        bool // Added
+	Minify        bool
 }
 func NewConcatStrategy(path string, minify bool) *ConcatStrategy {
 	return &ConcatStrategy{OutputPath: path, Minify: minify}
@@ -401,6 +397,7 @@ func (c *ConcatStrategy) minifyContent(content []byte, ext string) []byte {
 	lines := strings.Split(string(content), "\n")
 	var kept []string
 	prefix := ""
+	isMarkdown := false
 	switch strings.ToLower(ext) {
 	case ".go", ".js", ".ts", ".java", ".c", ".cpp", ".rs", ".cs", ".php", ".swift", ".kt":
 		prefix = "//"
@@ -408,16 +405,21 @@ func (c *ConcatStrategy) minifyContent(content []byte, ext string) []byte {
 		prefix = "#"
 	case ".sql", ".lua":
 		prefix = "--"
+	case ".md", ".txt", ".rst":
+		isMarkdown = true
 	}
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
+			if isMarkdown {
+				kept = append(kept, line)
+			}
 			continue
 		}
 		if prefix != "" && strings.HasPrefix(trimmed, prefix) {
 			continue
 		}
-		kept = append(kept, line) // Keep original indentation
+		kept = append(kept, line)
 	}
 	return []byte(strings.Join(kept, "\n"))
 }
