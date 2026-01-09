@@ -11,12 +11,8 @@ var copyCmd = &cobra.Command{
 	Use:   "copy",
 	Short: "Copy files to a directory preserving structure",
 	Run: func(cmd *cobra.Command, args []string) {
-		finalOut := outPath
-		if finalOut == "codepicker_context.txt" {
-			finalOut = "codepicker_out"
-		}
-		absOut, _ := filepath.Abs(finalOut)
-
+		// outPath defaults to "codepicker_out" via the flag definition in init() below
+		absOut, _ := filepath.Abs(outPath)
 		w := writer.NewCopyStrategy(absOut)
 		runScan(w)
 	},
@@ -24,6 +20,7 @@ var copyCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(copyCmd)
+	// We set a specific default for the copy command here
 	copyCmd.Flags().StringVarP(&outPath, "out", "o", "codepicker_out", "Output directory")
 }
 
