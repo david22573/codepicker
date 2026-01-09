@@ -17,7 +17,7 @@ import (
 
 var (
 	askModel  string
-	focusFile string // New flag for single file context
+	focusFile string
 )
 
 var askCmd = &cobra.Command{
@@ -32,30 +32,31 @@ var askCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		// Temp file for context
+		// Create a temp file for context
 		tmpFile, _ := os.CreateTemp("", "agent_context_*.md")
 		tmpPath := tmpFile.Name()
 		tmpFile.Close()
 		defer os.Remove(tmpPath)
 
-		// --- CONTEXT GATHERING STRATEGY ---
-		w := writer.NewConcatStrategy(tmpPath, true) // Always minify
-		w.Init()                                     // Manually init since we might not use Scanner's Scan()
+		// FIX 1: Set minify to false so the AI receives and generates readable code
+		w := writer.NewConcatStrategy(tmpPath, false)
+		w.Init()
 
 		if focusFile != "" {
-			// FAST PATH: Only scan the specific file(s) requested
+			// Fast path: Only scan specific files
 			files := strings.Split(focusFile, ",")
-			fmt.Printf("🔍 Focused Context: %v\n", files)
+
+			// FIX 2: Commented out debug print so it doesn't appear in Neovim buffer
+			// fmt.Printf("🔍 Focused Context: %v\n", files)
 
 			for _, f := range files {
 				abs, err := filepath.Abs(f)
 				if err == nil {
-					// Reuse writer logic to format/minify it
 					w.Write(abs, f)
 				}
 			}
 		} else {
-			// SLOW PATH: Scan entire directory
+			// Slow path: Scan entire directory
 			absSrc, _ := filepath.Abs(srcDir)
 			cfg := config.NewConfig()
 			if includeExts != "" {
@@ -65,24 +66,20 @@ var askCmd = &cobra.Command{
 				cfg.AddIgnoredDirs(strings.Split(ignoreDirs, ","))
 			}
 			s := scanner.NewScanner(absSrc, w, cfg)
-			// Note: Scanner calls w.Init/Close internally, but we called Init above.
-			// Ideally, refactor Scanner to not strictly own Init/Close,
-			// but for now, let's just use the scanner normally if no focus.
 			s.Scan()
 		}
 		w.Close()
 
-		// Read the context
+		// Read the context file
 		contextBytes, err := os.ReadFile(tmpPath)
 		if err != nil {
 			fmt.Printf("Error reading context: %v\n", err)
 			os.Exit(1)
 		}
 
-		// --- API CALL ---
+		// Prepare OpenRouter Client
 		client := openrouter.NewClient(apiKey)
 
-		// Updated System Prompt with "Current File" awareness if focused
 		contextType := "Codebase"
 		if focusFile != "" {
 			contextType = "Active File"
@@ -130,6 +127,6 @@ var askCmd = &cobra.Command{
 func init() {
 	rootCmd.AddCommand(askCmd)
 	askCmd.Flags().StringVarP(&askModel, "model", "m", "xiaomi/mimo-v2-flash:free", "Model ID")
-	askCmd.Flags().StringVarP(&focusFile, "focus", "f", "", "Comma-separated list of files to scan (ignores directory scan)")
+	askCmd.Flags().StringVarP(&focusFile, "focus", "f", "", "Comma-separated list of files to scan")
 }
 
