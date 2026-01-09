@@ -10,5 +10,8 @@ install:
 
 clean:
 	go clean
-	rm -f $(BINARY_NAME) codepicker_context.txt
+	rm -f $(BINARY_NAME)
+	# Removes default txt, and any generated _context.md files
+	rm -f codepicker_context.txt *_context.md
 	rm -rf codepicker_out
+

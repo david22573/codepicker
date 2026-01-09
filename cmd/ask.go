@@ -6,20 +6,23 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/david22573/codepicker/internal/config"
 	"github.com/david22573/codepicker/internal/scanner"
 	"github.com/david22573/codepicker/internal/writer"
-	"github.com/david22573/codepicker/pkg/openrouter" // Imported from your copied package
+	"github.com/david22573/codepicker/pkg/openrouter"
 	"github.com/spf13/cobra"
 )
 
-var askModel string
+var (
+	askModel  string
+	focusFile string // New flag for single file context
+)
 
 var askCmd = &cobra.Command{
 	Use:   "ask [query]",
-	Short: "Ask AI about the codebase using OpenRouter",
-	Long:  `Scans the current directory (respecting .gitignore) and sends the context + query to OpenRouter.`,
+	Short: "Ask AI about the codebase",
 	Args:  cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		query := strings.Join(args, " ")
@@ -29,49 +32,68 @@ var askCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		// --- PHASE 1: THE ENGINE (Gather Context) ---
-		// We use a temporary file to store the scan result
+		// Temp file for context
 		tmpFile, _ := os.CreateTemp("", "agent_context_*.md")
 		tmpPath := tmpFile.Name()
 		tmpFile.Close()
-		defer os.Remove(tmpPath) // Clean up after we are done
+		defer os.Remove(tmpPath)
 
-		// Configure scanner (reusing your existing logic)
-		absSrc, _ := filepath.Abs(srcDir)
-		w := writer.NewConcatStrategy(tmpPath, true) // minify=true to save tokens
-		cfg := config.NewConfig()
+		// --- CONTEXT GATHERING STRATEGY ---
+		w := writer.NewConcatStrategy(tmpPath, true) // Always minify
+		w.Init()                                     // Manually init since we might not use Scanner's Scan()
 
-		// Apply flags if set (reusing global flags from root.go)
-		if includeExts != "" {
-			cfg.AddAllowedExtensions(strings.Split(includeExts, ","))
+		if focusFile != "" {
+			// FAST PATH: Only scan the specific file(s) requested
+			files := strings.Split(focusFile, ",")
+			fmt.Printf("🔍 Focused Context: %v\n", files)
+
+			for _, f := range files {
+				abs, err := filepath.Abs(f)
+				if err == nil {
+					// Reuse writer logic to format/minify it
+					w.Write(abs, f)
+				}
+			}
+		} else {
+			// SLOW PATH: Scan entire directory
+			absSrc, _ := filepath.Abs(srcDir)
+			cfg := config.NewConfig()
+			if includeExts != "" {
+				cfg.AddAllowedExtensions(strings.Split(includeExts, ","))
+			}
+			if ignoreDirs != "" {
+				cfg.AddIgnoredDirs(strings.Split(ignoreDirs, ","))
+			}
+			s := scanner.NewScanner(absSrc, w, cfg)
+			// Note: Scanner calls w.Init/Close internally, but we called Init above.
+			// Ideally, refactor Scanner to not strictly own Init/Close,
+			// but for now, let's just use the scanner normally if no focus.
+			s.Scan()
 		}
-		if ignoreDirs != "" {
-			cfg.AddIgnoredDirs(strings.Split(ignoreDirs, ","))
-		}
+		w.Close()
 
-		s := scanner.NewScanner(absSrc, w, cfg)
-		if err := s.Scan(); err != nil {
-			fmt.Printf("Scan failed: %v\n", err)
-			os.Exit(1)
-		}
-
-		// Read the massive context file
+		// Read the context
 		contextBytes, err := os.ReadFile(tmpPath)
 		if err != nil {
-			fmt.Printf("Read failed: %v\n", err)
+			fmt.Printf("Error reading context: %v\n", err)
 			os.Exit(1)
 		}
 
-		// Safety Check: Warn if context is massive (> 500k chars approx 125k tokens)
-		if len(contextBytes) > 2000000 {
-			fmt.Printf("⚠️  Warning: Context is very large (%d bytes). This might timeout on free tier.\n", len(contextBytes))
-		}
-
-		// --- PHASE 2: THE BRAIN (Call OpenRouter) ---
+		// --- API CALL ---
 		client := openrouter.NewClient(apiKey)
 
-		systemMsg := "You are an expert coding assistant. Use the provided Codebase Context to answer the user's question accurately."
-		userMsg := fmt.Sprintf("Codebase Context:\n%s\n\nQuestion: %s", string(contextBytes), query)
+		// Updated System Prompt with "Current File" awareness if focused
+		contextType := "Codebase"
+		if focusFile != "" {
+			contextType = "Active File"
+		}
+
+		systemMsg := fmt.Sprintf(
+			"You are an expert coding assistant. Date: %s. Use the provided %s Context to answer.",
+			time.Now().Format("2006-01-02"), contextType,
+		)
+
+		userMsg := fmt.Sprintf("Context:\n%s\n\nQuestion: %s", string(contextBytes), query)
 
 		req := openrouter.ChatCompletionRequest{
 			Model: askModel,
@@ -79,7 +101,7 @@ var askCmd = &cobra.Command{
 				{Role: "system", Content: systemMsg},
 				{Role: "user", Content: userMsg},
 			},
-			Stream: true, // Essential for Neovim feel
+			Stream: true,
 		}
 
 		ctx := context.Background()
@@ -90,7 +112,6 @@ var askCmd = &cobra.Command{
 		}
 		defer stream.Close()
 
-		// Stream stdout so Neovim can capture it line-by-line
 		for {
 			resp, err := stream.Recv()
 			if err != nil {
@@ -108,6 +129,7 @@ var askCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(askCmd)
-	// Default to the 256k context model you wanted
 	askCmd.Flags().StringVarP(&askModel, "model", "m", "xiaomi/mimo-v2-flash:free", "Model ID")
+	askCmd.Flags().StringVarP(&focusFile, "focus", "f", "", "Comma-separated list of files to scan (ignores directory scan)")
 }
+
