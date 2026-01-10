@@ -75,12 +75,14 @@ func (c *Client) CreateChatCompletionStream(ctx context.Context, req ChatComplet
 	for attempt := 0; attempt < constants.MaxRetries; attempt++ {
 		// Phase 1.3: Harden retry logic with exponential backoff + jitter
 		if attempt > 0 {
-			// Base delay * 2^attempt
-			backoff := float64(constants.RetryDelay) * float64(1<<attempt)
-			// Add 0-20% jitter
-			jitter := backoff * (rand.Float64() * 0.2)
+			// 1. Calculate base delay using integer math (time.Duration is int64)
+			// Explicitly casting 1 to time.Duration prevents the "invalid operation: shift of type float64" error
+			baseDelay := constants.RetryDelay * time.Duration(1<<attempt)
 
-			sleepDuration := time.Duration(backoff + jitter)
+			// 2. Add 0-20% jitter (requires conversion to float for percentage calc)
+			jitter := time.Duration(float64(baseDelay) * (rand.Float64() * 0.2))
+
+			sleepDuration := baseDelay + jitter
 
 			select {
 			case <-ctx.Done():
@@ -98,11 +100,12 @@ func (c *Client) CreateChatCompletionStream(ctx context.Context, req ChatComplet
 		resp, err := c.httpClient.Do(httpReq)
 		if err != nil {
 			lastErr = err
-			// Check for context cancellation immediately
+			// Check for context cancellation immediately (using standard lib errors)
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return nil, err
 			}
 
+			// Check if we should retry (using internal errors package)
 			if errs.IsRetryable(err) {
 				continue
 			}
@@ -134,3 +137,4 @@ func (c *Client) CreateChatCompletionStream(ctx context.Context, req ChatComplet
 
 	return nil, fmt.Errorf("max retries exceeded: %w", lastErr)
 }
+
