@@ -108,7 +108,6 @@ var rootCmd = &cobra.Command{
 
 		w := writer.NewConcatStrategy(absOut, minify)
 
-		// Updated: Pass 'cmd' explicitly to avoid initialization cycle
 		if err := runScan(cmd.Context(), w, absSrc, cmd); err != nil {
 			return err
 		}
@@ -165,8 +164,13 @@ func applyConfig(cmd *cobra.Command, cfgFile *config.ConfigFile) {
 	}
 }
 
-// Updated: runScan now accepts cmd *cobra.Command
 func runScan(ctx context.Context, w writer.OutputStrategy, absSrc string, cmd *cobra.Command) error {
+	// FIX: Added lifecycle management here for commands that use this helper.
+	if err := w.Init(); err != nil {
+		return fmt.Errorf("failed to initialize writer: %w", err)
+	}
+	defer w.Close()
+
 	start := time.Now()
 	appLogger.Info(fmt.Sprintf("Scanning directory: %s", absSrc))
 
@@ -183,7 +187,6 @@ func runScan(ctx context.Context, w writer.OutputStrategy, absSrc string, cmd *c
 		appLogger.Debug(fmt.Sprintf("Excluding directories: %v", dirs))
 	}
 
-	// Safe check for the "diff" flag
 	hasDiff := false
 	if cmd.Flags().Lookup("diff") != nil {
 		hasDiff = flagChanged(cmd.Flags(), "diff") || diffRef != ""
@@ -204,7 +207,6 @@ func runScan(ctx context.Context, w writer.OutputStrategy, absSrc string, cmd *c
 
 	s := scanner.NewScanner(absSrc, w, cfg, appLogger)
 
-	// Handle Git Diff Mode
 	if hasDiff {
 		files, err := git.GetChangedFiles(diffRef)
 		if err != nil {

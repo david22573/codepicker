@@ -20,7 +20,7 @@ type Scanner struct {
 	GitIgnore    *ignore.GitIgnore
 	CustomIgnore *ignore.GitIgnore
 	Logger       logger.Logger
-	// Whitelist acts as a strict filter. If not nil, only files in this map are processed.
+
 	Whitelist map[string]bool
 }
 
@@ -49,16 +49,13 @@ func NewScanner(root string, w writer.OutputStrategy, cfg *config.Config, log lo
 	return s
 }
 
-// SetWhitelist restricts the scanner to only process the given relative paths.
 func (s *Scanner) SetWhitelist(files map[string]bool) {
 	s.Whitelist = files
 }
 
 func (s *Scanner) Scan(ctx context.Context) error {
-	if err := s.Writer.Init(); err != nil {
-		return fmt.Errorf("writer init failed: %w", err)
-	}
-	defer s.Writer.Close()
+	// FIX: Lifecycle management (Init/Close) removed from here.
+	// The caller (cmd) is now responsible for opening and closing the writer.
 
 	return filepath.WalkDir(s.Root, func(path string, d os.DirEntry, err error) error {
 		select {
@@ -80,22 +77,19 @@ func (s *Scanner) Scan(ctx context.Context) error {
 			return nil
 		}
 
-		// Normalize path separators for consistent map lookup
 		cleanRel := filepath.ToSlash(relPath)
 
-		// 1. Strict Whitelist Check (for Git Diff mode)
 		if s.Whitelist != nil {
 			if d.IsDir() {
-				// We don't skip dirs in whitelist mode, we just traverse them
-				// to find the specific whitelisted files inside.
+				// Allow directories if they contain whitelisted files?
+				// Simple approach: don't block dirs here, filter files only
 			} else {
 				if !s.Whitelist[cleanRel] {
-					return nil // Skip this file as it's not in the whitelist
+					return nil
 				}
 			}
 		}
 
-		// 2. Ignore Checks
 		if s.GitIgnore != nil && s.GitIgnore.MatchesPath(relPath) {
 			if d.IsDir() {
 				return filepath.SkipDir
@@ -140,3 +134,4 @@ func (s *Scanner) Scan(ctx context.Context) error {
 		return s.Writer.Write(path, relPath)
 	})
 }
+
