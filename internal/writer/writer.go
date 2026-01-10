@@ -61,18 +61,17 @@ func (c *ConcatStrategy) Write(absPath, relPath string) error {
 	}
 	defer f.Close()
 
-	// Check file size first
 	info, err := f.Stat()
 	if err != nil {
 		return err
 	}
 
 	if info.Size() > maxFileSize {
-		logWarn(fmt.Sprintf("Skipping large file (>100MB): %s", relPath))
+		// FIXED: Replaced undefined logWarn with fmt.Printf
+		fmt.Printf("⚠️  Skipping large file (>100MB): %s\n", relPath)
 		return nil
 	}
 
-	// Use LimitReader for safety
 	content, err := io.ReadAll(io.LimitReader(f, maxFileSize))
 
 	if err != nil {
@@ -80,10 +79,9 @@ func (c *ConcatStrategy) Write(absPath, relPath string) error {
 	}
 
 	if !utf8.Valid(content) {
-		return nil // Skip binary files
+		return nil
 	}
 
-	// Apply AST-based minification
 	if c.Minify {
 		ext := strings.ToLower(filepath.Ext(relPath))
 		content = minifier.Minify(content, ext)
@@ -101,13 +99,12 @@ func (c *ConcatStrategy) Write(absPath, relPath string) error {
 		return err
 	}
 
-	// Ensure newline at end
 	if len(content) > 0 && content[len(content)-1] != '\n' {
 		c.file.Write([]byte("\n"))
 		n++
 	}
 
-	c.TokenEstimate += n / 4 // Rough estimate
+	c.TokenEstimate += n / 4
 	fmt.Fprintf(c.file, "```\n\n")
 	return nil
 }
@@ -213,3 +210,4 @@ func (t *TreeStrategy) Close() error {
 	fmt.Println()
 	return nil
 }
+
