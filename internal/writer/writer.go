@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/atotto/clipboard"
+	"github.com/david22573/codepicker/internal/minifier"
 )
 
 type OutputStrategy interface {
@@ -19,8 +20,6 @@ type OutputStrategy interface {
 	ShouldSkip(path string) bool
 	Name() string
 }
-
-// --- Strategy 1: Concat (Single File) ---
 
 type ConcatStrategy struct {
 	OutputPath    string
@@ -66,11 +65,13 @@ func (c *ConcatStrategy) Write(absPath, relPath string) error {
 	}
 
 	if !utf8.Valid(content) {
-		return nil
+		return nil // Skip binary files
 	}
 
+	// Apply AST-based minification
 	if c.Minify {
-		content = c.minifyContent(content, filepath.Ext(relPath))
+		ext := strings.ToLower(filepath.Ext(relPath))
+		content = minifier.Minify(content, ext)
 	}
 
 	ext := strings.TrimPrefix(filepath.Ext(relPath), ".")
@@ -85,68 +86,20 @@ func (c *ConcatStrategy) Write(absPath, relPath string) error {
 		return err
 	}
 
-	// Ensure newline at end of block
+	// Ensure newline at end
 	if len(content) > 0 && content[len(content)-1] != '\n' {
 		c.file.Write([]byte("\n"))
 		n++
 	}
 
-	c.TokenEstimate += n / 4
+	c.TokenEstimate += n / 4 // Rough estimate
 	fmt.Fprintf(c.file, "```\n\n")
 	return nil
-}
-
-func (c *ConcatStrategy) minifyContent(content []byte, ext string) []byte {
-	lines := strings.Split(string(content), "\n")
-	var kept []string
-
-	// Determine comment prefix and type
-	prefix := ""
-	isMarkdown := false
-
-	switch strings.ToLower(ext) {
-	case ".go", ".js", ".ts", ".java", ".c", ".cpp", ".rs", ".cs", ".php", ".swift", ".kt":
-		prefix = "//"
-	case ".py", ".rb", ".sh", ".yaml", ".yml", ".toml", ".dockerfile", "makefile", ".pl":
-		prefix = "#"
-	case ".sql", ".lua":
-		prefix = "--"
-	case ".md", ".txt", ".rst":
-		isMarkdown = true
-	}
-
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-
-		// 1. Handle Empty Lines
-		if trimmed == "" {
-			// If it's markdown, we MUST keep empty lines to preserve paragraphs.
-			// If it's code, we can safely strip them to save tokens.
-			if isMarkdown {
-				kept = append(kept, line)
-			}
-			continue
-		}
-
-		// 2. Remove Comments
-		// Only remove if a prefix is defined AND the line starts with it.
-		// We do not strip comments from Markdown files (prefix is "").
-		if prefix != "" && strings.HasPrefix(trimmed, prefix) {
-			continue
-		}
-
-		// Keep the line (preserves indentation)
-		kept = append(kept, line)
-	}
-
-	return []byte(strings.Join(kept, "\n"))
 }
 
 func (c *ConcatStrategy) Close() error {
 	return c.file.Close()
 }
-
-// --- Strategy 2: Copy (Directory Mirror) ---
 
 type CopyStrategy struct {
 	OutputDir string
@@ -171,20 +124,15 @@ func (c *CopyStrategy) Write(absPath, relPath string) error {
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
 		return err
 	}
-
 	src, _ := os.Open(absPath)
 	defer src.Close()
-
 	dst, _ := os.Create(targetPath)
 	defer dst.Close()
-
 	io.Copy(dst, src)
 	return nil
 }
 
 func (c *CopyStrategy) Close() error { return nil }
-
-// --- Strategy 3: Tree (Visual Map) ---
 
 type TreeOptions struct {
 	CopyToClipboard bool
@@ -223,12 +171,10 @@ func (t *TreeStrategy) Write(absPath, relPath string) error {
 	parts := strings.Split(relPath, string(os.PathSeparator))
 	depth := len(parts) - 1
 	filename := parts[len(parts)-1]
-
 	indent := ""
 	for i := 0; i < depth; i++ {
 		indent += "│   "
 	}
-
 	line := fmt.Sprintf("%s├── %s\n", indent, filename)
 	fmt.Print(line)
 	t.buffer.WriteString(line)
@@ -237,14 +183,12 @@ func (t *TreeStrategy) Write(absPath, relPath string) error {
 
 func (t *TreeStrategy) Close() error {
 	result := t.buffer.String()
-
 	if t.opts.OutPath != "" {
 		if err := os.WriteFile(t.opts.OutPath, t.buffer.Bytes(), 0644); err != nil {
 			return fmt.Errorf("failed to save tree file: %w", err)
 		}
 		fmt.Printf("\n📄 Tree saved to: %s", t.opts.OutPath)
 	}
-
 	if t.opts.CopyToClipboard {
 		if err := clipboard.WriteAll(result); err != nil {
 			return fmt.Errorf("failed to copy to clipboard: %w", err)

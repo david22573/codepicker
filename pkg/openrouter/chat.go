@@ -8,13 +8,18 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
+
+	"github.com/david22573/codepicker/internal/errors"
 )
 
-// CreateChatCompletion sends a request to the chat completions endpoint.
-// This is for non-streaming requests.
+const (
+	maxRetries = 3
+	retryDelay = 1 * time.Second
+)
+
 func (c *Client) CreateChatCompletion(ctx context.Context, req ChatCompletionRequest) (*ChatCompletionResponse, error) {
 	req.Stream = false // Force stream to false for this method
-
 	httpReq, err := c.newRequest(ctx, http.MethodPost, "/chat/completions", req)
 	if err != nil {
 		return nil, err
@@ -24,25 +29,16 @@ func (c *Client) CreateChatCompletion(ctx context.Context, req ChatCompletionReq
 	if err := c.sendRequest(httpReq, &resp); err != nil {
 		return nil, err
 	}
-
 	return &resp, nil
 }
 
-// -----------------------------------------------------------------------------
-// Streaming Support
-// -----------------------------------------------------------------------------
-
-// ChatCompletionStream manages the stream of responses.
 type ChatCompletionStream struct {
 	reader *bufio.Reader
 	body   io.Closer
 }
 
-// Recv returns the next response from the stream.
-// Returns io.EOF when the stream is finished.
 func (s *ChatCompletionStream) Recv() (*ChatCompletionResponse, error) {
 	for {
-		// Read line by line (SSE format)
 		line, err := s.reader.ReadBytes('\n')
 		if err != nil {
 			return nil, err
@@ -53,15 +49,11 @@ func (s *ChatCompletionStream) Recv() (*ChatCompletionResponse, error) {
 			continue
 		}
 
-		// SSE lines start with "data: "
 		if !bytes.HasPrefix(line, []byte("data: ")) {
 			continue
 		}
 
-		// Remove the prefix
 		data := bytes.TrimPrefix(line, []byte("data: "))
-
-		// Check for the [DONE] signal
 		if string(data) == "[DONE]" {
 			return nil, io.EOF
 		}
@@ -70,44 +62,60 @@ func (s *ChatCompletionStream) Recv() (*ChatCompletionResponse, error) {
 		if err := json.Unmarshal(data, &response); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal stream data: %w", err)
 		}
-
-		// OpenRouter (and OpenAI) sometimes send keep-alive comments or empty updates
-		// We return valid structs, but empty ones might be filtered by the caller if desired.
 		return &response, nil
 	}
 }
 
-// Close closes the underlying response body.
 func (s *ChatCompletionStream) Close() error {
 	return s.body.Close()
 }
 
-// CreateChatCompletionStream sends a request to the chat completions endpoint with streaming enabled.
 func (c *Client) CreateChatCompletionStream(ctx context.Context, req ChatCompletionRequest) (*ChatCompletionStream, error) {
 	req.Stream = true // Force stream to true
 
-	httpReq, err := c.newRequest(ctx, http.MethodPost, "/chat/completions", req)
-	if err != nil {
-		return nil, err
-	}
-
-	// We use c.httpClient.Do directly here because we need to keep the body open
-	resp, err := c.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("failed to execute stream request: %w", err)
-	}
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		defer resp.Body.Close()
-		var errResp ErrorResponse
-		if decodeErr := json.NewDecoder(resp.Body).Decode(&errResp); decodeErr == nil && errResp.Error.Message != "" {
-			return nil, fmt.Errorf("api error (status %d): %s - %s", resp.StatusCode, errResp.Error.Type, errResp.Error.Message)
+	var lastErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			time.Sleep(retryDelay * time.Duration(attempt))
 		}
-		return nil, fmt.Errorf("api error (status %d)", resp.StatusCode)
+
+		httpReq, err := c.newRequest(ctx, http.MethodPost, "/chat/completions", req)
+		if err != nil {
+			return nil, err
+		}
+
+		resp, err := c.httpClient.Do(httpReq)
+		if err != nil {
+			lastErr = err
+			if errors.IsRetryable(err) {
+				continue
+			}
+			return nil, fmt.Errorf("failed to execute stream request: %w", err)
+		}
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			defer resp.Body.Close()
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+			apiErr := errors.NewAPIError(resp.StatusCode, string(body), req.Model, "/chat/completions")
+			lastErr = apiErr
+
+			var errResp ErrorResponse
+			if decodeErr := json.Unmarshal(body, &errResp); decodeErr == nil && errResp.Error.Message != "" {
+				lastErr = fmt.Errorf("api error (status %d): %s - %s", resp.StatusCode, errResp.Error.Type, errResp.Error.Message)
+			}
+
+			if errors.IsRetryable(apiErr) {
+				continue
+			}
+			return nil, lastErr
+		}
+
+		return &ChatCompletionStream{
+			reader: bufio.NewReader(resp.Body),
+			body:   resp.Body,
+		}, nil
 	}
 
-	return &ChatCompletionStream{
-		reader: bufio.NewReader(resp.Body),
-		body:   resp.Body,
-	}, nil
+	return nil, fmt.Errorf("max retries exceeded: %w", lastErr)
 }
+

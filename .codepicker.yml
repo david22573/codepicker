@@ -1,0 +1,10 @@
+# .codepicker.yml
+src: .
+output: ./context.md
+include:
+  - .go
+  - .ts
+exclude:
+  - vendor
+minify: true
+tokens: true
