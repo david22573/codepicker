@@ -24,7 +24,6 @@ var treeCmd = &cobra.Command{
 		}
 		w := writer.NewTreeStrategy(opts)
 
-		// Get absolute source path
 		absSrc, err := filepath.Abs(srcDir)
 		if err != nil {
 			logError(fmt.Sprintf("Invalid source path: %v", err))
@@ -32,7 +31,8 @@ var treeCmd = &cobra.Command{
 		}
 
 		logInfo(fmt.Sprintf("Generating tree for: %s", absSrc))
-		runScan(w, absSrc)
+		// FIXED: Pass cmd.Context()
+		runScan(cmd.Context(), w, absSrc)
 	},
 }
 
@@ -41,3 +41,4 @@ func init() {
 	treeCmd.Flags().BoolVarP(&treeCopy, "copy", "c", false, "Copy tree output to clipboard")
 	treeCmd.Flags().StringVarP(&treeOut, "out", "o", "", "Save tree output to a text file")
 }
+

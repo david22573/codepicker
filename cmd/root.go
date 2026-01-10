@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -27,7 +28,7 @@ var (
 )
 
 var logger = log.New(os.Stderr, "", 0)
-var logLevel = 1 // 0=quiet, 1=normal, 2=verbose
+var logLevel = 1
 
 func logInfo(msg string) {
 	if logLevel >= 1 {
@@ -52,22 +53,29 @@ func logError(msg string) {
 }
 
 func sanitizePath(path string) (string, error) {
-	if strings.Contains(path, "..") {
-		return "", &errors.ValidationError{
-			Field:   "path",
-			Message: "contains traversal sequence",
-			Value:   path,
-		}
-	}
-
 	clean := filepath.Clean(path)
-	if clean != path {
-		logWarn(fmt.Sprintf("Path normalized from '%s' to '%s'", path, clean))
-	}
 
 	abs, err := filepath.Abs(clean)
 	if err != nil {
-		return "", errors.NewPathError("abs", path, err)
+		return "", fmt.Errorf("failed to get absolute path: %w", err)
+	}
+
+	wd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("failed to get working directory: %w", err)
+	}
+
+	rel, err := filepath.Rel(wd, abs)
+	if err != nil {
+		return "", fmt.Errorf("failed to get relative path: %w", err)
+	}
+
+	if strings.HasPrefix(rel, "..") {
+		return "", &errors.ValidationError{
+			Field:   "path",
+			Message: "path escapes working directory",
+			Value:   path,
+		}
 	}
 
 	return abs, nil
@@ -102,12 +110,10 @@ var rootCmd = &cobra.Command{
 	Short: "Harvest code for AI consumption",
 	Long:  `Scans a directory and combines code files into a single context file.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		// Handle verbose flag
 		if verbose {
 			logLevel = 2
 		}
 
-		// Load config file if specified or exists
 		var cfgFile *config.ConfigFile
 		if configFile != "" {
 			var err error
@@ -118,14 +124,12 @@ var rootCmd = &cobra.Command{
 			}
 			logInfo(fmt.Sprintf("Loaded config from: %s", configFile))
 		} else {
-			// Try default locations
 			cfgFile, _ = config.LoadConfigFile("")
 			if cfgFile != nil {
 				logInfo("Found default config file")
 			}
 		}
 
-		// Apply config values to flags (if not explicitly set by user)
 		if cfgFile != nil {
 			if srcDir == "." && cfgFile.Src != "" {
 				srcDir = cfgFile.Src
@@ -163,14 +167,12 @@ var rootCmd = &cobra.Command{
 
 		logDebug(fmt.Sprintf("Starting with source: %s", srcDir))
 
-		// Validate and sanitize source directory
 		absSrc, err := sanitizePath(srcDir)
 		if err != nil {
 			logError(fmt.Sprintf("Invalid source directory: %v", err))
 			os.Exit(1)
 		}
 
-		// Verify source directory exists and is accessible
 		info, err := os.Stat(absSrc)
 		if err != nil {
 			logError(fmt.Sprintf("Cannot access source directory: %v", err))
@@ -181,18 +183,20 @@ var rootCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		// Determine output path if not provided
 		if outPath == "" {
 			dirName := filepath.Base(absSrc)
 			if dirName == "." || dirName == string(filepath.Separator) {
-				wd, _ := os.Getwd()
+				wd, err := os.Getwd()
+				if err != nil {
+					logError(fmt.Sprintf("Failed to get working directory: %v", err))
+					os.Exit(1)
+				}
 				dirName = filepath.Base(wd)
 			}
 			outPath = fmt.Sprintf("%s_context.md", dirName)
 			logDebug(fmt.Sprintf("Default output path: %s", outPath))
 		}
 
-		// Validate output path
 		absOut, err := sanitizePath(outPath)
 		if err != nil {
 			logError(fmt.Sprintf("Invalid output path: %v", err))
@@ -204,32 +208,24 @@ var rootCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		// Ensure extension
 		if filepath.Ext(absOut) == "" {
 			absOut += ".md"
 		}
 
-		// Create parent directory if needed
 		parentDir := filepath.Dir(absOut)
 		if err := os.MkdirAll(parentDir, 0755); err != nil {
 			logError(fmt.Sprintf("Cannot create output directory: %v", err))
 			os.Exit(1)
 		}
 
-		// Check for self-overwrite protection
 		if absSrc == absOut {
 			logError("Cannot write context to source directory root")
 			os.Exit(1)
 		}
 
-		// Check if output already exists
-		if _, err := os.Stat(absOut); err == nil {
-			logWarn(fmt.Sprintf("Output file already exists: %s", absOut))
-		}
-
-		// Execute scan
 		w := writer.NewConcatStrategy(absOut, minify)
-		runScan(w, absSrc)
+		// FIXED: Pass cmd.Context()
+		runScan(cmd.Context(), w, absSrc)
 
 		fmt.Printf("📦 Output: %s\n", absOut)
 		if showTokens {
@@ -256,7 +252,8 @@ func init() {
 	rootCmd.PersistentFlags().StringVarP(&configFile, "config", "c", "", "Config file path (default: .codepicker.yml)")
 }
 
-func runScan(w writer.OutputStrategy, absSrc string) {
+// FIXED: Added context parameter
+func runScan(ctx context.Context, w writer.OutputStrategy, absSrc string) {
 	start := time.Now()
 	logInfo(fmt.Sprintf("Scanning directory: %s", absSrc))
 
@@ -274,7 +271,7 @@ func runScan(w writer.OutputStrategy, absSrc string) {
 	}
 
 	if w.Name() != "Tree" {
-		fmt.Printf("🍇 Scanning: %s\n", absSrc)
+		fmt.Printf("🚇 Scanning: %s\n", absSrc)
 		if includeExts != "" {
 			fmt.Printf("➕ Including: %s\n", includeExts)
 		}
@@ -284,7 +281,8 @@ func runScan(w writer.OutputStrategy, absSrc string) {
 	}
 
 	s := scanner.NewScanner(absSrc, w, cfg)
-	if err := s.Scan(); err != nil {
+	// FIXED: Pass context to Scan
+	if err := s.Scan(ctx); err != nil {
 		logError(fmt.Sprintf("Scan failed: %v", err))
 		os.Exit(1)
 	}

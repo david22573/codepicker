@@ -13,6 +13,8 @@ import (
 	"github.com/david22573/codepicker/internal/minifier"
 )
 
+const maxFileSize = 100 * 1024 * 1024 // 100MB
+
 type OutputStrategy interface {
 	Init() error
 	Write(absPath, relPath string) error
@@ -59,7 +61,20 @@ func (c *ConcatStrategy) Write(absPath, relPath string) error {
 	}
 	defer f.Close()
 
-	content, err := io.ReadAll(f)
+	// Check file size first
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+
+	if info.Size() > maxFileSize {
+		logWarn(fmt.Sprintf("Skipping large file (>100MB): %s", relPath))
+		return nil
+	}
+
+	// Use LimitReader for safety
+	content, err := io.ReadAll(io.LimitReader(f, maxFileSize))
+
 	if err != nil {
 		return err
 	}
@@ -198,4 +213,3 @@ func (t *TreeStrategy) Close() error {
 	fmt.Println()
 	return nil
 }
-

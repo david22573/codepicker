@@ -22,7 +22,6 @@ var (
 	smartMode bool
 )
 
-// PathCollector is a lightweight writer strategy that just collects filenames
 type PathCollector struct {
 	Paths []string
 }
@@ -47,7 +46,7 @@ func validateAPIKey() string {
 	}
 
 	if len(apiKey) < 10 {
-		logError(fmt.Sprintf("API key appears invalid (too short): %s", apiKey[:5]+"..."))
+		logError("API key appears invalid (insufficient length)")
 		os.Exit(1)
 	}
 
@@ -71,7 +70,7 @@ func validateFocusFiles(focusList string) []string {
 
 		info, err := os.Stat(clean)
 		if err != nil {
-			// In smart mode, the LLM might hallucinate a file, so we warn instead of exit
+
 			logWarn(fmt.Sprintf("Focus file not found (skipping): %s", clean))
 			continue
 		}
@@ -88,7 +87,6 @@ func validateFocusFiles(focusList string) []string {
 	return validated
 }
 
-// callLLMForPaths handles the "Planning" step: sending a file list to the LLM and parsing the JSON response.
 func callLLMForPaths(apiKey, model, sysMsg, userMsg string) []string {
 	client := openrouter.NewClient(apiKey)
 	req := openrouter.ChatCompletionRequest{
@@ -117,7 +115,6 @@ func callLLMForPaths(apiKey, model, sysMsg, userMsg string) []string {
 		return nil
 	}
 
-	// Clean up potential markdown formatting in the JSON response
 	content := strings.TrimSpace(contentStr)
 	if strings.HasPrefix(content, "```json") {
 		content = strings.TrimPrefix(content, "```json")
@@ -127,7 +124,6 @@ func callLLMForPaths(apiKey, model, sysMsg, userMsg string) []string {
 		content = strings.TrimSuffix(content, "```")
 	}
 
-	// Try parsing as object { "files": [...] }
 	var resultObj struct {
 		Files []string `json:"files"`
 	}
@@ -135,7 +131,6 @@ func callLLMForPaths(apiKey, model, sysMsg, userMsg string) []string {
 		return resultObj.Files
 	}
 
-	// Try parsing as direct array [...]
 	var paths []string
 	if err := json.Unmarshal([]byte(content), &paths); err == nil {
 		return paths
@@ -156,7 +151,6 @@ var askCmd = &cobra.Command{
 		apiKey := validateAPIKey()
 		logInfo("API key validated")
 
-		// --- SMART MODE PLANNING START ---
 		if smartMode && focusFile == "" {
 			logInfo("🧠 Smart mode enabled: Planning context...")
 
@@ -166,7 +160,6 @@ var askCmd = &cobra.Command{
 				os.Exit(1)
 			}
 
-			// Scan purely for file paths
 			collector := &PathCollector{}
 			cfg := config.NewConfig()
 			if includeExts != "" {
@@ -177,7 +170,8 @@ var askCmd = &cobra.Command{
 			}
 
 			s := scanner.NewScanner(absSrc, collector, cfg)
-			if err := s.Scan(); err == nil && len(collector.Paths) > 0 {
+			// FIXED: Pass cmd.Context()
+			if err := s.Scan(cmd.Context()); err == nil && len(collector.Paths) > 0 {
 				fileList := strings.Join(collector.Paths, "\n")
 				logInfo(fmt.Sprintf("Found %d files. Asking AI to select relevant ones...", len(collector.Paths)))
 
@@ -192,7 +186,7 @@ If no specific code is needed, return { "files": [] }.`
 				selectedFiles := callLLMForPaths(apiKey, askModel, sysMsg, userMsg)
 
 				if len(selectedFiles) > 0 {
-					// Update focusFile so the logic below treats it as a manual focus
+
 					focusFile = strings.Join(selectedFiles, ",")
 					logInfo(fmt.Sprintf("🤖 AI selected %d files: %v", len(selectedFiles), selectedFiles))
 				} else {
@@ -202,7 +196,6 @@ If no specific code is needed, return { "files": [] }.`
 				logWarn("Scanner found no files for planning. Proceeding normally.")
 			}
 		}
-		// --- SMART MODE PLANNING END ---
 
 		tmpFile, err := os.CreateTemp("", "agent_context_*.md")
 		if err != nil {
@@ -258,7 +251,8 @@ If no specific code is needed, return { "files": [] }.`
 			}
 
 			s := scanner.NewScanner(absSrc, w, cfg)
-			if err := s.Scan(); err != nil {
+			// FIXED: Pass cmd.Context()
+			if err := s.Scan(cmd.Context()); err != nil {
 				logError(fmt.Sprintf("Scan failed: %v", err))
 				os.Exit(1)
 			}
@@ -275,7 +269,6 @@ If no specific code is needed, return { "files": [] }.`
 			os.Exit(1)
 		}
 
-		// Allow empty context if AI selected nothing (might be a general question)
 		if len(contextBytes) == 0 && !smartMode {
 			logError("No context generated (check your filters)")
 			os.Exit(1)
