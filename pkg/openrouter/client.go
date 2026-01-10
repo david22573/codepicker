@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	goerrors "errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/david22573/codepicker/internal/errors"
 )
@@ -15,6 +17,7 @@ import (
 const (
 	defaultBaseURL = "https://openrouter.ai/api/v1"
 	contentType    = "application/json"
+	defaultTimeout = 30 * time.Second // Phase 1.1: Enforce sane default timeout
 )
 
 type Client struct {
@@ -53,17 +56,18 @@ func WithTitle(title string) Option {
 
 func NewClient(apiKey string, opts ...Option) *Client {
 	c := &Client{
-		apiKey:     apiKey,
-		baseURL:    defaultBaseURL,
-		httpClient: http.DefaultClient,
+		apiKey:  apiKey,
+		baseURL: defaultBaseURL,
+		// Phase 1.1: Initialize with a timeout to prevent hanging forever
+		httpClient: &http.Client{
+			Timeout: defaultTimeout,
+		},
 	}
 	for _, opt := range opts {
 		opt(c)
 	}
 	return c
 }
-
-// CreateChatCompletionStream is now defined in chat.go
 
 func (c *Client) ListModels(ctx context.Context) (*ListModelsResponse, error) {
 	req, err := c.newRequest(ctx, http.MethodGet, "/models", nil)
@@ -105,6 +109,10 @@ func (c *Client) newRequest(ctx context.Context, method, path string, payload in
 func (c *Client) sendRequest(req *http.Request, v any) error {
 	res, err := c.httpClient.Do(req)
 	if err != nil {
+		// Go's http client returns an error for context cancellation
+		if goerrors.Is(err, context.Canceled) || goerrors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
 		return errors.NewAPIError(0, err.Error(), "", req.URL.Path)
 	}
 	defer res.Body.Close()

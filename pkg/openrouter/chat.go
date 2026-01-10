@@ -5,13 +5,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"time"
 
 	"github.com/david22573/codepicker/internal/constants"
-	"github.com/david22573/codepicker/internal/errors"
+	errs "github.com/david22573/codepicker/internal/errors"
 )
 
 func (c *Client) CreateChatCompletion(ctx context.Context, req ChatCompletionRequest) (*ChatCompletionResponse, error) {
@@ -71,8 +73,21 @@ func (c *Client) CreateChatCompletionStream(ctx context.Context, req ChatComplet
 
 	var lastErr error
 	for attempt := 0; attempt < constants.MaxRetries; attempt++ {
+		// Phase 1.3: Harden retry logic with exponential backoff + jitter
 		if attempt > 0 {
-			time.Sleep(constants.RetryDelay * time.Duration(attempt))
+			// Base delay * 2^attempt
+			backoff := float64(constants.RetryDelay) * float64(1<<attempt)
+			// Add 0-20% jitter
+			jitter := backoff * (rand.Float64() * 0.2)
+
+			sleepDuration := time.Duration(backoff + jitter)
+
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(sleepDuration):
+				// Continue after sleep
+			}
 		}
 
 		httpReq, err := c.newRequest(ctx, http.MethodPost, "/chat/completions", req)
@@ -83,7 +98,12 @@ func (c *Client) CreateChatCompletionStream(ctx context.Context, req ChatComplet
 		resp, err := c.httpClient.Do(httpReq)
 		if err != nil {
 			lastErr = err
-			if errors.IsRetryable(err) {
+			// Check for context cancellation immediately
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return nil, err
+			}
+
+			if errs.IsRetryable(err) {
 				continue
 			}
 			return nil, fmt.Errorf("failed to execute stream request: %w", err)
@@ -92,7 +112,7 @@ func (c *Client) CreateChatCompletionStream(ctx context.Context, req ChatComplet
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			defer resp.Body.Close()
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-			apiErr := errors.NewAPIError(resp.StatusCode, string(body), req.Model, "/chat/completions")
+			apiErr := errs.NewAPIError(resp.StatusCode, string(body), req.Model, "/chat/completions")
 			lastErr = apiErr
 
 			var errResp ErrorResponse
@@ -100,7 +120,7 @@ func (c *Client) CreateChatCompletionStream(ctx context.Context, req ChatComplet
 				lastErr = fmt.Errorf("api error (status %d): %s - %s", resp.StatusCode, errResp.Error.Type, errResp.Error.Message)
 			}
 
-			if errors.IsRetryable(apiErr) {
+			if errs.IsRetryable(apiErr) {
 				continue
 			}
 			return nil, lastErr

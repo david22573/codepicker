@@ -79,7 +79,8 @@ func validateFocusFiles(focusList string) ([]string, error) {
 	return validated, nil
 }
 
-func callLLMForPaths(apiKey, model, sysMsg, userMsg string) []string {
+// Phase 1.2: Added context parameter to allow cancellation
+func callLLMForPaths(ctx context.Context, apiKey, model, sysMsg, userMsg string) []string {
 	client := openrouter.NewClient(apiKey)
 	req := openrouter.ChatCompletionRequest{
 		Model: model,
@@ -90,10 +91,10 @@ func callLLMForPaths(apiKey, model, sysMsg, userMsg string) []string {
 		ResponseFormat: &openrouter.ResponseFormat{Type: "json_object"},
 	}
 
-	ctx := context.Background()
+	// Use passed context instead of Background()
 	resp, err := client.CreateChatCompletion(ctx, req)
 	if err != nil {
-		appLogger.Warn(fmt.Sprintf("Smart planning failed (API error): %v. Falling back to normal scan.", err))
+		appLogger.Warn(fmt.Sprintf("Smart planning failed (API error or cancellation): %v. Falling back to normal scan.", err))
 		return nil
 	}
 
@@ -151,6 +152,9 @@ var askCmd = &cobra.Command{
 		}
 		appLogger.Info("API key validated")
 
+		// Phase 1.2: Propagate command context (handles Ctrl+C)
+		ctx := cmd.Context()
+
 		if smartMode && focusFile == "" {
 			appLogger.Info("🧠 Smart mode enabled: Planning context...")
 
@@ -170,7 +174,8 @@ var askCmd = &cobra.Command{
 
 			s := scanner.NewScanner(absSrc, collector, cfg, appLogger)
 
-			if err := s.Scan(cmd.Context()); err == nil && len(collector.Paths) > 0 {
+			// Scan uses ctx
+			if err := s.Scan(ctx); err == nil && len(collector.Paths) > 0 {
 				fileList := strings.Join(collector.Paths, "\n")
 				appLogger.Info(fmt.Sprintf("Found %d files. Asking AI to select relevant ones...", len(collector.Paths)))
 
@@ -182,7 +187,8 @@ If no specific code is needed, return { "files": [] }.`
 
 				userMsg := fmt.Sprintf("Files:\n%s\n\nQuery: %s", fileList, query)
 
-				selectedFiles := callLLMForPaths(apiKey, askModel, sysMsg, userMsg)
+				// Pass context to AI call
+				selectedFiles := callLLMForPaths(ctx, apiKey, askModel, sysMsg, userMsg)
 
 				if len(selectedFiles) > 0 {
 					focusFile = strings.Join(selectedFiles, ",")
@@ -193,6 +199,13 @@ If no specific code is needed, return { "files": [] }.`
 			} else {
 				appLogger.Warn("Scanner found no files for planning. Proceeding normally.")
 			}
+		}
+
+		// Check context before heavy lifting
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
 		}
 
 		tmpFile, err := os.CreateTemp("", "agent_context_*.md")
@@ -251,7 +264,8 @@ If no specific code is needed, return { "files": [] }.`
 
 			s := scanner.NewScanner(absSrc, w, cfg, appLogger)
 
-			if err := s.Scan(cmd.Context()); err != nil {
+			// Scan uses ctx
+			if err := s.Scan(ctx); err != nil {
 				return fmt.Errorf("scan failed: %w", err)
 			}
 		}
@@ -296,7 +310,7 @@ If no specific code is needed, return { "files": [] }.`
 
 		appLogger.Info(fmt.Sprintf("Sending request to model: %s", askModel))
 
-		ctx := context.Background()
+		// Phase 1.2: Stream uses ctx
 		stream, err := client.CreateChatCompletionStream(ctx, req)
 		if err != nil {
 			appLogger.Error(fmt.Sprintf("API Error: %v", err))
@@ -332,3 +346,4 @@ func init() {
 	askCmd.Flags().StringVarP(&focusFile, "focus", "f", "", "Comma-separated list of files to scan")
 	askCmd.Flags().BoolVarP(&smartMode, "smart", "S", false, "Use AI to intelligently select relevant files")
 }
+

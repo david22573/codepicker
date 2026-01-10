@@ -24,10 +24,10 @@ type OutputStrategy interface {
 }
 
 type ConcatStrategy struct {
-	OutputPath    string
-	file          *os.File
-	TokenCount    int
-	Minify        bool
+	OutputPath string
+	file       *os.File
+	TokenCount int
+	Minify     bool
 }
 
 func NewConcatStrategy(path string, minify bool) *ConcatStrategy {
@@ -90,20 +90,18 @@ func (c *ConcatStrategy) Write(absPath, relPath string) error {
 		ext = "text"
 	}
 
-	// Buffer the output for this file so we can count tokens accurately on what gets written
 	var fileBuffer bytes.Buffer
 	fmt.Fprintf(&fileBuffer, "## File: %s\n", relPath)
 	fmt.Fprintf(&fileBuffer, "```%s\n", ext)
 	fileBuffer.Write(content)
-	
+
 	if len(content) > 0 && content[len(content)-1] != '\n' {
 		fileBuffer.Write([]byte("\n"))
 	}
 	fmt.Fprintf(&fileBuffer, "```\n\n")
 
 	finalBytes := fileBuffer.Bytes()
-	
-	// Count tokens using the real tokenizer
+
 	c.TokenCount += tokenizer.CountTokens(string(finalBytes))
 
 	_, err = c.file.Write(finalBytes)
@@ -129,20 +127,45 @@ func (c *CopyStrategy) Init() error {
 }
 
 func (c *CopyStrategy) ShouldSkip(path string) bool {
-	return filepath.HasPrefix(path, c.OutputDir)
+	// Phase 0.1: Fix invalid API usage.
+	// filepath.HasPrefix does not exist. We use filepath.Rel to check containment.
+	rel, err := filepath.Rel(c.OutputDir, path)
+	if err != nil {
+		// If paths are on different drives or cannot be related, assume it's not inside.
+		return false
+	}
+
+	// If the relative path does NOT start with "..", it implies the path
+	// is inside the OutputDir (or is the OutputDir itself).
+	return !strings.HasPrefix(rel, "..")
 }
 
 func (c *CopyStrategy) Write(absPath, relPath string) error {
 	targetPath := filepath.Join(c.OutputDir, relPath)
+
+	// Phase 0.3: Ensure parent directories exist before writing
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
-		return err
+		return fmt.Errorf("failed to create parent dir for %s: %w", relPath, err)
 	}
-	src, _ := os.Open(absPath)
+
+	// Phase 0.2: Stop ignoring filesystem errors
+	src, err := os.Open(absPath)
+	if err != nil {
+		return fmt.Errorf("failed to open source %s: %w", absPath, err)
+	}
 	defer src.Close()
-	dst, _ := os.Create(targetPath)
+
+	dst, err := os.Create(targetPath)
+	if err != nil {
+		return fmt.Errorf("failed to create target %s: %w", targetPath, err)
+	}
 	defer dst.Close()
-	_, err := io.Copy(dst, src)
-	return err
+
+	if _, err := io.Copy(dst, src); err != nil {
+		return fmt.Errorf("failed to copy content to %s: %w", targetPath, err)
+	}
+
+	return nil
 }
 
 func (c *CopyStrategy) Close() error { return nil }
@@ -211,3 +234,4 @@ func (t *TreeStrategy) Close() error {
 	fmt.Println()
 	return nil
 }
+
