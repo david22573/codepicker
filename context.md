@@ -113,7 +113,7 @@ func validateFocusFiles(focusList string) ([]string, error) {
 	return validated, nil
 }
 
-func callLLMForPaths(apiKey, model, sysMsg, userMsg string) []string {
+func callLLMForPaths(ctx context.Context, apiKey, model, sysMsg, userMsg string) []string {
 	client := openrouter.NewClient(apiKey)
 	req := openrouter.ChatCompletionRequest{
 		Model: model,
@@ -124,10 +124,9 @@ func callLLMForPaths(apiKey, model, sysMsg, userMsg string) []string {
 		ResponseFormat: &openrouter.ResponseFormat{Type: "json_object"},
 	}
 
-	ctx := context.Background()
 	resp, err := client.CreateChatCompletion(ctx, req)
 	if err != nil {
-		appLogger.Warn(fmt.Sprintf("Smart planning failed (API error): %v. Falling back to normal scan.", err))
+		appLogger.Warn(fmt.Sprintf("Smart planning failed (API error or cancellation): %v. Falling back to normal scan.", err))
 		return nil
 	}
 
@@ -185,6 +184,8 @@ var askCmd = &cobra.Command{
 		}
 		appLogger.Info("API key validated")
 
+		ctx := cmd.Context()
+
 		if smartMode && focusFile == "" {
 			appLogger.Info("🧠 Smart mode enabled: Planning context...")
 
@@ -204,7 +205,7 @@ var askCmd = &cobra.Command{
 
 			s := scanner.NewScanner(absSrc, collector, cfg, appLogger)
 
-			if err := s.Scan(cmd.Context()); err == nil && len(collector.Paths) > 0 {
+			if err := s.Scan(ctx); err == nil && len(collector.Paths) > 0 {
 				fileList := strings.Join(collector.Paths, "\n")
 				appLogger.Info(fmt.Sprintf("Found %d files. Asking AI to select relevant ones...", len(collector.Paths)))
 
@@ -216,7 +217,7 @@ If no specific code is needed, return { "files": [] }.`
 
 				userMsg := fmt.Sprintf("Files:\n%s\n\nQuery: %s", fileList, query)
 
-				selectedFiles := callLLMForPaths(apiKey, askModel, sysMsg, userMsg)
+				selectedFiles := callLLMForPaths(ctx, apiKey, askModel, sysMsg, userMsg)
 
 				if len(selectedFiles) > 0 {
 					focusFile = strings.Join(selectedFiles, ",")
@@ -227,6 +228,12 @@ If no specific code is needed, return { "files": [] }.`
 			} else {
 				appLogger.Warn("Scanner found no files for planning. Proceeding normally.")
 			}
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
 		}
 
 		tmpFile, err := os.CreateTemp("", "agent_context_*.md")
@@ -285,7 +292,7 @@ If no specific code is needed, return { "files": [] }.`
 
 			s := scanner.NewScanner(absSrc, w, cfg, appLogger)
 
-			if err := s.Scan(cmd.Context()); err != nil {
+			if err := s.Scan(ctx); err != nil {
 				return fmt.Errorf("scan failed: %w", err)
 			}
 		}
@@ -330,7 +337,6 @@ If no specific code is needed, return { "files": [] }.`
 
 		appLogger.Info(fmt.Sprintf("Sending request to model: %s", askModel))
 
-		ctx := context.Background()
 		stream, err := client.CreateChatCompletionStream(ctx, req)
 		if err != nil {
 			appLogger.Error(fmt.Sprintf("API Error: %v", err))
@@ -1954,20 +1960,40 @@ func (c *CopyStrategy) Init() error {
 }
 
 func (c *CopyStrategy) ShouldSkip(path string) bool {
-	return filepath.HasPrefix(path, c.OutputDir)
+
+	rel, err := filepath.Rel(c.OutputDir, path)
+	if err != nil {
+
+		return false
+	}
+
+	return !strings.HasPrefix(rel, "..")
 }
 
 func (c *CopyStrategy) Write(absPath, relPath string) error {
 	targetPath := filepath.Join(c.OutputDir, relPath)
+
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
-		return err
+		return fmt.Errorf("failed to create parent dir for %s: %w", relPath, err)
 	}
-	src, _ := os.Open(absPath)
+
+	src, err := os.Open(absPath)
+	if err != nil {
+		return fmt.Errorf("failed to open source %s: %w", absPath, err)
+	}
 	defer src.Close()
-	dst, _ := os.Create(targetPath)
+
+	dst, err := os.Create(targetPath)
+	if err != nil {
+		return fmt.Errorf("failed to create target %s: %w", targetPath, err)
+	}
 	defer dst.Close()
-	_, err := io.Copy(dst, src)
-	return err
+
+	if _, err := io.Copy(dst, src); err != nil {
+		return fmt.Errorf("failed to copy content to %s: %w", targetPath, err)
+	}
+
+	return nil
 }
 
 func (c *CopyStrategy) Close() error { return nil }
@@ -2058,13 +2084,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"time"
 
 	"github.com/david22573/codepicker/internal/constants"
-	"github.com/david22573/codepicker/internal/errors"
+	errs "github.com/david22573/codepicker/internal/errors"
 )
 
 func (c *Client) CreateChatCompletion(ctx context.Context, req ChatCompletionRequest) (*ChatCompletionResponse, error) {
@@ -2124,8 +2152,21 @@ func (c *Client) CreateChatCompletionStream(ctx context.Context, req ChatComplet
 
 	var lastErr error
 	for attempt := 0; attempt < constants.MaxRetries; attempt++ {
+
 		if attempt > 0 {
-			time.Sleep(constants.RetryDelay * time.Duration(attempt))
+
+			baseDelay := constants.RetryDelay * time.Duration(1<<attempt)
+
+			jitter := time.Duration(float64(baseDelay) * (rand.Float64() * 0.2))
+
+			sleepDuration := baseDelay + jitter
+
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(sleepDuration):
+
+			}
 		}
 
 		httpReq, err := c.newRequest(ctx, http.MethodPost, "/chat/completions", req)
@@ -2136,7 +2177,12 @@ func (c *Client) CreateChatCompletionStream(ctx context.Context, req ChatComplet
 		resp, err := c.httpClient.Do(httpReq)
 		if err != nil {
 			lastErr = err
-			if errors.IsRetryable(err) {
+
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return nil, err
+			}
+
+			if errs.IsRetryable(err) {
 				continue
 			}
 			return nil, fmt.Errorf("failed to execute stream request: %w", err)
@@ -2145,7 +2191,7 @@ func (c *Client) CreateChatCompletionStream(ctx context.Context, req ChatComplet
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			defer resp.Body.Close()
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-			apiErr := errors.NewAPIError(resp.StatusCode, string(body), req.Model, "/chat/completions")
+			apiErr := errs.NewAPIError(resp.StatusCode, string(body), req.Model, "/chat/completions")
 			lastErr = apiErr
 
 			var errResp ErrorResponse
@@ -2153,7 +2199,7 @@ func (c *Client) CreateChatCompletionStream(ctx context.Context, req ChatComplet
 				lastErr = fmt.Errorf("api error (status %d): %s - %s", resp.StatusCode, errResp.Error.Type, errResp.Error.Message)
 			}
 
-			if errors.IsRetryable(apiErr) {
+			if errs.IsRetryable(apiErr) {
 				continue
 			}
 			return nil, lastErr
@@ -2177,10 +2223,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	goerrors "errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/david22573/codepicker/internal/errors"
 )
@@ -2188,6 +2236,7 @@ import (
 const (
 	defaultBaseURL = "https://openrouter.ai/api/v1"
 	contentType    = "application/json"
+	defaultTimeout = 30 * time.Second // Phase 1.1: Enforce sane default timeout
 )
 
 type Client struct {
@@ -2226,9 +2275,12 @@ func WithTitle(title string) Option {
 
 func NewClient(apiKey string, opts ...Option) *Client {
 	c := &Client{
-		apiKey:     apiKey,
-		baseURL:    defaultBaseURL,
-		httpClient: http.DefaultClient,
+		apiKey:  apiKey,
+		baseURL: defaultBaseURL,
+
+		httpClient: &http.Client{
+			Timeout: defaultTimeout,
+		},
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -2276,6 +2328,10 @@ func (c *Client) newRequest(ctx context.Context, method, path string, payload in
 func (c *Client) sendRequest(req *http.Request, v any) error {
 	res, err := c.httpClient.Do(req)
 	if err != nil {
+
+		if goerrors.Is(err, context.Canceled) || goerrors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
 		return errors.NewAPIError(0, err.Error(), "", req.URL.Path)
 	}
 	defer res.Body.Close()
