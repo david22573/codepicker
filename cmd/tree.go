@@ -26,12 +26,12 @@ var treeCmd = &cobra.Command{
 
 		absSrc, err := filepath.Abs(srcDir)
 		if err != nil {
-			logError(fmt.Sprintf("Invalid source path: %v", err))
+			appLogger.Error(fmt.Sprintf("Invalid source path: %v", err))
 			os.Exit(1)
 		}
 
-		logInfo(fmt.Sprintf("Generating tree for: %s", absSrc))
-		// FIXED: Pass cmd.Context()
+		appLogger.Info(fmt.Sprintf("Generating tree for: %s", absSrc))
+
 		runScan(cmd.Context(), w, absSrc)
 	},
 }

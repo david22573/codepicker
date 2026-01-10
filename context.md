@@ -11,7 +11,6 @@ include:
   - .ts
 exclude:
   - vendor
-  - ./phases.md
 minify: true
 tokens: true
 ```
@@ -27,7 +26,6 @@ install:
 clean:
 	go clean
 	rm -f $(BINARY_NAME)
-	# Removes default txt, and any generated _context.md files
 	rm -f codepicker_context.txt *_context.md
 	rm -rf codepicker_out
 ```
@@ -46,6 +44,7 @@ import (
 	"time"
 
 	"github.com/david22573/codepicker/internal/config"
+	"github.com/david22573/codepicker/internal/paths"
 	"github.com/david22573/codepicker/internal/scanner"
 	"github.com/david22573/codepicker/internal/writer"
 	"github.com/david22573/codepicker/pkg/openrouter"
@@ -72,7 +71,7 @@ func validateAPIKey() string {
 	apiKey := os.Getenv("OPENROUTER_API_KEY")
 
 	if apiKey == "" {
-		logError("OPENROUTER_API_KEY environment variable is not set")
+		appLogger.Error("OPENROUTER_API_KEY environment variable is not set")
 		fmt.Println("\n💡 To fix this:")
 		fmt.Println("   1. Get your API key from https://openrouter.ai/settings/keys")
 		fmt.Println("   2. Set it: export OPENROUTER_API_KEY=your_key_here")
@@ -82,7 +81,7 @@ func validateAPIKey() string {
 	}
 
 	if len(apiKey) < 10 {
-		logError("API key appears invalid (insufficient length)")
+		appLogger.Error("API key appears invalid (insufficient length)")
 		os.Exit(1)
 	}
 
@@ -98,26 +97,25 @@ func validateFocusFiles(focusList string) []string {
 	var validated []string
 
 	for _, f := range files {
-		clean, err := sanitizePath(f)
+		clean, err := paths.Sanitize(f)
 		if err != nil {
-			logError(fmt.Sprintf("Invalid focus file path '%s': %v", f, err))
+			appLogger.Error(fmt.Sprintf("Invalid focus file path '%s': %v", f, err))
 			os.Exit(1)
 		}
 
 		info, err := os.Stat(clean)
 		if err != nil {
-
-			logWarn(fmt.Sprintf("Focus file not found (skipping): %s", clean))
+			appLogger.Warn(fmt.Sprintf("Focus file not found (skipping): %s", clean))
 			continue
 		}
 
 		if info.IsDir() {
-			logError(fmt.Sprintf("Focus file is a directory (use -s for directories): %s", clean))
+			appLogger.Error(fmt.Sprintf("Focus file is a directory (use -s for directories): %s", clean))
 			os.Exit(1)
 		}
 
 		validated = append(validated, clean)
-		logDebug(fmt.Sprintf("Validated focus file: %s", clean))
+		appLogger.Debug(fmt.Sprintf("Validated focus file: %s", clean))
 	}
 
 	return validated
@@ -137,7 +135,7 @@ func callLLMForPaths(apiKey, model, sysMsg, userMsg string) []string {
 	ctx := context.Background()
 	resp, err := client.CreateChatCompletion(ctx, req)
 	if err != nil {
-		logWarn(fmt.Sprintf("Smart planning failed (API error): %v. Falling back to normal scan.", err))
+		appLogger.Warn(fmt.Sprintf("Smart planning failed (API error): %v. Falling back to normal scan.", err))
 		return nil
 	}
 
@@ -147,7 +145,7 @@ func callLLMForPaths(apiKey, model, sysMsg, userMsg string) []string {
 
 	contentStr, ok := resp.Choices[0].Message.Content.(string)
 	if !ok {
-		logWarn("Failed to parse AI response content (not a string)")
+		appLogger.Warn("Failed to parse AI response content (not a string)")
 		return nil
 	}
 
@@ -172,7 +170,7 @@ func callLLMForPaths(apiKey, model, sysMsg, userMsg string) []string {
 		return paths
 	}
 
-	logWarn(fmt.Sprintf("Failed to parse AI planning JSON. Response was: %s", content))
+	appLogger.Warn(fmt.Sprintf("Failed to parse AI planning JSON. Response was: %s", content))
 	return nil
 }
 
@@ -182,17 +180,17 @@ var askCmd = &cobra.Command{
 	Args:  cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		query := strings.Join(args, " ")
-		logInfo(fmt.Sprintf("Ask command initiated with query: %s", query))
+		appLogger.Info(fmt.Sprintf("Ask command initiated with query: %s", query))
 
 		apiKey := validateAPIKey()
-		logInfo("API key validated")
+		appLogger.Info("API key validated")
 
 		if smartMode && focusFile == "" {
-			logInfo("🧠 Smart mode enabled: Planning context...")
+			appLogger.Info("🧠 Smart mode enabled: Planning context...")
 
-			absSrc, err := sanitizePath(srcDir)
+			absSrc, err := paths.Sanitize(srcDir)
 			if err != nil {
-				logError(fmt.Sprintf("Invalid source directory: %v", err))
+				appLogger.Error(fmt.Sprintf("Invalid source directory: %v", err))
 				os.Exit(1)
 			}
 
@@ -205,11 +203,11 @@ var askCmd = &cobra.Command{
 				cfg.AddIgnoredDirs(strings.Split(ignoreDirs, ","))
 			}
 
-			s := scanner.NewScanner(absSrc, collector, cfg)
+			s := scanner.NewScanner(absSrc, collector, cfg, appLogger)
 
 			if err := s.Scan(cmd.Context()); err == nil && len(collector.Paths) > 0 {
 				fileList := strings.Join(collector.Paths, "\n")
-				logInfo(fmt.Sprintf("Found %d files. Asking AI to select relevant ones...", len(collector.Paths)))
+				appLogger.Info(fmt.Sprintf("Found %d files. Asking AI to select relevant ones...", len(collector.Paths)))
 
 				sysMsg := `You are a senior developer. You have a list of files in a codebase.
 Based on the user's query, identify exactly which files contain the relevant code to answer the question.
@@ -222,59 +220,58 @@ If no specific code is needed, return { "files": [] }.`
 				selectedFiles := callLLMForPaths(apiKey, askModel, sysMsg, userMsg)
 
 				if len(selectedFiles) > 0 {
-
 					focusFile = strings.Join(selectedFiles, ",")
-					logInfo(fmt.Sprintf("🤖 AI selected %d files: %v", len(selectedFiles), selectedFiles))
+					appLogger.Info(fmt.Sprintf("🤖 AI selected %d files: %v", len(selectedFiles), selectedFiles))
 				} else {
-					logInfo("🤖 AI decided no files are needed (or failed to pick), proceeding with full context.")
+					appLogger.Info("🤖 AI decided no files are needed (or failed to pick), proceeding with full context.")
 				}
 			} else {
-				logWarn("Scanner found no files for planning. Proceeding normally.")
+				appLogger.Warn("Scanner found no files for planning. Proceeding normally.")
 			}
 		}
 
 		tmpFile, err := os.CreateTemp("", "agent_context_*.md")
 		if err != nil {
-			logError(fmt.Sprintf("Failed to create temp file: %v", err))
+			appLogger.Error(fmt.Sprintf("Failed to create temp file: %v", err))
 			os.Exit(1)
 		}
 		tmpPath := tmpFile.Name()
 		tmpFile.Close()
 		defer func() {
 			if err := os.Remove(tmpPath); err != nil {
-				logWarn(fmt.Sprintf("Failed to remove temp file: %v", err))
+				appLogger.Warn(fmt.Sprintf("Failed to remove temp file: %v", err))
 			}
 		}()
 
-		logDebug(fmt.Sprintf("Temporary context file: %s", tmpPath))
+		appLogger.Debug(fmt.Sprintf("Temporary context file: %s", tmpPath))
 
 		w := writer.NewConcatStrategy(tmpPath, minify)
 		if err := w.Init(); err != nil {
-			logError(fmt.Sprintf("Failed to initialize writer: %v", err))
+			appLogger.Error(fmt.Sprintf("Failed to initialize writer: %v", err))
 			os.Exit(1)
 		}
 
 		if focusFile != "" {
 			validatedFiles := validateFocusFiles(focusFile)
 			if len(validatedFiles) == 0 {
-				logWarn("No valid files in focus list. Generating empty context.")
+				appLogger.Warn("No valid files in focus list. Generating empty context.")
 			} else {
-				logInfo(fmt.Sprintf("Focus mode: %d file(s) selected", len(validatedFiles)))
+				appLogger.Info(fmt.Sprintf("Focus mode: %d file(s) selected", len(validatedFiles)))
 				for _, f := range validatedFiles {
 					abs, err := filepath.Abs(f)
 					if err == nil {
 						rel, _ := filepath.Rel(".", abs)
 						fmt.Printf("   + %s\n", rel)
 						if err := w.Write(abs, rel); err != nil {
-							logWarn(fmt.Sprintf("Failed to write %s: %v", rel, err))
+							appLogger.Warn(fmt.Sprintf("Failed to write %s: %v", rel, err))
 						}
 					}
 				}
 			}
 		} else {
-			absSrc, err := sanitizePath(srcDir)
+			absSrc, err := paths.Sanitize(srcDir)
 			if err != nil {
-				logError(fmt.Sprintf("Invalid source directory: %v", err))
+				appLogger.Error(fmt.Sprintf("Invalid source directory: %v", err))
 				os.Exit(1)
 			}
 
@@ -286,31 +283,31 @@ If no specific code is needed, return { "files": [] }.`
 				cfg.AddIgnoredDirs(strings.Split(ignoreDirs, ","))
 			}
 
-			s := scanner.NewScanner(absSrc, w, cfg)
+			s := scanner.NewScanner(absSrc, w, cfg, appLogger)
 
 			if err := s.Scan(cmd.Context()); err != nil {
-				logError(fmt.Sprintf("Scan failed: %v", err))
+				appLogger.Error(fmt.Sprintf("Scan failed: %v", err))
 				os.Exit(1)
 			}
 		}
 
 		if err := w.Close(); err != nil {
-			logError(fmt.Sprintf("Failed to write context: %v", err))
+			appLogger.Error(fmt.Sprintf("Failed to write context: %v", err))
 			os.Exit(1)
 		}
 
 		contextBytes, err := os.ReadFile(tmpPath)
 		if err != nil {
-			logError(fmt.Sprintf("Failed to read context: %v", err))
+			appLogger.Error(fmt.Sprintf("Failed to read context: %v", err))
 			os.Exit(1)
 		}
 
 		if len(contextBytes) == 0 && !smartMode {
-			logError("No context generated (check your filters)")
+			appLogger.Error("No context generated (check your filters)")
 			os.Exit(1)
 		}
 
-		logInfo(fmt.Sprintf("Context generated: %d bytes", len(contextBytes)))
+		appLogger.Info(fmt.Sprintf("Context generated: %d bytes", len(contextBytes)))
 
 		client := openrouter.NewClient(apiKey)
 		contextType := "Codebase"
@@ -335,13 +332,13 @@ If no specific code is needed, return { "files": [] }.`
 			Stream: true,
 		}
 
-		logInfo(fmt.Sprintf("Sending request to model: %s", askModel))
+		appLogger.Info(fmt.Sprintf("Sending request to model: %s", askModel))
 
 		ctx := context.Background()
 		stream, err := client.CreateChatCompletionStream(ctx, req)
 		if err != nil {
-			logError(fmt.Sprintf("API Error: %v", err))
-			logInfo("💡 Check your API key and network connection")
+			appLogger.Error(fmt.Sprintf("API Error: %v", err))
+			appLogger.Info("💡 Check your API key and network connection")
 			os.Exit(1)
 		}
 		defer stream.Close()
@@ -362,7 +359,7 @@ If no specific code is needed, return { "files": [] }.`
 			}
 		}
 		fmt.Println()
-		logInfo("Response streaming completed")
+		appLogger.Info("Response streaming completed")
 	},
 }
 
@@ -393,22 +390,22 @@ var copyCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		absOut, err := filepath.Abs(outPath)
 		if err != nil {
-			logError(fmt.Sprintf("Invalid output path: %v", err))
+			appLogger.Error(fmt.Sprintf("Invalid output path: %v", err))
 			os.Exit(1)
 		}
 
 		absSrc, err := filepath.Abs(srcDir)
 		if err != nil {
-			logError(fmt.Sprintf("Invalid source directory: %v", err))
+			appLogger.Error(fmt.Sprintf("Invalid source directory: %v", err))
 			os.Exit(1)
 		}
 
 		if absSrc == absOut {
-			logError("Cannot copy to source directory")
+			appLogger.Error("Cannot copy to source directory")
 			os.Exit(1)
 		}
 
-		logInfo(fmt.Sprintf("Copy mode: output to %s", absOut))
+		appLogger.Info(fmt.Sprintf("Copy mode: output to %s", absOut))
 		w := writer.NewCopyStrategy(absOut)
 
 		runScan(cmd.Context(), w, absSrc)
@@ -428,14 +425,14 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/david22573/codepicker/internal/config"
-	"github.com/david22573/codepicker/internal/errors"
+	"github.com/david22573/codepicker/internal/logger"
+	"github.com/david22573/codepicker/internal/paths"
 	"github.com/david22573/codepicker/internal/scanner"
 	"github.com/david22573/codepicker/internal/writer"
 	"github.com/spf13/cobra"
@@ -452,159 +449,79 @@ var (
 	verbose     bool
 )
 
-var logger = log.New(os.Stderr, "", 0)
-var logLevel = 1
-
-func logInfo(msg string) {
-	if logLevel >= 1 {
-		logger.Printf("ℹ️  %s", msg)
-	}
-}
-
-func logWarn(msg string) {
-	if logLevel >= 1 {
-		logger.Printf("⚠️  %s", msg)
-	}
-}
-
-func logDebug(msg string) {
-	if logLevel >= 2 {
-		logger.Printf("🔧 %s", msg)
-	}
-}
-
-func logError(msg string) {
-	logger.Printf("❌ %s", msg)
-}
-
-func sanitizePath(path string) (string, error) {
-	clean := filepath.Clean(path)
-
-	abs, err := filepath.Abs(clean)
-	if err != nil {
-		return "", fmt.Errorf("failed to get absolute path: %w", err)
-	}
-
-	wd, err := os.Getwd()
-	if err != nil {
-		return "", fmt.Errorf("failed to get working directory: %w", err)
-	}
-
-	rel, err := filepath.Rel(wd, abs)
-	if err != nil {
-		return "", fmt.Errorf("failed to get relative path: %w", err)
-	}
-
-	if strings.HasPrefix(rel, "..") {
-		return "", &errors.ValidationError{
-			Field:   "path",
-			Message: "path escapes working directory",
-			Value:   path,
-		}
-	}
-
-	return abs, nil
-}
-
-func validateOutPath(out string) error {
-	forbidden := []string{"/", "/usr", "/etc", "/bin", "/sbin", "/opt", "/sys", "/proc", "/dev"}
-	for _, forbiddenDir := range forbidden {
-		if out == forbiddenDir || strings.HasPrefix(out, forbiddenDir+string(filepath.Separator)) {
-			return &errors.ValidationError{
-				Field:   "outPath",
-				Message: "forbidden system directory",
-				Value:   out,
-			}
-		}
-	}
-
-	base := filepath.Base(out)
-	if base == "go.mod" || base == "go.sum" || base == "package.json" || base == "package-lock.json" {
-		return &errors.ValidationError{
-			Field:   "outPath",
-			Message: "refusing to overwrite important file",
-			Value:   out,
-		}
-	}
-
-	return nil
-}
+var appLogger logger.Logger
 
 var rootCmd = &cobra.Command{
 	Use:   "codepicker",
 	Short: "Harvest code for AI consumption",
 	Long:  `Scans a directory and combines code files into a single context file.`,
-	Run: func(cmd *cobra.Command, args []string) {
+	PersistentPreRun: func(cmd *cobra.Command, args []string) {
+		level := 1
 		if verbose {
-			logLevel = 2
+			level = 2
 		}
+		appLogger = logger.NewStandardLogger(level)
+	},
+	Run: func(cmd *cobra.Command, args []string) {
 
 		var cfgFile *config.ConfigFile
 		if configFile != "" {
 			var err error
 			cfgFile, err = config.LoadConfigFile(configFile)
 			if err != nil {
-				logError(fmt.Sprintf("Failed to load config file: %v", err))
+				appLogger.Error(fmt.Sprintf("Failed to load config file: %v", err))
 				os.Exit(1)
 			}
-			logInfo(fmt.Sprintf("Loaded config from: %s", configFile))
+			appLogger.Info(fmt.Sprintf("Loaded config from: %s", configFile))
 		} else {
 			cfgFile, _ = config.LoadConfigFile("")
 			if cfgFile != nil {
-				logInfo("Found default config file")
+				appLogger.Info("Found default config file")
 			}
 		}
 
 		if cfgFile != nil {
 			if srcDir == "." && cfgFile.Src != "" {
 				srcDir = cfgFile.Src
-				logDebug(fmt.Sprintf("Config: src = %s", srcDir))
 			}
 			if outPath == "" && cfgFile.Output != "" {
 				outPath = cfgFile.Output
-				logDebug(fmt.Sprintf("Config: output = %s", outPath))
 			}
 			if !cmd.Flags().Changed("minify") && cfgFile.Minify {
 				minify = cfgFile.Minify
-				logDebug("Config: minify = true")
 			}
 			if !cmd.Flags().Changed("tokens") && cfgFile.Tokens {
 				showTokens = cfgFile.Tokens
-				logDebug("Config: tokens = true")
 			}
 			if cfgFile.Verbose {
-				logLevel = 2
-				logDebug("Config: verbose = true")
+				appLogger = logger.NewStandardLogger(2)
 			}
 			if len(cfgFile.Include) > 0 && includeExts == "" {
 				includeExts = strings.Join(cfgFile.Include, ",")
-				logDebug(fmt.Sprintf("Config: include = %v", cfgFile.Include))
 			}
 			if len(cfgFile.Exclude) > 0 && ignoreDirs == "" {
 				ignoreDirs = strings.Join(cfgFile.Exclude, ",")
-				logDebug(fmt.Sprintf("Config: exclude = %v", cfgFile.Exclude))
 			}
 			if askModel == "" && cfgFile.AI.Model != "" && cmd.Name() == "ask" {
 				askModel = cfgFile.AI.Model
-				logDebug(fmt.Sprintf("Config: ai.model = %s", askModel))
 			}
 		}
 
-		logDebug(fmt.Sprintf("Starting with source: %s", srcDir))
+		appLogger.Debug(fmt.Sprintf("Starting with source: %s", srcDir))
 
-		absSrc, err := sanitizePath(srcDir)
+		absSrc, err := paths.Sanitize(srcDir)
 		if err != nil {
-			logError(fmt.Sprintf("Invalid source directory: %v", err))
+			appLogger.Error(fmt.Sprintf("Invalid source directory: %v", err))
 			os.Exit(1)
 		}
 
 		info, err := os.Stat(absSrc)
 		if err != nil {
-			logError(fmt.Sprintf("Cannot access source directory: %v", err))
+			appLogger.Error(fmt.Sprintf("Cannot access source directory: %v", err))
 			os.Exit(1)
 		}
 		if !info.IsDir() {
-			logError(fmt.Sprintf("Source path is not a directory: %s", absSrc))
+			appLogger.Error(fmt.Sprintf("Source path is not a directory: %s", absSrc))
 			os.Exit(1)
 		}
 
@@ -613,23 +530,22 @@ var rootCmd = &cobra.Command{
 			if dirName == "." || dirName == string(filepath.Separator) {
 				wd, err := os.Getwd()
 				if err != nil {
-					logError(fmt.Sprintf("Failed to get working directory: %v", err))
+					appLogger.Error(fmt.Sprintf("Failed to get working directory: %v", err))
 					os.Exit(1)
 				}
 				dirName = filepath.Base(wd)
 			}
 			outPath = fmt.Sprintf("%s_context.md", dirName)
-			logDebug(fmt.Sprintf("Default output path: %s", outPath))
 		}
 
-		absOut, err := sanitizePath(outPath)
+		absOut, err := paths.Sanitize(outPath)
 		if err != nil {
-			logError(fmt.Sprintf("Invalid output path: %v", err))
+			appLogger.Error(fmt.Sprintf("Invalid output path: %v", err))
 			os.Exit(1)
 		}
 
-		if err := validateOutPath(absOut); err != nil {
-			logError(fmt.Sprintf("Output validation failed: %v", err))
+		if err := paths.ValidateOutput(absOut); err != nil {
+			appLogger.Error(fmt.Sprintf("Output validation failed: %v", err))
 			os.Exit(1)
 		}
 
@@ -637,19 +553,12 @@ var rootCmd = &cobra.Command{
 			absOut += ".md"
 		}
 
-		parentDir := filepath.Dir(absOut)
-		if err := os.MkdirAll(parentDir, 0755); err != nil {
-			logError(fmt.Sprintf("Cannot create output directory: %v", err))
-			os.Exit(1)
-		}
-
 		if absSrc == absOut {
-			logError("Cannot write context to source directory root")
+			appLogger.Error("Cannot write context to source directory root")
 			os.Exit(1)
 		}
 
 		w := writer.NewConcatStrategy(absOut, minify)
-
 		runScan(cmd.Context(), w, absSrc)
 
 		fmt.Printf("📦 Output: %s\n", absOut)
@@ -660,8 +569,10 @@ var rootCmd = &cobra.Command{
 }
 
 func Execute() {
+
+	appLogger = logger.NewStandardLogger(1)
 	if err := rootCmd.Execute(); err != nil {
-		logError(fmt.Sprintf("Fatal error: %v", err))
+		appLogger.Error(fmt.Sprintf("Fatal error: %v", err))
 		os.Exit(1)
 	}
 }
@@ -679,19 +590,19 @@ func init() {
 
 func runScan(ctx context.Context, w writer.OutputStrategy, absSrc string) {
 	start := time.Now()
-	logInfo(fmt.Sprintf("Scanning directory: %s", absSrc))
+	appLogger.Info(fmt.Sprintf("Scanning directory: %s", absSrc))
 
 	cfg := config.NewConfig()
 	if includeExts != "" {
 		exts := strings.Split(includeExts, ",")
 		cfg.AddAllowedExtensions(exts)
-		logDebug(fmt.Sprintf("Including extensions: %v", exts))
+		appLogger.Debug(fmt.Sprintf("Including extensions: %v", exts))
 	}
 
 	if ignoreDirs != "" {
 		dirs := strings.Split(ignoreDirs, ",")
 		cfg.AddIgnoredDirs(dirs)
-		logDebug(fmt.Sprintf("Excluding directories: %v", dirs))
+		appLogger.Debug(fmt.Sprintf("Excluding directories: %v", dirs))
 	}
 
 	if w.Name() != "Tree" {
@@ -704,17 +615,17 @@ func runScan(ctx context.Context, w writer.OutputStrategy, absSrc string) {
 		}
 	}
 
-	s := scanner.NewScanner(absSrc, w, cfg)
+	s := scanner.NewScanner(absSrc, w, cfg, appLogger)
 
 	if err := s.Scan(ctx); err != nil {
-		logError(fmt.Sprintf("Scan failed: %v", err))
+		appLogger.Error(fmt.Sprintf("Scan failed: %v", err))
 		os.Exit(1)
 	}
 
 	if w.Name() != "Tree" {
 		elapsed := time.Since(start)
 		fmt.Printf("✅ Done in %v\n", elapsed)
-		logDebug(fmt.Sprintf("Scan completed in %v", elapsed))
+		appLogger.Debug(fmt.Sprintf("Scan completed in %v", elapsed))
 	}
 }
 ```
@@ -749,11 +660,11 @@ var treeCmd = &cobra.Command{
 
 		absSrc, err := filepath.Abs(srcDir)
 		if err != nil {
-			logError(fmt.Sprintf("Invalid source path: %v", err))
+			appLogger.Error(fmt.Sprintf("Invalid source path: %v", err))
 			os.Exit(1)
 		}
 
-		logInfo(fmt.Sprintf("Generating tree for: %s", absSrc))
+		appLogger.Info(fmt.Sprintf("Generating tree for: %s", absSrc))
 
 		runScan(cmd.Context(), w, absSrc)
 	},
@@ -1023,7 +934,111 @@ func NewPathError(op, path string, err error) error {
 }
 ```
 
-## File: internal/minifier/minifier.go
+## File: internal/logger/logger.go
+```go
+package logger
+
+import (
+	"log"
+	"os"
+)
+
+type Logger interface {
+	Info(msg string)
+	Warn(msg string)
+	Debug(msg string)
+	Error(msg string)
+}
+
+type StandardLogger struct {
+	logger *log.Logger
+	level  int // 0=Error, 1=Info/Warn, 2=Debug
+}
+
+func NewStandardLogger(level int) *StandardLogger {
+	return &StandardLogger{
+		logger: log.New(os.Stderr, "", 0),
+		level:  level,
+	}
+}
+
+func (l *StandardLogger) Info(msg string) {
+	if l.level >= 1 {
+		l.logger.Printf("ℹ️  %s", msg)
+	}
+}
+
+func (l *StandardLogger) Warn(msg string) {
+	if l.level >= 1 {
+		l.logger.Printf("⚠️  %s", msg)
+	}
+}
+
+func (l *StandardLogger) Debug(msg string) {
+	if l.level >= 2 {
+		l.logger.Printf("🔧 %s", msg)
+	}
+}
+
+func (l *StandardLogger) Error(msg string) {
+	l.logger.Printf("❌ %s", msg)
+}
+
+type NoOpLogger struct{}
+
+func (l *NoOpLogger) Info(msg string)  {}
+func (l *NoOpLogger) Warn(msg string)  {}
+func (l *NoOpLogger) Debug(msg string) {}
+func (l *NoOpLogger) Error(msg string) {}
+```
+
+## File: internal/minifier/generic.go
+```go
+package minifier
+
+import (
+	"regexp"
+	"strings"
+)
+
+type PassthroughMinifier struct{}
+
+func (p *PassthroughMinifier) Minify(content []byte) []byte {
+	return content
+}
+
+type GenericMinifier struct{}
+
+func (g *GenericMinifier) Minify(content []byte) []byte {
+	lines := strings.Split(string(content), "\n")
+	var kept []string
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+
+		if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "#") {
+
+			continue
+		}
+
+		kept = append(kept, strings.TrimRight(line, " \r"))
+	}
+	return []byte(strings.Join(kept, "\n"))
+}
+
+func SqueezeVerticalWhitespace(content []byte) []byte {
+	str := string(content)
+
+	re := regexp.MustCompile(`\n{3,}`)
+	str = re.ReplaceAllString(str, "\n\n")
+	return []byte(str)
+}
+```
+
+## File: internal/minifier/go_minifier.go
 ```go
 package minifier
 
@@ -1033,38 +1048,18 @@ import (
 	"go/format"
 	"go/parser"
 	"go/token"
-	"regexp"
-	"strings"
 )
 
-func Minify(content []byte, ext string) []byte {
-	ext = strings.ToLower(ext)
-	var result []byte
+type GoMinifier struct{}
 
-	switch ext {
-	case ".go":
-		result = minifyGo(content)
-	case ".js", ".ts", ".tsx", ".jsx":
-		result = minifyJS(content)
-	case ".py":
-		result = minifyPython(content)
-	case ".json", ".yaml", ".yml", ".toml", ".xml":
-
-		result = content
-	default:
-		result = lineBasedMinify(content, ext)
-	}
-
-	return squeezeVerticalWhitespace(result)
-}
-
-func minifyGo(content []byte) []byte {
+func (m *GoMinifier) Minify(content []byte) []byte {
 	fset := token.NewFileSet()
 
 	f, err := parser.ParseFile(fset, "", content, parser.ParseComments)
 	if err != nil {
 
-		return lineBasedMinify(content, ".go")
+		fallback := &GenericMinifier{}
+		return fallback.Minify(content)
 	}
 
 	f.Comments = nil
@@ -1086,15 +1081,25 @@ func minifyGo(content []byte) []byte {
 	})
 
 	var buf bytes.Buffer
-
 	if err := format.Node(&buf, fset, f); err != nil {
 		return content
 	}
 
 	return buf.Bytes()
 }
+```
 
-func minifyJS(content []byte) []byte {
+## File: internal/minifier/js_minifier.go
+```go
+package minifier
+
+import (
+	"strings"
+)
+
+type JSMinifier struct{}
+
+func (m *JSMinifier) Minify(content []byte) []byte {
 	lines := strings.Split(string(content), "\n")
 	var result []string
 
@@ -1105,7 +1110,6 @@ func minifyJS(content []byte) []byte {
 		if inBlockComment {
 			if strings.Contains(line, "*/") {
 				inBlockComment = false
-
 				parts := strings.SplitN(line, "*/", 2)
 				if len(parts) > 1 {
 					line = parts[1]
@@ -1122,16 +1126,17 @@ func minifyJS(content []byte) []byte {
 			pre := parts[0]
 
 			if strings.Contains(parts[1], "*/") {
+
 				rest := strings.SplitN(parts[1], "*/", 2)
 				line = pre + rest[1]
 			} else {
+
 				inBlockComment = true
 				line = pre
 			}
 		}
 
 		if idx := strings.Index(line, "//"); idx != -1 {
-
 			isUrl := idx > 0 && line[idx-1] == ':'
 			if !isUrl {
 				line = line[:idx]
@@ -1146,8 +1151,77 @@ func minifyJS(content []byte) []byte {
 	}
 	return []byte(strings.Join(result, "\n"))
 }
+```
 
-func minifyPython(content []byte) []byte {
+## File: internal/minifier/minifier.go
+```go
+package minifier
+
+import (
+	"strings"
+	"sync"
+)
+
+type Strategy interface {
+	Minify(content []byte) []byte
+}
+
+var (
+	defaultRegistry *Registry
+	once            sync.Once
+)
+
+type Registry struct {
+	strategies map[string]Strategy
+	fallback   Strategy
+}
+
+func GetRegistry() *Registry {
+	once.Do(func() {
+		defaultRegistry = &Registry{
+			strategies: make(map[string]Strategy),
+			fallback:   &GenericMinifier{},
+		}
+
+		defaultRegistry.Register(&GoMinifier{}, ".go")
+		defaultRegistry.Register(&JSMinifier{}, ".js", ".ts", ".tsx", ".jsx")
+		defaultRegistry.Register(&PythonMinifier{}, ".py")
+		defaultRegistry.Register(&PassthroughMinifier{}, ".json", ".yaml", ".yml", ".toml", ".xml", ".md", ".txt")
+	})
+	return defaultRegistry
+}
+
+func (r *Registry) Register(s Strategy, exts ...string) {
+	for _, ext := range exts {
+		r.strategies[ext] = s
+	}
+}
+
+func Minify(content []byte, ext string) []byte {
+	r := GetRegistry()
+	ext = strings.ToLower(ext)
+
+	strategy, exists := r.strategies[ext]
+	if !exists {
+		strategy = r.fallback
+	}
+
+	minified := strategy.Minify(content)
+	return SqueezeVerticalWhitespace(minified)
+}
+```
+
+## File: internal/minifier/python_minifier.go
+```go
+package minifier
+
+import (
+	"strings"
+)
+
+type PythonMinifier struct{}
+
+func (m *PythonMinifier) Minify(content []byte) []byte {
 	lines := strings.Split(string(content), "\n")
 	var kept []string
 
@@ -1187,41 +1261,80 @@ func minifyPython(content []byte) []byte {
 	}
 	return []byte(strings.Join(kept, "\n"))
 }
+```
 
-func lineBasedMinify(content []byte, ext string) []byte {
-	lines := strings.Split(string(content), "\n")
-	var kept []string
-	prefix := ""
+## File: internal/paths/validator.go
+```go
+package paths
 
-	switch ext {
-	case ".java", ".c", ".cpp", ".rs", ".cs", ".php", ".swift", ".kt", ".scala":
-		prefix = "//"
-	case ".rb", ".sh", ".dockerfile", "makefile", ".pl":
-		prefix = "#"
-	case ".sql", ".lua":
-		prefix = "--"
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/david22573/codepicker/internal/errors"
+)
+
+func Sanitize(path string) (string, error) {
+	clean := filepath.Clean(path)
+
+	abs, err := filepath.Abs(clean)
+	if err != nil {
+		return "", fmt.Errorf("failed to get absolute path: %w", err)
 	}
 
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			continue
-		}
-		if prefix != "" && strings.HasPrefix(trimmed, prefix) {
-			continue
-		}
-
-		kept = append(kept, strings.TrimRight(line, " \r"))
+	wd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("failed to get working directory: %w", err)
 	}
-	return []byte(strings.Join(kept, "\n"))
+
+	rel, err := filepath.Rel(wd, abs)
+	if err != nil {
+		return "", fmt.Errorf("failed to get relative path: %w", err)
+	}
+
+	if strings.HasPrefix(rel, "..") {
+		return "", &errors.ValidationError{
+			Field:   "path",
+			Message: "path escapes working directory",
+			Value:   path,
+		}
+	}
+
+	return abs, nil
 }
 
-func squeezeVerticalWhitespace(content []byte) []byte {
+func ValidateOutput(out string) error {
+	forbidden := []string{"/", "/usr", "/etc", "/bin", "/sbin", "/opt", "/sys", "/proc", "/dev"}
+	for _, forbiddenDir := range forbidden {
+		if out == forbiddenDir || strings.HasPrefix(out, forbiddenDir+string(filepath.Separator)) {
+			return &errors.ValidationError{
+				Field:   "outPath",
+				Message: "forbidden system directory",
+				Value:   out,
+			}
+		}
+	}
 
-	str := string(content)
-	re := regexp.MustCompile(`\n{3,}`)
-	str = re.ReplaceAllString(str, "\n\n")
-	return []byte(str)
+	base := filepath.Base(out)
+	criticalFiles := map[string]bool{
+		"go.mod":            true,
+		"go.sum":            true,
+		"package.json":      true,
+		"package-lock.json": true,
+		".git":              true,
+	}
+
+	if criticalFiles[base] {
+		return &errors.ValidationError{
+			Field:   "outPath",
+			Message: "refusing to overwrite important file",
+			Value:   out,
+		}
+	}
+
+	return nil
 }
 ```
 
@@ -1237,6 +1350,7 @@ import (
 	"strings"
 
 	"github.com/david22573/codepicker/internal/config"
+	"github.com/david22573/codepicker/internal/logger"
 	"github.com/david22573/codepicker/internal/writer"
 	ignore "github.com/sabhiram/go-gitignore"
 )
@@ -1247,25 +1361,29 @@ type Scanner struct {
 	Config       *config.Config
 	GitIgnore    *ignore.GitIgnore
 	CustomIgnore *ignore.GitIgnore
+	Logger       logger.Logger
 }
 
-func NewScanner(root string, w writer.OutputStrategy, cfg *config.Config) *Scanner {
+func NewScanner(root string, w writer.OutputStrategy, cfg *config.Config, log logger.Logger) *Scanner {
 	s := &Scanner{
 		Root:   root,
 		Writer: w,
 		Config: cfg,
+		Logger: log,
 	}
 
 	gitIgnorePath := filepath.Join(root, ".gitignore")
 	if _, err := os.Stat(gitIgnorePath); err == nil {
 		ign, _ := ignore.CompileIgnoreFile(gitIgnorePath)
 		s.GitIgnore = ign
+		s.Logger.Debug("Loaded .gitignore")
 	}
 
 	cpIgnorePath := filepath.Join(root, ".codepickerignore")
 	if _, err := os.Stat(cpIgnorePath); err == nil {
 		ign, _ := ignore.CompileIgnoreFile(cpIgnorePath)
 		s.CustomIgnore = ign
+		s.Logger.Debug("Loaded .codepickerignore")
 	}
 
 	return s
@@ -1278,7 +1396,6 @@ func (s *Scanner) Scan(ctx context.Context) error {
 	defer s.Writer.Close()
 
 	return filepath.WalkDir(s.Root, func(path string, d os.DirEntry, err error) error {
-
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -1286,7 +1403,12 @@ func (s *Scanner) Scan(ctx context.Context) error {
 		}
 
 		if err != nil {
-			return err
+
+			if path == s.Root {
+				return err
+			}
+			s.Logger.Warn(fmt.Sprintf("Skipping %s: access denied", path))
+			return nil
 		}
 
 		relPath, _ := filepath.Rel(s.Root, path)
@@ -1332,7 +1454,7 @@ func (s *Scanner) Scan(ctx context.Context) error {
 		}
 
 		if s.Writer.Name() != "Tree" {
-			fmt.Printf("   Picked: %s\n", relPath)
+			s.Logger.Info(fmt.Sprintf("Picked: %s", relPath))
 		}
 
 		return s.Writer.Write(path, relPath)
@@ -1565,651 +1687,6 @@ import "github.com/david22573/codepicker/cmd"
 func main() {
 	cmd.Execute()
 }
-```
-
-## File: phases.md
-```md
-# Codepicker: Critical Issues & Refactoring Phases
-**Generated:** 2025-01-10
-**Status:** Phase 1 Complete ✅ | Phases 2-4 Pending 📋
----
-## 🔴 Phase 1: Critical Safety & Security Issues
-**Priority:** URGENT - Fix immediately before proceeding
-**Status:** ✅ COMPLETED
-**Time Estimate:** 1 day
-**Files Changed:** 6
-### Issues Fixed
-| # | Issue | Severity | Impact | Files Affected |
-|---|-------|----------|--------|----------------|
-| 1 | **Path Traversal Vulnerability** | 🔴 HIGH | Attackers can read/write arbitrary files outside working directory | `cmd/root.go` |
-| 2 | **API Key Exposure in Logs** | 🟡 MEDIUM | Partial key leakage (5 chars) aids brute-force attacks | `cmd/ask.go` |
-| 3 | **Unbounded Memory Consumption** | 🔴 HIGH | Reading 10GB file crashes app, no size limits | `internal/writer/writer.go` |
-| 4 | **TOCTOU Race Condition** | 🟡 MEDIUM | File state can change between `Stat()` and `Create()` | `cmd/root.go` |
-| 5 | **Resource Leak (Stream)** | 🟡 MEDIUM | HTTP streams not closed on error, accumulates over time | `cmd/ask.go` |
-| 6 | **Silent Error Suppression** | 🟡 MEDIUM | Errors ignored with `_`, hides bugs until cascade | All 6 files |
-| 7 | **No Context Cancellation** | 🟢 LOW-MED | Long-running scans can't be cancelled gracefully | `internal/scanner/scanner.go` |
-### Files Modified
-```
-cmd/
-├── root.go      ✅ Path traversal fix, error handling
-├── ask.go       ✅ API key security, resource leak fix
-└── copy.go      ✅ Error handling
-internal/
-├── writer/
-│   └── writer.go    ✅ Memory limits (100MB), error handling
-└── scanner/
-    └── scanner.go   ✅ Context cancellation, error handling
-pkg/
-└── openrouter/
-    └── chat.go      ✅ Magic numbers defined, error handling
-```
-### Key Changes
-#### 1. Path Traversal Protection (`cmd/root.go`)
-**Before:**
-```go
-func sanitizePath(path string) (string, error) {
-    if strings.Contains(path, "..") {
-        return "", &errors.ValidationError{...}
-    }
-    // ❌ Easily bypassed with ....//
-}
-```
-**After:**
-```go
-func sanitizePath(path string) (string, error) {
-    clean := filepath.Clean(path)
-    abs, err := filepath.Abs(clean)
-    // ... get working directory
-    rel, err := filepath.Rel(wd, abs)
-    if strings.HasPrefix(rel, "..") {
-        return "", &errors.ValidationError{...}
-    }
-    // ✅ Validates path is within working directory
-}
-```
-#### 2. API Key Security (`cmd/ask.go`)
-**Before:**
-```go
-logError(fmt.Sprintf("API key appears invalid: %s", apiKey[:5]+"..."))
-// ❌ Logs first 5 characters
-```
-**After:**
-```go
-logError("API key appears invalid (insufficient length)")
-// ✅ No key material logged
-```
-#### 3. Memory Protection (`internal/writer/writer.go`)
-**Before:**
-```go
-content, err := io.ReadAll(f)
-// ❌ Can read unlimited size
-```
-**After:**
-```go
-const maxFileSize = 100 * 1024 * 1024 // 100MB
-info, err := f.Stat()
-if info.Size() > maxFileSize {
-    logWarn(fmt.Sprintf("Skipping large file (>100MB): %s", relPath))
-    return nil
-}
-content, err := io.ReadAll(io.LimitReader(f, maxFileSize))
-// ✅ Enforces size limit
-```
-#### 4. Resource Leak Fix (`cmd/ask.go`)
-**Before:**
-```go
-stream, err := client.CreateChatCompletionStream(ctx, req)
-if err != nil {
-    os.Exit(1)  // ❌ Stream never closed!
-}
-defer stream.Close()
-```
-**After:**
-```go
-stream, err := client.CreateChatCompletionStream(ctx, req)
-if err != nil {
-    logError(fmt.Sprintf("API Error: %v", err))
-    os.Exit(1)
-}
-defer stream.Close()  // ✅ Immediately after successful creation
-```
-#### 5. Context Cancellation (`internal/scanner/scanner.go`)
-**Before:**
-```go
-return filepath.WalkDir(s.Root, func(path string, d os.DirEntry, err error) error {
-    // ❌ No cancellation check
-})
-```
-**After:**
-```go
-return filepath.WalkDir(s.Root, func(path string, d os.DirEntry, err error) error {
-    select {
-    case <-ctx.Done():
-        return ctx.Err()  // ✅ Respects cancellation
-    default:
-    }
-})
-```
-### Testing Phase 1 Fixes
-```bash
-# 1. Path traversal protection
-./codepicker -s ../../..
-# Expected: ❌ validation error "path escapes working directory"
-# 2. Large file handling
-dd if=/dev/zero of=testlarge.bin bs=1M count=150
-./codepicker
-# Expected: ⚠️  Skipping large file (>100MB): testlarge.bin
-# 3. API key security
-export OPENROUTER_API_KEY="sk-short"
-./codepicker ask "test"
-# Expected: ❌ Error WITHOUT showing "sk-short" anywhere
-# 4. Resource cleanup
-./codepicker ask "invalid query with bad network"
-# Expected: No hanging connections, clean exit
-# 5. Error handling
-./codepicker -s /nonexistent
-# Expected: Clear error message, no panic
-```
----
-## 🟡 Phase 2: Architecture & Design Issues
-**Priority:** HIGH - Prevents technical debt
-**Status:** 📋 NOT STARTED
-**Time Estimate:** 2-3 days
-**Effort:** Medium
-### Issues to Address
-| # | Issue | Impact | Complexity | Priority |
-|---|-------|--------|------------|----------|
-| 1 | **God Object in `cmd/root.go`** | Violates SRP, hard to test | Medium | High |
-| 2 | **Tight Coupling** | Scanner depends on concrete types | Low | Medium |
-| 3 | **Inconsistent Error Handling** | Mix of log+exit vs return | Low | High |
-| 4 | **Global Mutable State** | Logger/logLevel globals untestable | Low | Medium |
-| 5 | **Stringly-Typed Extensions** | Fragile `.go`, `.js` comparisons | Medium | Medium |
-| 6 | **Poor Separation in Minifier** | Language logic mixed with generic | Medium | Low |
-| 7 | **PathCollector Anti-Pattern** | Implements interface to return false | Low | Low |
-### Proposed Refactoring
-#### 1. Extract Responsibilities from `cmd/root.go`
-**Current Problem:**
-```go
-// root.go does everything:
-// - Config loading
-// - Path validation
-// - Scanner orchestration
-// - Output formatting
-// - Error handling
-```
-**Proposed Structure:**
-```go
-// internal/orchestrator/orchestrator.go
-type ScanOrchestrator struct {
-    configLoader  *ConfigLoader
-    pathValidator *PathValidator
-    scanner       *scanner.Scanner
-}
-// internal/config/loader.go
-type ConfigLoader struct {}
-func (l *ConfigLoader) Load(path string) (*Config, error)
-// internal/validation/paths.go
-type PathValidator struct {}
-func (v *PathValidator) Sanitize(path string) (string, error)
-func (v *PathValidator) ValidateOutput(path string) error
-```
-#### 2. Dependency Injection Pattern
-**Current Problem:**
-```go
-// Scanner creates dependencies internally
-s := scanner.NewScanner(absSrc, w, cfg)
-```
-**Proposed:**
-```go
-// Inject all dependencies
-type Scanner struct {
-    root    string
-    writer  OutputStrategy
-    config  *Config
-    ignorer IgnoreStrategy  // Interface, not concrete type
-    logger  Logger          // Interface, not global
-}
-func NewScanner(opts ScannerOptions) *Scanner
-```
-#### 3. Standardize Error Handling
-**Current Problem:**
-```go
-// Inconsistent patterns:
-if err != nil { return err }           // Pattern 1
-if err != nil { logError(...); os.Exit(1) }  // Pattern 2
-if err != nil { logWarn(...); continue }     // Pattern 3
-```
-**Proposed:**
-```go
-// Library functions: ALWAYS return errors
-func (s *Scanner) Scan() error {
-    if err != nil {
-        return fmt.Errorf("scan failed: %w", err)
-    }
-}
-// Main/CLI layer: Handle errors once
-func Execute() {
-    if err := rootCmd.Execute(); err != nil {
-        fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-        os.Exit(1)
-    }
-}
-```
-#### 4. Replace Global State
-**Current Problem:**
-```go
-var logger = log.New(os.Stderr, "", 0)
-var logLevel = 1
-```
-**Proposed:**
-```go
-// internal/logging/logger.go
-type Logger interface {
-    Info(msg string)
-    Warn(msg string)
-    Debug(msg string)
-    Error(msg string)
-}
-type StructuredLogger struct {
-    level Level
-    out   io.Writer
-}
-// Inject logger everywhere
-func NewScanner(root string, logger Logger) *Scanner
-```
-#### 5. Type-Safe Extension Handling
-**Current Problem:**
-```go
-switch ext {
-case ".go", ".js", ".ts", ".tsx", ".jsx":
-    // Fragile string comparisons
-}
-```
-**Proposed:**
-```go
-// internal/language/registry.go
-type Language int
-const (
-    Go Language = iota
-    JavaScript
-    TypeScript
-    Python
-)
-type LanguageRegistry struct {
-    languages map[string]Language
-    minifiers map[Language]Minifier
-}
-func (r *LanguageRegistry) GetMinifier(ext string) (Minifier, bool)
-```
-#### 6. Minifier Interface Pattern
-**Current Problem:**
-```go
-// All minification logic in one file
-func Minify(content []byte, ext string) []byte {
-    switch ext {
-    case ".go": return minifyGo(content)
-    case ".js": return minifyJS(content)
-    // ...
-    }
-}
-```
-**Proposed:**
-```go
-// internal/minifier/minifier.go
-type Minifier interface {
-    Minify(content []byte) []byte
-    CanHandle(ext string) bool
-}
-type GoMinifier struct{}
-func (m *GoMinifier) Minify(content []byte) []byte { /* AST-based */ }
-type JavaScriptMinifier struct{}
-func (m *JavaScriptMinifier) Minify(content []byte) []byte { /* regex-based */ }
-// Registry pattern
-type MinifierRegistry struct {
-    minifiers []Minifier
-}
-func (r *MinifierRegistry) MinifyFile(ext string, content []byte) []byte {
-    for _, m := range r.minifiers {
-        if m.CanHandle(ext) {
-            return m.Minify(content)
-        }
-    }
-    return content // No minifier found
-}
-```
-### Expected File Structure After Phase 2
-```
-cmd/
-├── root.go          (much smaller, just CLI glue)
-├── ask.go
-├── copy.go
-└── tree.go
-internal/
-├── orchestrator/
-│   └── orchestrator.go   (coordinates scan workflow)
-├── config/
-│   ├── config.go
-│   ├── loader.go         (loads & validates config)
-│   └── configfile.go
-├── validation/
-│   └── paths.go          (path validation logic)
-├── logging/
-│   ├── logger.go         (interface)
-│   └── structured.go     (implementation)
-├── language/
-│   ├── registry.go       (language detection)
-│   └── languages.go      (language constants)
-├── minifier/
-│   ├── minifier.go       (interface)
-│   ├── go.go             (Go minifier)
-│   ├── javascript.go     (JS/TS minifier)
-│   ├── python.go         (Python minifier)
-│   └── registry.go       (minifier registry)
-├── scanner/
-│   └── scanner.go        (simplified, uses interfaces)
-└── writer/
-    └── writer.go
-```
-### Benefits
-- ✅ **Testability**: Each component can be unit tested in isolation
-- ✅ **Maintainability**: Clear separation of concerns
-- ✅ **Extensibility**: Easy to add new languages/minifiers
-- ✅ **Readability**: Each file has one clear purpose
-- ✅ **Reusability**: Components can be used independently
----
-## 🟢 Phase 3: Code Quality Issues
-**Priority:** MEDIUM - Polish and best practices
-**Status:** 📋 NOT STARTED
-**Time Estimate:** 3-5 days
-**Effort:** Medium-High
-### Issues to Address
-| # | Issue | Impact | Fix Difficulty |
-|---|-------|--------|----------------|
-| 1 | **Magic Numbers Everywhere** | Hard to maintain constants | Easy |
-| 2 | **Inefficient String Building** | Performance degradation at scale | Easy |
-| 3 | **Hardcoded UI Strings** | Can't test output, no i18n | Easy |
-| 4 | **Heavy `os.Exit()` Usage** | Impossible to unit test | Hard |
-| 5 | **No Input Validation Tests** | Untestable validation logic | Medium |
-| 6 | **No Error Type Assertions** | Generic error handling | Medium |
-| 7 | **Lack of Documentation** | Hard for new contributors | Easy |
-### Improvements
-#### 1. Define All Magic Numbers
-**Current:**
-```go
-if len(apiKey) < 10 { }
-body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-const maxRetries = 3
-```
-**Improved:**
-```go
-// internal/constants/constants.go
-const (
-    MinAPIKeyLength     = 10
-    MaxErrorBodyBytes   = 512
-    MaxAPIRetries       = 3
-    MaxFileSizeBytes    = 100 * 1024 * 1024
-    TokensPerByte       = 4
-    DefaultRetryDelayMs = 1000
-)
-```
-#### 2. Use `strings.Builder`
-**Current:**
-```go
-var result []string
-for _, line := range lines {
-    result = append(result, line)
-}
-return []byte(strings.Join(result, "\n"))
-```
-**Improved:**
-```go
-var builder strings.Builder
-for _, line := range lines {
-    builder.WriteString(line)
-    builder.WriteByte('\n')
-}
-return []byte(builder.String())
-```
-#### 3. Extract UI Strings
-**Current:**
-```go
-fmt.Printf("🚇 Scanning: %s\n", absSrc)
-fmt.Println("✂️  Minification enabled (AST-based)")
-```
-**Improved:**
-```go
-// internal/ui/messages.go
-const (
-    MsgScanning       = "🚇 Scanning: %s"
-    MsgMinifyEnabled  = "✂️  Minification enabled (AST-based)"
-    MsgDone           = "✅ Done in %v"
-    ErrInvalidAPIKey  = "❌ API key appears invalid"
-)
-// Usage
-fmt.Printf(ui.MsgScanning+"\n", absSrc)
-```
-#### 4. Make Functions Testable (Remove `os.Exit`)
-**Current (Untestable):**
-```go
-func validateAPIKey() string {
-    apiKey := os.Getenv("OPENROUTER_API_KEY")
-    if apiKey == "" {
-        logError("...")
-        os.Exit(1)  // ❌ Can't test this!
-    }
-    return apiKey
-}
-```
-**Improved (Testable):**
-```go
-// Return errors instead of exiting
-func ValidateAPIKey(key string) error {
-    if key == "" {
-        return errors.New("API key is empty")
-    }
-    if len(key) < constants.MinAPIKeyLength {
-        return errors.New("API key too short")
-    }
-    return nil
-}
-// Tests become possible
-func TestValidateAPIKey(t *testing.T) {
-    tests := []struct {
-        name    string
-        key     string
-        wantErr bool
-    }{
-        {"empty key", "", true},
-        {"short key", "abc", true},
-        {"valid key", "sk-or-v1-1234567890abcdef", false},
-    }
-    for _, tt := range tests {
-        t.Run(tt.name, func(t *testing.T) {
-            err := ValidateAPIKey(tt.key)
-            if (err != nil) != tt.wantErr {
-                t.Errorf("ValidateAPIKey() error = %v, wantErr %v", err, tt.wantErr)
-            }
-        })
-    }
-}
-```
-#### 5. Add Comprehensive Tests
-```go
-// cmd/root_test.go
-func TestSanitizePath(t *testing.T) {
-    tests := []struct {
-        name    string
-        input   string
-        wantErr bool
-    }{
-        {"normal path", "./internal", false},
-        {"traversal attempt", "../../etc", true},
-        {"traversal hidden", "....//", true},
-        {"absolute in wd", "/tmp/test", false}, // if in /tmp
-    }
-    // ...
-}
-// internal/writer/writer_test.go
-func TestConcatStrategy_Write(t *testing.T) {
-    // Test file size limits
-    // Test UTF-8 validation
-    // Test minification
-}
-// internal/minifier/minifier_test.go
-func TestMinifyGo(t *testing.T) {
-    input := `package main
-    // This is a comment
-    func main() {
-        // Another comment
-        fmt.Println("Hello")
-    }`
-    output := minifyGo([]byte(input))
-    assert.NotContains(t, string(output), "This is a comment")
-    assert.Contains(t, string(output), "package main")
-}
-```
-#### 6. Better Error Types
-**Current:**
-```go
-return fmt.Errorf("failed to do thing: %w", err)
-```
-**Improved:**
-```go
-// internal/errors/errors.go - expand existing types
-type ConfigError struct {
-    Path   string
-    Reason string
-    Err    error
-}
-func (e *ConfigError) Error() string {
-    return fmt.Sprintf("config error in %s: %s: %v", e.Path, e.Reason, e.Err)
-}
-// Usage with type assertions
-if err := loadConfig(); err != nil {
-    var configErr *errors.ConfigError
-    if errors.As(err, &configErr) {
-        // Handle config-specific error
-        fmt.Printf("Fix your config at: %s\n", configErr.Path)
-    }
-}
-```
-#### 7. Add Documentation
-```go
-// Package scanner provides directory traversal and file collection functionality.
-// It supports .gitignore patterns, custom ignore files, and multiple output strategies.
-package scanner
-// Scanner walks a directory tree and processes files according to configured rules.
-// It respects .gitignore patterns and supports cancellation via context.
-//
-// Example:
-//   cfg := config.NewConfig()
-//   w := writer.NewConcatStrategy("output.md", true)
-//   s := scanner.NewScanner("/path/to/code", w, cfg)
-//   if err := s.Scan(); err != nil {
-//       log.Fatal(err)
-//   }
-type Scanner struct {
-    // Root is the absolute path to the directory being scanned
-    Root string
-    // ...
-}
-```
----
-## 🔵 Phase 4: Future Enhancements
-**Priority:** LOW - Nice-to-haves for production
-**Status:** 💡 OPTIONAL
-**Time Estimate:** Ongoing
-### Potential Improvements
-1. **Structured Logging**
-   - Replace `log.Printf` with `slog` (Go 1.21+)
-   - Add context fields (file, line, operation)
-   - Support JSON output for log aggregation
-2. **Observability**
-   - Add metrics (files processed, bytes read, time per operation)
-   - OpenTelemetry integration
-   - Health check endpoint
-3. **Performance**
-   - Concurrent file processing with worker pools
-   - Streaming for very large files (>1GB)
-   - Smart caching of gitignore patterns
-4. **Plugin Architecture**
-   - External minifier plugins
-   - Custom output formatters
-   - User-defined file filters
-5. **Better UX**
-   - Progress bars for long scans (github.com/schollz/progressbar)
-   - Interactive mode for file selection
-   - Dry-run mode
-6. **Configuration**
-   - JSON Schema validation for config files
-   - Environment variable overrides
-   - Profile support (.codepicker.dev.yml, .codepicker.prod.yml)
-7. **Advanced Features**
-   - Watch mode (rescan on file changes)
-   - Incremental updates (only process changed files)
-   - Compressed output (gzip)
-   - Cloud storage output (S3, GCS)
----
-## 📊 Implementation Roadmap
-### Recommended Sequence
-```
-Phase 1 (CRITICAL)
-    ↓ [Build & Test - 1 hour]
-    ↓
-Phase 2 (REFACTOR)
-    ↓ [Build & Test - 2 hours]
-    ↓
-Phase 3 (QUALITY)
-    ↓ [Build & Test - 4 hours]
-    ↓
-Phase 4 (OPTIONAL)
-    ↓ [Ongoing]
-```
-### Time Estimates
-| Phase | Effort | Testing | Total | Priority |
-|-------|--------|---------|-------|----------|
-| Phase 1 | 1 day | 2 hours | 1-2 days | 🔴 URGENT |
-| Phase 2 | 2-3 days | 4 hours | 3-4 days | 🟡 HIGH |
-| Phase 3 | 3-5 days | 8 hours | 4-6 days | 🟢 MEDIUM |
-| Phase 4 | Ongoing | N/A | N/A | 🔵 LOW |
-### Current Status
-- ✅ **Phase 1**: Complete (6 files fixed)
-- 📋 **Phase 2**: Not started
-- 📋 **Phase 3**: Not started
-- 💡 **Phase 4**: Future consideration
----
-## 🎯 Decision Point
-### Option A: Ship After Phase 1
-**Pros:**
-- ✅ All critical security issues fixed
-- ✅ Safe for production use
-- ✅ Minimal time investment (1-2 days)
-**Cons:**
-- ❌ Technical debt remains
-- ❌ Hard to add features later
-- ❌ Testing is difficult
-### Option B: Complete Phase 2 Before Shipping
-**Pros:**
-- ✅ Clean architecture
-- ✅ Easy to test and extend
-- ✅ Better long-term maintainability
-**Cons:**
-- ⏰ Additional 3-4 days of work
-- ⚠️ Risk of scope creep
-### Option C: Incremental Approach
-**Recommended:**
-1. Ship Phase 1 immediately (fixes critical bugs)
-2. Refactor Phase 2 over 2-3 sprints
-3. Add Phase 3 quality improvements as time permits
-4. Cherry-pick Phase 4 features based on user feedback
----
-## 📝 Notes
-- All Phase 1 fixes are **backward compatible**
-- Phase 2 refactoring will **not change CLI interface**
-- Phase 3 testing can be done incrementally
-- Phase 4 is purely additive
-**Last Updated:** 2025-01-10
-**Next Review:** After Phase 1 testing complete
 ```
 
 ## File: pkg/openrouter/chat.go

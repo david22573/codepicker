@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/david22573/codepicker/internal/config"
+	"github.com/david22573/codepicker/internal/logger"
 	"github.com/david22573/codepicker/internal/writer"
 	ignore "github.com/sabhiram/go-gitignore"
 )
@@ -18,31 +19,34 @@ type Scanner struct {
 	Config       *config.Config
 	GitIgnore    *ignore.GitIgnore
 	CustomIgnore *ignore.GitIgnore
+	Logger       logger.Logger
 }
 
-func NewScanner(root string, w writer.OutputStrategy, cfg *config.Config) *Scanner {
+func NewScanner(root string, w writer.OutputStrategy, cfg *config.Config, log logger.Logger) *Scanner {
 	s := &Scanner{
 		Root:   root,
 		Writer: w,
 		Config: cfg,
+		Logger: log,
 	}
 
 	gitIgnorePath := filepath.Join(root, ".gitignore")
 	if _, err := os.Stat(gitIgnorePath); err == nil {
 		ign, _ := ignore.CompileIgnoreFile(gitIgnorePath)
 		s.GitIgnore = ign
+		s.Logger.Debug("Loaded .gitignore")
 	}
 
 	cpIgnorePath := filepath.Join(root, ".codepickerignore")
 	if _, err := os.Stat(cpIgnorePath); err == nil {
 		ign, _ := ignore.CompileIgnoreFile(cpIgnorePath)
 		s.CustomIgnore = ign
+		s.Logger.Debug("Loaded .codepickerignore")
 	}
 
 	return s
 }
 
-// Scan now accepts a context for cancellation
 func (s *Scanner) Scan(ctx context.Context) error {
 	if err := s.Writer.Init(); err != nil {
 		return fmt.Errorf("writer init failed: %w", err)
@@ -50,7 +54,6 @@ func (s *Scanner) Scan(ctx context.Context) error {
 	defer s.Writer.Close()
 
 	return filepath.WalkDir(s.Root, func(path string, d os.DirEntry, err error) error {
-		// 1. Check for cancellation
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -58,7 +61,12 @@ func (s *Scanner) Scan(ctx context.Context) error {
 		}
 
 		if err != nil {
-			return err
+			// Don't fail the whole scan on permission errors, unless it's the root
+			if path == s.Root {
+				return err
+			}
+			s.Logger.Warn(fmt.Sprintf("Skipping %s: access denied", path))
+			return nil
 		}
 
 		relPath, _ := filepath.Rel(s.Root, path)
@@ -104,7 +112,7 @@ func (s *Scanner) Scan(ctx context.Context) error {
 		}
 
 		if s.Writer.Name() != "Tree" {
-			fmt.Printf("   Picked: %s\n", relPath)
+			s.Logger.Info(fmt.Sprintf("Picked: %s", relPath))
 		}
 
 		return s.Writer.Write(path, relPath)

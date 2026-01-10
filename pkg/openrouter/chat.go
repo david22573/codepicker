@@ -10,16 +10,12 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/david22573/codepicker/internal/constants"
 	"github.com/david22573/codepicker/internal/errors"
 )
 
-const (
-	maxRetries = 3
-	retryDelay = 1 * time.Second
-)
-
 func (c *Client) CreateChatCompletion(ctx context.Context, req ChatCompletionRequest) (*ChatCompletionResponse, error) {
-	req.Stream = false // Force stream to false for this method
+	req.Stream = false
 	httpReq, err := c.newRequest(ctx, http.MethodPost, "/chat/completions", req)
 	if err != nil {
 		return nil, err
@@ -71,12 +67,12 @@ func (s *ChatCompletionStream) Close() error {
 }
 
 func (c *Client) CreateChatCompletionStream(ctx context.Context, req ChatCompletionRequest) (*ChatCompletionStream, error) {
-	req.Stream = true // Force stream to true
+	req.Stream = true
 
 	var lastErr error
-	for attempt := 0; attempt < maxRetries; attempt++ {
+	for attempt := 0; attempt < constants.MaxRetries; attempt++ {
 		if attempt > 0 {
-			time.Sleep(retryDelay * time.Duration(attempt))
+			time.Sleep(constants.RetryDelay * time.Duration(attempt))
 		}
 
 		httpReq, err := c.newRequest(ctx, http.MethodPost, "/chat/completions", req)
@@ -118,4 +114,3 @@ func (c *Client) CreateChatCompletionStream(ctx context.Context, req ChatComplet
 
 	return nil, fmt.Errorf("max retries exceeded: %w", lastErr)
 }
-

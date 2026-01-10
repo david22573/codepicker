@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/david22573/codepicker/internal/config"
+	"github.com/david22573/codepicker/internal/constants"
+	"github.com/david22573/codepicker/internal/paths"
 	"github.com/david22573/codepicker/internal/scanner"
 	"github.com/david22573/codepicker/internal/writer"
 	"github.com/david22573/codepicker/pkg/openrouter"
@@ -32,59 +34,49 @@ func (p *PathCollector) Close() error                { return nil }
 func (p *PathCollector) ShouldSkip(path string) bool { return false }
 func (p *PathCollector) Name() string                { return "Collector" }
 
-func validateAPIKey() string {
+func validateAPIKey() (string, error) {
 	apiKey := os.Getenv("OPENROUTER_API_KEY")
 
 	if apiKey == "" {
-		logError("OPENROUTER_API_KEY environment variable is not set")
-		fmt.Println("\n💡 To fix this:")
-		fmt.Println("   1. Get your API key from https://openrouter.ai/settings/keys")
-		fmt.Println("   2. Set it: export OPENROUTER_API_KEY=your_key_here")
-		fmt.Println("   3. Or create a .env file with: OPENROUTER_API_KEY=your_key_here")
-		fmt.Println("\n⚠️  WARNING: Never commit your API key!")
-		os.Exit(1)
+		return "", fmt.Errorf("OPENROUTER_API_KEY environment variable is not set")
 	}
 
-	if len(apiKey) < 10 {
-		logError("API key appears invalid (insufficient length)")
-		os.Exit(1)
+	if len(apiKey) < constants.MinAPIKeyLength {
+		return "", fmt.Errorf("API key appears invalid (length < %d)", constants.MinAPIKeyLength)
 	}
 
-	return apiKey
+	return apiKey, nil
 }
 
-func validateFocusFiles(focusList string) []string {
+func validateFocusFiles(focusList string) ([]string, error) {
 	if focusList == "" {
-		return nil
+		return nil, nil
 	}
 
 	files := strings.Split(focusList, ",")
 	var validated []string
 
 	for _, f := range files {
-		clean, err := sanitizePath(f)
+		clean, err := paths.Sanitize(f)
 		if err != nil {
-			logError(fmt.Sprintf("Invalid focus file path '%s': %v", f, err))
-			os.Exit(1)
+			return nil, fmt.Errorf("invalid focus file path '%s': %w", f, err)
 		}
 
 		info, err := os.Stat(clean)
 		if err != nil {
-
-			logWarn(fmt.Sprintf("Focus file not found (skipping): %s", clean))
+			appLogger.Warn(fmt.Sprintf("Focus file not found (skipping): %s", clean))
 			continue
 		}
 
 		if info.IsDir() {
-			logError(fmt.Sprintf("Focus file is a directory (use -s for directories): %s", clean))
-			os.Exit(1)
+			return nil, fmt.Errorf("focus file is a directory (use -s for directories): %s", clean)
 		}
 
 		validated = append(validated, clean)
-		logDebug(fmt.Sprintf("Validated focus file: %s", clean))
+		appLogger.Debug(fmt.Sprintf("Validated focus file: %s", clean))
 	}
 
-	return validated
+	return validated, nil
 }
 
 func callLLMForPaths(apiKey, model, sysMsg, userMsg string) []string {
@@ -101,7 +93,7 @@ func callLLMForPaths(apiKey, model, sysMsg, userMsg string) []string {
 	ctx := context.Background()
 	resp, err := client.CreateChatCompletion(ctx, req)
 	if err != nil {
-		logWarn(fmt.Sprintf("Smart planning failed (API error): %v. Falling back to normal scan.", err))
+		appLogger.Warn(fmt.Sprintf("Smart planning failed (API error): %v. Falling back to normal scan.", err))
 		return nil
 	}
 
@@ -111,7 +103,7 @@ func callLLMForPaths(apiKey, model, sysMsg, userMsg string) []string {
 
 	contentStr, ok := resp.Choices[0].Message.Content.(string)
 	if !ok {
-		logWarn("Failed to parse AI response content (not a string)")
+		appLogger.Warn("Failed to parse AI response content (not a string)")
 		return nil
 	}
 
@@ -136,7 +128,7 @@ func callLLMForPaths(apiKey, model, sysMsg, userMsg string) []string {
 		return paths
 	}
 
-	logWarn(fmt.Sprintf("Failed to parse AI planning JSON. Response was: %s", content))
+	appLogger.Warn(fmt.Sprintf("Failed to parse AI planning JSON. Response was: %s", content))
 	return nil
 }
 
@@ -144,20 +136,27 @@ var askCmd = &cobra.Command{
 	Use:   "ask [query]",
 	Short: "Ask AI about the codebase",
 	Args:  cobra.MinimumNArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		query := strings.Join(args, " ")
-		logInfo(fmt.Sprintf("Ask command initiated with query: %s", query))
+		appLogger.Info(fmt.Sprintf("Ask command initiated with query: %s", query))
 
-		apiKey := validateAPIKey()
-		logInfo("API key validated")
+		apiKey, err := validateAPIKey()
+		if err != nil {
+			fmt.Println("\n💡 To fix this:")
+			fmt.Println("   1. Get your API key from https://openrouter.ai/settings/keys")
+			fmt.Println("   2. Set it: export OPENROUTER_API_KEY=your_key_here")
+			fmt.Println("   3. Or create a .env file with: OPENROUTER_API_KEY=your_key_here")
+			fmt.Println("\n⚠️  WARNING: Never commit your API key!")
+			return err
+		}
+		appLogger.Info("API key validated")
 
 		if smartMode && focusFile == "" {
-			logInfo("🧠 Smart mode enabled: Planning context...")
+			appLogger.Info("🧠 Smart mode enabled: Planning context...")
 
-			absSrc, err := sanitizePath(srcDir)
+			absSrc, err := paths.Sanitize(srcDir)
 			if err != nil {
-				logError(fmt.Sprintf("Invalid source directory: %v", err))
-				os.Exit(1)
+				return fmt.Errorf("invalid source directory: %w", err)
 			}
 
 			collector := &PathCollector{}
@@ -169,11 +168,11 @@ var askCmd = &cobra.Command{
 				cfg.AddIgnoredDirs(strings.Split(ignoreDirs, ","))
 			}
 
-			s := scanner.NewScanner(absSrc, collector, cfg)
-			// FIXED: Pass cmd.Context()
+			s := scanner.NewScanner(absSrc, collector, cfg, appLogger)
+
 			if err := s.Scan(cmd.Context()); err == nil && len(collector.Paths) > 0 {
 				fileList := strings.Join(collector.Paths, "\n")
-				logInfo(fmt.Sprintf("Found %d files. Asking AI to select relevant ones...", len(collector.Paths)))
+				appLogger.Info(fmt.Sprintf("Found %d files. Asking AI to select relevant ones...", len(collector.Paths)))
 
 				sysMsg := `You are a senior developer. You have a list of files in a codebase.
 Based on the user's query, identify exactly which files contain the relevant code to answer the question.
@@ -186,60 +185,60 @@ If no specific code is needed, return { "files": [] }.`
 				selectedFiles := callLLMForPaths(apiKey, askModel, sysMsg, userMsg)
 
 				if len(selectedFiles) > 0 {
-
 					focusFile = strings.Join(selectedFiles, ",")
-					logInfo(fmt.Sprintf("🤖 AI selected %d files: %v", len(selectedFiles), selectedFiles))
+					appLogger.Info(fmt.Sprintf("🤖 AI selected %d files: %v", len(selectedFiles), selectedFiles))
 				} else {
-					logInfo("🤖 AI decided no files are needed (or failed to pick), proceeding with full context.")
+					appLogger.Info("🤖 AI decided no files are needed (or failed to pick), proceeding with full context.")
 				}
 			} else {
-				logWarn("Scanner found no files for planning. Proceeding normally.")
+				appLogger.Warn("Scanner found no files for planning. Proceeding normally.")
 			}
 		}
 
 		tmpFile, err := os.CreateTemp("", "agent_context_*.md")
 		if err != nil {
-			logError(fmt.Sprintf("Failed to create temp file: %v", err))
-			os.Exit(1)
+			return fmt.Errorf("failed to create temp file: %w", err)
 		}
 		tmpPath := tmpFile.Name()
 		tmpFile.Close()
 		defer func() {
 			if err := os.Remove(tmpPath); err != nil {
-				logWarn(fmt.Sprintf("Failed to remove temp file: %v", err))
+				appLogger.Warn(fmt.Sprintf("Failed to remove temp file: %v", err))
 			}
 		}()
 
-		logDebug(fmt.Sprintf("Temporary context file: %s", tmpPath))
+		appLogger.Debug(fmt.Sprintf("Temporary context file: %s", tmpPath))
 
 		w := writer.NewConcatStrategy(tmpPath, minify)
 		if err := w.Init(); err != nil {
-			logError(fmt.Sprintf("Failed to initialize writer: %v", err))
-			os.Exit(1)
+			return fmt.Errorf("failed to initialize writer: %w", err)
 		}
 
 		if focusFile != "" {
-			validatedFiles := validateFocusFiles(focusFile)
+			validatedFiles, err := validateFocusFiles(focusFile)
+			if err != nil {
+				return err
+			}
+
 			if len(validatedFiles) == 0 {
-				logWarn("No valid files in focus list. Generating empty context.")
+				appLogger.Warn("No valid files in focus list. Generating empty context.")
 			} else {
-				logInfo(fmt.Sprintf("Focus mode: %d file(s) selected", len(validatedFiles)))
+				appLogger.Info(fmt.Sprintf("Focus mode: %d file(s) selected", len(validatedFiles)))
 				for _, f := range validatedFiles {
 					abs, err := filepath.Abs(f)
 					if err == nil {
 						rel, _ := filepath.Rel(".", abs)
 						fmt.Printf("   + %s\n", rel)
 						if err := w.Write(abs, rel); err != nil {
-							logWarn(fmt.Sprintf("Failed to write %s: %v", rel, err))
+							appLogger.Warn(fmt.Sprintf("Failed to write %s: %v", rel, err))
 						}
 					}
 				}
 			}
 		} else {
-			absSrc, err := sanitizePath(srcDir)
+			absSrc, err := paths.Sanitize(srcDir)
 			if err != nil {
-				logError(fmt.Sprintf("Invalid source directory: %v", err))
-				os.Exit(1)
+				return fmt.Errorf("invalid source directory: %w", err)
 			}
 
 			cfg := config.NewConfig()
@@ -250,31 +249,27 @@ If no specific code is needed, return { "files": [] }.`
 				cfg.AddIgnoredDirs(strings.Split(ignoreDirs, ","))
 			}
 
-			s := scanner.NewScanner(absSrc, w, cfg)
-			// FIXED: Pass cmd.Context()
+			s := scanner.NewScanner(absSrc, w, cfg, appLogger)
+
 			if err := s.Scan(cmd.Context()); err != nil {
-				logError(fmt.Sprintf("Scan failed: %v", err))
-				os.Exit(1)
+				return fmt.Errorf("scan failed: %w", err)
 			}
 		}
 
 		if err := w.Close(); err != nil {
-			logError(fmt.Sprintf("Failed to write context: %v", err))
-			os.Exit(1)
+			return fmt.Errorf("failed to write context: %w", err)
 		}
 
 		contextBytes, err := os.ReadFile(tmpPath)
 		if err != nil {
-			logError(fmt.Sprintf("Failed to read context: %v", err))
-			os.Exit(1)
+			return fmt.Errorf("failed to read context: %w", err)
 		}
 
 		if len(contextBytes) == 0 && !smartMode {
-			logError("No context generated (check your filters)")
-			os.Exit(1)
+			return fmt.Errorf("no context generated (check your filters)")
 		}
 
-		logInfo(fmt.Sprintf("Context generated: %d bytes", len(contextBytes)))
+		appLogger.Info(fmt.Sprintf("Context generated: %d bytes", len(contextBytes)))
 
 		client := openrouter.NewClient(apiKey)
 		contextType := "Codebase"
@@ -299,14 +294,14 @@ If no specific code is needed, return { "files": [] }.`
 			Stream: true,
 		}
 
-		logInfo(fmt.Sprintf("Sending request to model: %s", askModel))
+		appLogger.Info(fmt.Sprintf("Sending request to model: %s", askModel))
 
 		ctx := context.Background()
 		stream, err := client.CreateChatCompletionStream(ctx, req)
 		if err != nil {
-			logError(fmt.Sprintf("API Error: %v", err))
-			logInfo("💡 Check your API key and network connection")
-			os.Exit(1)
+			appLogger.Error(fmt.Sprintf("API Error: %v", err))
+			appLogger.Info("💡 Check your API key and network connection")
+			return err
 		}
 		defer stream.Close()
 
@@ -326,13 +321,14 @@ If no specific code is needed, return { "files": [] }.`
 			}
 		}
 		fmt.Println()
-		logInfo("Response streaming completed")
+		appLogger.Info("Response streaming completed")
+		return nil
 	},
 }
 
 func init() {
 	rootCmd.AddCommand(askCmd)
-	askCmd.Flags().StringVarP(&askModel, "model", "m", "xiaomi/mimo-v2-flash:free", "Model ID")
+	askCmd.Flags().StringVarP(&askModel, "model", "m", constants.DefaultModel, "Model ID")
 	askCmd.Flags().StringVarP(&focusFile, "focus", "f", "", "Comma-separated list of files to scan")
 	askCmd.Flags().BoolVarP(&smartMode, "smart", "S", false, "Use AI to intelligently select relevant files")
 }

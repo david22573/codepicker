@@ -15,24 +15,24 @@ var copyCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		absOut, err := filepath.Abs(outPath)
 		if err != nil {
-			logError(fmt.Sprintf("Invalid output path: %v", err))
+			appLogger.Error(fmt.Sprintf("Invalid output path: %v", err))
 			os.Exit(1)
 		}
 
 		absSrc, err := filepath.Abs(srcDir)
 		if err != nil {
-			logError(fmt.Sprintf("Invalid source directory: %v", err))
+			appLogger.Error(fmt.Sprintf("Invalid source directory: %v", err))
 			os.Exit(1)
 		}
 
 		if absSrc == absOut {
-			logError("Cannot copy to source directory")
+			appLogger.Error("Cannot copy to source directory")
 			os.Exit(1)
 		}
 
-		logInfo(fmt.Sprintf("Copy mode: output to %s", absOut))
+		appLogger.Info(fmt.Sprintf("Copy mode: output to %s", absOut))
 		w := writer.NewCopyStrategy(absOut)
-		// FIXED: Pass cmd.Context()
+
 		runScan(cmd.Context(), w, absSrc)
 	},
 }
