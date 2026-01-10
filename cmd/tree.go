@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 
 	"github.com/david22573/codepicker/internal/writer"
@@ -17,7 +16,7 @@ var (
 var treeCmd = &cobra.Command{
 	Use:   "tree",
 	Short: "Print a visual tree of the project",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		opts := writer.TreeOptions{
 			CopyToClipboard: treeCopy,
 			OutPath:         treeOut,
@@ -26,13 +25,13 @@ var treeCmd = &cobra.Command{
 
 		absSrc, err := filepath.Abs(srcDir)
 		if err != nil {
-			appLogger.Error(fmt.Sprintf("Invalid source path: %v", err))
-			os.Exit(1)
+			return fmt.Errorf("invalid source path: %w", err)
 		}
 
 		appLogger.Info(fmt.Sprintf("Generating tree for: %s", absSrc))
 
-		runScan(cmd.Context(), w, absSrc)
+		// Updated: Pass 'cmd'
+		return runScan(cmd.Context(), w, absSrc, cmd)
 	},
 }
 

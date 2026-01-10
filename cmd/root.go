@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/david22573/codepicker/internal/config"
+	"github.com/david22573/codepicker/internal/git"
 	"github.com/david22573/codepicker/internal/logger"
 	"github.com/david22573/codepicker/internal/paths"
 	"github.com/david22573/codepicker/internal/scanner"
@@ -25,9 +26,9 @@ var (
 	ignoreDirs  string
 	configFile  string
 	verbose     bool
+	diffRef     string
 )
 
-// appLogger is shared by subcommands in the cmd package
 var appLogger logger.Logger
 
 var rootCmd = &cobra.Command{
@@ -41,15 +42,13 @@ var rootCmd = &cobra.Command{
 		}
 		appLogger = logger.NewStandardLogger(level)
 	},
-	Run: func(cmd *cobra.Command, args []string) {
-		// Config Loading
+	RunE: func(cmd *cobra.Command, args []string) error {
 		var cfgFile *config.ConfigFile
 		if configFile != "" {
 			var err error
 			cfgFile, err = config.LoadConfigFile(configFile)
 			if err != nil {
-				appLogger.Error(fmt.Sprintf("Failed to load config file: %v", err))
-				os.Exit(1)
+				return fmt.Errorf("failed to load config file: %w", err)
 			}
 			appLogger.Info(fmt.Sprintf("Loaded config from: %s", configFile))
 		} else {
@@ -59,51 +58,23 @@ var rootCmd = &cobra.Command{
 			}
 		}
 
-		// Apply Config
 		if cfgFile != nil {
-			if srcDir == "." && cfgFile.Src != "" {
-				srcDir = cfgFile.Src
-			}
-			if outPath == "" && cfgFile.Output != "" {
-				outPath = cfgFile.Output
-			}
-			if !cmd.Flags().Changed("minify") && cfgFile.Minify {
-				minify = cfgFile.Minify
-			}
-			if !cmd.Flags().Changed("tokens") && cfgFile.Tokens {
-				showTokens = cfgFile.Tokens
-			}
-			if cfgFile.Verbose {
-				appLogger = logger.NewStandardLogger(2) // Upgrade logger
-			}
-			if len(cfgFile.Include) > 0 && includeExts == "" {
-				includeExts = strings.Join(cfgFile.Include, ",")
-			}
-			if len(cfgFile.Exclude) > 0 && ignoreDirs == "" {
-				ignoreDirs = strings.Join(cfgFile.Exclude, ",")
-			}
-			if askModel == "" && cfgFile.AI.Model != "" && cmd.Name() == "ask" {
-				askModel = cfgFile.AI.Model
-			}
+			applyConfig(cmd, cfgFile)
 		}
 
 		appLogger.Debug(fmt.Sprintf("Starting with source: %s", srcDir))
 
-		// Validation using new packages
 		absSrc, err := paths.Sanitize(srcDir)
 		if err != nil {
-			appLogger.Error(fmt.Sprintf("Invalid source directory: %v", err))
-			os.Exit(1)
+			return fmt.Errorf("invalid source directory: %w", err)
 		}
 
 		info, err := os.Stat(absSrc)
 		if err != nil {
-			appLogger.Error(fmt.Sprintf("Cannot access source directory: %v", err))
-			os.Exit(1)
+			return fmt.Errorf("cannot access source directory: %w", err)
 		}
 		if !info.IsDir() {
-			appLogger.Error(fmt.Sprintf("Source path is not a directory: %s", absSrc))
-			os.Exit(1)
+			return fmt.Errorf("source path is not a directory: %s", absSrc)
 		}
 
 		if outPath == "" {
@@ -111,8 +82,7 @@ var rootCmd = &cobra.Command{
 			if dirName == "." || dirName == string(filepath.Separator) {
 				wd, err := os.Getwd()
 				if err != nil {
-					appLogger.Error(fmt.Sprintf("Failed to get working directory: %v", err))
-					os.Exit(1)
+					return fmt.Errorf("failed to get working directory: %w", err)
 				}
 				dirName = filepath.Base(wd)
 			}
@@ -121,13 +91,11 @@ var rootCmd = &cobra.Command{
 
 		absOut, err := paths.Sanitize(outPath)
 		if err != nil {
-			appLogger.Error(fmt.Sprintf("Invalid output path: %v", err))
-			os.Exit(1)
+			return fmt.Errorf("invalid output path: %w", err)
 		}
 
 		if err := paths.ValidateOutput(absOut); err != nil {
-			appLogger.Error(fmt.Sprintf("Output validation failed: %v", err))
-			os.Exit(1)
+			return fmt.Errorf("output validation failed: %w", err)
 		}
 
 		if filepath.Ext(absOut) == "" {
@@ -135,22 +103,25 @@ var rootCmd = &cobra.Command{
 		}
 
 		if absSrc == absOut {
-			appLogger.Error("Cannot write context to source directory root")
-			os.Exit(1)
+			return fmt.Errorf("cannot write context to source directory root")
 		}
 
 		w := writer.NewConcatStrategy(absOut, minify)
-		runScan(cmd.Context(), w, absSrc)
+
+		// Updated: Pass 'cmd' explicitly to avoid initialization cycle
+		if err := runScan(cmd.Context(), w, absSrc, cmd); err != nil {
+			return err
+		}
 
 		fmt.Printf("📦 Output: %s\n", absOut)
 		if showTokens {
-			fmt.Printf("🔢 Estimated Tokens: ~%d\n", w.TokenEstimate)
+			fmt.Printf("🔢 Token Count: %d\n", w.TokenCount)
 		}
+		return nil
 	},
 }
 
 func Execute() {
-	// Initialize default logger to avoid nil pointer before Run
 	appLogger = logger.NewStandardLogger(1)
 	if err := rootCmd.Execute(); err != nil {
 		appLogger.Error(fmt.Sprintf("Fatal error: %v", err))
@@ -161,16 +132,41 @@ func Execute() {
 func init() {
 	rootCmd.PersistentFlags().StringVarP(&srcDir, "src", "s", ".", "Source directory to scan")
 	rootCmd.Flags().StringVarP(&outPath, "out", "o", "", "Output file path (default: [dir_name]_context.md)")
-	rootCmd.Flags().BoolVarP(&showTokens, "tokens", "t", false, "Show estimated token count")
-	rootCmd.Flags().BoolVarP(&minify, "minify", "m", true, "Remove comments and extra whitespace to save tokens")
-	rootCmd.Flags().StringVarP(&includeExts, "include", "i", "", "Comma-separated extensions to include (e.g. .vue,.svelte)")
+	rootCmd.Flags().BoolVarP(&showTokens, "tokens", "t", false, "Show precise token count (BPE)")
+	rootCmd.Flags().BoolVarP(&minify, "minify", "m", true, "Remove comments and extra whitespace")
+	rootCmd.Flags().StringVarP(&includeExts, "include", "i", "", "Comma-separated extensions to include")
 	rootCmd.Flags().StringVarP(&ignoreDirs, "exclude", "e", "", "Comma-separated directories to exclude")
+	rootCmd.Flags().StringVarP(&diffRef, "diff", "d", "", "Scan only changed files (e.g. 'main', 'HEAD~1', or empty for staged/unstaged)")
 	rootCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose logging")
 	rootCmd.PersistentFlags().StringVarP(&configFile, "config", "c", "", "Config file path (default: .codepicker.yml)")
 }
 
-// runScan is shared by subcommands
-func runScan(ctx context.Context, w writer.OutputStrategy, absSrc string) {
+func applyConfig(cmd *cobra.Command, cfgFile *config.ConfigFile) {
+	if srcDir == "." && cfgFile.Src != "" {
+		srcDir = cfgFile.Src
+	}
+	if outPath == "" && cfgFile.Output != "" {
+		outPath = cfgFile.Output
+	}
+	if !cmd.Flags().Changed("minify") && cfgFile.Minify {
+		minify = cfgFile.Minify
+	}
+	if !cmd.Flags().Changed("tokens") && cfgFile.Tokens {
+		showTokens = cfgFile.Tokens
+	}
+	if cfgFile.Verbose {
+		appLogger = logger.NewStandardLogger(2)
+	}
+	if len(cfgFile.Include) > 0 && includeExts == "" {
+		includeExts = strings.Join(cfgFile.Include, ",")
+	}
+	if len(cfgFile.Exclude) > 0 && ignoreDirs == "" {
+		ignoreDirs = strings.Join(cfgFile.Exclude, ",")
+	}
+}
+
+// Updated: runScan now accepts cmd *cobra.Command
+func runScan(ctx context.Context, w writer.OutputStrategy, absSrc string, cmd *cobra.Command) error {
 	start := time.Now()
 	appLogger.Info(fmt.Sprintf("Scanning directory: %s", absSrc))
 
@@ -187,8 +183,17 @@ func runScan(ctx context.Context, w writer.OutputStrategy, absSrc string) {
 		appLogger.Debug(fmt.Sprintf("Excluding directories: %v", dirs))
 	}
 
+	// Safe check for the "diff" flag
+	hasDiff := false
+	if cmd.Flags().Lookup("diff") != nil {
+		hasDiff = flagChanged(cmd.Flags(), "diff") || diffRef != ""
+	}
+
 	if w.Name() != "Tree" {
 		fmt.Printf("🚇 Scanning: %s\n", absSrc)
+		if hasDiff {
+			fmt.Printf("🔄 Diff Mode: %s\n", diffRef)
+		}
 		if includeExts != "" {
 			fmt.Printf("➕ Including: %s\n", includeExts)
 		}
@@ -197,12 +202,25 @@ func runScan(ctx context.Context, w writer.OutputStrategy, absSrc string) {
 		}
 	}
 
-	// Inject appLogger into scanner
 	s := scanner.NewScanner(absSrc, w, cfg, appLogger)
+
+	// Handle Git Diff Mode
+	if hasDiff {
+		files, err := git.GetChangedFiles(diffRef)
+		if err != nil {
+			return fmt.Errorf("diff mode failed: %w", err)
+		}
+		if len(files) == 0 {
+			appLogger.Warn("No changed files found via git diff.")
+			return nil
+		}
+		appLogger.Info(fmt.Sprintf("Restricting scan to %d changed files", len(files)))
+		s.SetWhitelist(files)
+	}
 
 	if err := s.Scan(ctx); err != nil {
 		appLogger.Error(fmt.Sprintf("Scan failed: %v", err))
-		os.Exit(1)
+		return err
 	}
 
 	if w.Name() != "Tree" {
@@ -210,4 +228,10 @@ func runScan(ctx context.Context, w writer.OutputStrategy, absSrc string) {
 		fmt.Printf("✅ Done in %v\n", elapsed)
 		appLogger.Debug(fmt.Sprintf("Scan completed in %v", elapsed))
 	}
+	return nil
 }
+
+func flagChanged(flags interface{ Changed(string) bool }, name string) bool {
+	return flags.Changed(name)
+}
+

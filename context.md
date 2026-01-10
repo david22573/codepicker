@@ -44,6 +44,7 @@ import (
 	"time"
 
 	"github.com/david22573/codepicker/internal/config"
+	"github.com/david22573/codepicker/internal/constants"
 	"github.com/david22573/codepicker/internal/paths"
 	"github.com/david22573/codepicker/internal/scanner"
 	"github.com/david22573/codepicker/internal/writer"
@@ -67,30 +68,23 @@ func (p *PathCollector) Close() error                { return nil }
 func (p *PathCollector) ShouldSkip(path string) bool { return false }
 func (p *PathCollector) Name() string                { return "Collector" }
 
-func validateAPIKey() string {
+func validateAPIKey() (string, error) {
 	apiKey := os.Getenv("OPENROUTER_API_KEY")
 
 	if apiKey == "" {
-		appLogger.Error("OPENROUTER_API_KEY environment variable is not set")
-		fmt.Println("\n💡 To fix this:")
-		fmt.Println("   1. Get your API key from https://openrouter.ai/settings/keys")
-		fmt.Println("   2. Set it: export OPENROUTER_API_KEY=your_key_here")
-		fmt.Println("   3. Or create a .env file with: OPENROUTER_API_KEY=your_key_here")
-		fmt.Println("\n⚠️  WARNING: Never commit your API key!")
-		os.Exit(1)
+		return "", fmt.Errorf("OPENROUTER_API_KEY environment variable is not set")
 	}
 
-	if len(apiKey) < 10 {
-		appLogger.Error("API key appears invalid (insufficient length)")
-		os.Exit(1)
+	if len(apiKey) < constants.MinAPIKeyLength {
+		return "", fmt.Errorf("API key appears invalid (length < %d)", constants.MinAPIKeyLength)
 	}
 
-	return apiKey
+	return apiKey, nil
 }
 
-func validateFocusFiles(focusList string) []string {
+func validateFocusFiles(focusList string) ([]string, error) {
 	if focusList == "" {
-		return nil
+		return nil, nil
 	}
 
 	files := strings.Split(focusList, ",")
@@ -99,8 +93,7 @@ func validateFocusFiles(focusList string) []string {
 	for _, f := range files {
 		clean, err := paths.Sanitize(f)
 		if err != nil {
-			appLogger.Error(fmt.Sprintf("Invalid focus file path '%s': %v", f, err))
-			os.Exit(1)
+			return nil, fmt.Errorf("invalid focus file path '%s': %w", f, err)
 		}
 
 		info, err := os.Stat(clean)
@@ -110,15 +103,14 @@ func validateFocusFiles(focusList string) []string {
 		}
 
 		if info.IsDir() {
-			appLogger.Error(fmt.Sprintf("Focus file is a directory (use -s for directories): %s", clean))
-			os.Exit(1)
+			return nil, fmt.Errorf("focus file is a directory (use -s for directories): %s", clean)
 		}
 
 		validated = append(validated, clean)
 		appLogger.Debug(fmt.Sprintf("Validated focus file: %s", clean))
 	}
 
-	return validated
+	return validated, nil
 }
 
 func callLLMForPaths(apiKey, model, sysMsg, userMsg string) []string {
@@ -178,11 +170,19 @@ var askCmd = &cobra.Command{
 	Use:   "ask [query]",
 	Short: "Ask AI about the codebase",
 	Args:  cobra.MinimumNArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		query := strings.Join(args, " ")
 		appLogger.Info(fmt.Sprintf("Ask command initiated with query: %s", query))
 
-		apiKey := validateAPIKey()
+		apiKey, err := validateAPIKey()
+		if err != nil {
+			fmt.Println("\n💡 To fix this:")
+			fmt.Println("   1. Get your API key from https://openrouter.ai/settings/keys")
+			fmt.Println("   2. Set it: export OPENROUTER_API_KEY=your_key_here")
+			fmt.Println("   3. Or create a .env file with: OPENROUTER_API_KEY=your_key_here")
+			fmt.Println("\n⚠️  WARNING: Never commit your API key!")
+			return err
+		}
 		appLogger.Info("API key validated")
 
 		if smartMode && focusFile == "" {
@@ -190,8 +190,7 @@ var askCmd = &cobra.Command{
 
 			absSrc, err := paths.Sanitize(srcDir)
 			if err != nil {
-				appLogger.Error(fmt.Sprintf("Invalid source directory: %v", err))
-				os.Exit(1)
+				return fmt.Errorf("invalid source directory: %w", err)
 			}
 
 			collector := &PathCollector{}
@@ -232,8 +231,7 @@ If no specific code is needed, return { "files": [] }.`
 
 		tmpFile, err := os.CreateTemp("", "agent_context_*.md")
 		if err != nil {
-			appLogger.Error(fmt.Sprintf("Failed to create temp file: %v", err))
-			os.Exit(1)
+			return fmt.Errorf("failed to create temp file: %w", err)
 		}
 		tmpPath := tmpFile.Name()
 		tmpFile.Close()
@@ -247,12 +245,15 @@ If no specific code is needed, return { "files": [] }.`
 
 		w := writer.NewConcatStrategy(tmpPath, minify)
 		if err := w.Init(); err != nil {
-			appLogger.Error(fmt.Sprintf("Failed to initialize writer: %v", err))
-			os.Exit(1)
+			return fmt.Errorf("failed to initialize writer: %w", err)
 		}
 
 		if focusFile != "" {
-			validatedFiles := validateFocusFiles(focusFile)
+			validatedFiles, err := validateFocusFiles(focusFile)
+			if err != nil {
+				return err
+			}
+
 			if len(validatedFiles) == 0 {
 				appLogger.Warn("No valid files in focus list. Generating empty context.")
 			} else {
@@ -271,8 +272,7 @@ If no specific code is needed, return { "files": [] }.`
 		} else {
 			absSrc, err := paths.Sanitize(srcDir)
 			if err != nil {
-				appLogger.Error(fmt.Sprintf("Invalid source directory: %v", err))
-				os.Exit(1)
+				return fmt.Errorf("invalid source directory: %w", err)
 			}
 
 			cfg := config.NewConfig()
@@ -286,25 +286,21 @@ If no specific code is needed, return { "files": [] }.`
 			s := scanner.NewScanner(absSrc, w, cfg, appLogger)
 
 			if err := s.Scan(cmd.Context()); err != nil {
-				appLogger.Error(fmt.Sprintf("Scan failed: %v", err))
-				os.Exit(1)
+				return fmt.Errorf("scan failed: %w", err)
 			}
 		}
 
 		if err := w.Close(); err != nil {
-			appLogger.Error(fmt.Sprintf("Failed to write context: %v", err))
-			os.Exit(1)
+			return fmt.Errorf("failed to write context: %w", err)
 		}
 
 		contextBytes, err := os.ReadFile(tmpPath)
 		if err != nil {
-			appLogger.Error(fmt.Sprintf("Failed to read context: %v", err))
-			os.Exit(1)
+			return fmt.Errorf("failed to read context: %w", err)
 		}
 
 		if len(contextBytes) == 0 && !smartMode {
-			appLogger.Error("No context generated (check your filters)")
-			os.Exit(1)
+			return fmt.Errorf("no context generated (check your filters)")
 		}
 
 		appLogger.Info(fmt.Sprintf("Context generated: %d bytes", len(contextBytes)))
@@ -339,7 +335,7 @@ If no specific code is needed, return { "files": [] }.`
 		if err != nil {
 			appLogger.Error(fmt.Sprintf("API Error: %v", err))
 			appLogger.Info("💡 Check your API key and network connection")
-			os.Exit(1)
+			return err
 		}
 		defer stream.Close()
 
@@ -360,12 +356,13 @@ If no specific code is needed, return { "files": [] }.`
 		}
 		fmt.Println()
 		appLogger.Info("Response streaming completed")
+		return nil
 	},
 }
 
 func init() {
 	rootCmd.AddCommand(askCmd)
-	askCmd.Flags().StringVarP(&askModel, "model", "m", "xiaomi/mimo-v2-flash:free", "Model ID")
+	askCmd.Flags().StringVarP(&askModel, "model", "m", constants.DefaultModel, "Model ID")
 	askCmd.Flags().StringVarP(&focusFile, "focus", "f", "", "Comma-separated list of files to scan")
 	askCmd.Flags().BoolVarP(&smartMode, "smart", "S", false, "Use AI to intelligently select relevant files")
 }
@@ -377,7 +374,6 @@ package cmd
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 
 	"github.com/david22573/codepicker/internal/writer"
@@ -387,34 +383,104 @@ import (
 var copyCmd = &cobra.Command{
 	Use:   "copy",
 	Short: "Copy files to a directory preserving structure",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		absOut, err := filepath.Abs(outPath)
 		if err != nil {
-			appLogger.Error(fmt.Sprintf("Invalid output path: %v", err))
-			os.Exit(1)
+			return fmt.Errorf("invalid output path: %w", err)
 		}
 
 		absSrc, err := filepath.Abs(srcDir)
 		if err != nil {
-			appLogger.Error(fmt.Sprintf("Invalid source directory: %v", err))
-			os.Exit(1)
+			return fmt.Errorf("invalid source directory: %w", err)
 		}
 
 		if absSrc == absOut {
-			appLogger.Error("Cannot copy to source directory")
-			os.Exit(1)
+			return fmt.Errorf("cannot copy to source directory")
 		}
 
 		appLogger.Info(fmt.Sprintf("Copy mode: output to %s", absOut))
 		w := writer.NewCopyStrategy(absOut)
 
-		runScan(cmd.Context(), w, absSrc)
+		return runScan(cmd.Context(), w, absSrc, cmd)
 	},
 }
 
 func init() {
 	rootCmd.AddCommand(copyCmd)
 	copyCmd.Flags().StringVarP(&outPath, "out", "o", "codepicker_out", "Output directory")
+}
+```
+
+## File: cmd/init.go
+```go
+package cmd
+
+import (
+	"fmt"
+	"os"
+
+	"github.com/david22573/codepicker/internal/constants"
+	"github.com/spf13/cobra"
+)
+
+var forceInit bool
+
+const defaultConfigTemplate = `# .codepicker.yml
+# Generated by codepicker init
+
+src: .
+output: codepicker_context.md
+minify: true
+tokens: false
+
+# File extensions to include (add more as needed)
+include:
+  - .go
+  - .ts
+  - .js
+
+# Directories to exclude
+exclude:
+  - .git
+  - node_modules
+  - vendor
+  - codepicker_out
+
+# AI integration settings
+ai:
+  model: %s
+  temperature: 0.7
+`
+
+var initCmd = &cobra.Command{
+	Use:   "init",
+	Short: "Generate a default configuration file",
+	Long:  `Creates a .codepicker.yml file in the current directory with default settings.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		filename := ".codepicker.yml"
+
+		if _, err := os.Stat(filename); err == nil {
+			if !forceInit {
+				return fmt.Errorf("configuration file %s already exists (use --force to overwrite)", filename)
+			}
+			appLogger.Warn(fmt.Sprintf("Overwriting existing %s", filename))
+		}
+
+		content := fmt.Sprintf(defaultConfigTemplate, constants.DefaultModel)
+
+		if err := os.WriteFile(filename, []byte(content), 0644); err != nil {
+			return fmt.Errorf("failed to write config file: %w", err)
+		}
+
+		appLogger.Info(fmt.Sprintf("Created default configuration: %s", filename))
+		fmt.Println("\n✨ Initialized! You can now edit .codepicker.yml to customize your settings.")
+		return nil
+	},
+}
+
+func init() {
+	rootCmd.AddCommand(initCmd)
+	initCmd.Flags().BoolVarP(&forceInit, "force", "f", false, "Overwrite existing config file")
 }
 ```
 
@@ -431,6 +497,7 @@ import (
 	"time"
 
 	"github.com/david22573/codepicker/internal/config"
+	"github.com/david22573/codepicker/internal/git"
 	"github.com/david22573/codepicker/internal/logger"
 	"github.com/david22573/codepicker/internal/paths"
 	"github.com/david22573/codepicker/internal/scanner"
@@ -447,6 +514,7 @@ var (
 	ignoreDirs  string
 	configFile  string
 	verbose     bool
+	diffRef     string
 )
 
 var appLogger logger.Logger
@@ -462,15 +530,13 @@ var rootCmd = &cobra.Command{
 		}
 		appLogger = logger.NewStandardLogger(level)
 	},
-	Run: func(cmd *cobra.Command, args []string) {
-
+	RunE: func(cmd *cobra.Command, args []string) error {
 		var cfgFile *config.ConfigFile
 		if configFile != "" {
 			var err error
 			cfgFile, err = config.LoadConfigFile(configFile)
 			if err != nil {
-				appLogger.Error(fmt.Sprintf("Failed to load config file: %v", err))
-				os.Exit(1)
+				return fmt.Errorf("failed to load config file: %w", err)
 			}
 			appLogger.Info(fmt.Sprintf("Loaded config from: %s", configFile))
 		} else {
@@ -481,48 +547,22 @@ var rootCmd = &cobra.Command{
 		}
 
 		if cfgFile != nil {
-			if srcDir == "." && cfgFile.Src != "" {
-				srcDir = cfgFile.Src
-			}
-			if outPath == "" && cfgFile.Output != "" {
-				outPath = cfgFile.Output
-			}
-			if !cmd.Flags().Changed("minify") && cfgFile.Minify {
-				minify = cfgFile.Minify
-			}
-			if !cmd.Flags().Changed("tokens") && cfgFile.Tokens {
-				showTokens = cfgFile.Tokens
-			}
-			if cfgFile.Verbose {
-				appLogger = logger.NewStandardLogger(2)
-			}
-			if len(cfgFile.Include) > 0 && includeExts == "" {
-				includeExts = strings.Join(cfgFile.Include, ",")
-			}
-			if len(cfgFile.Exclude) > 0 && ignoreDirs == "" {
-				ignoreDirs = strings.Join(cfgFile.Exclude, ",")
-			}
-			if askModel == "" && cfgFile.AI.Model != "" && cmd.Name() == "ask" {
-				askModel = cfgFile.AI.Model
-			}
+			applyConfig(cmd, cfgFile)
 		}
 
 		appLogger.Debug(fmt.Sprintf("Starting with source: %s", srcDir))
 
 		absSrc, err := paths.Sanitize(srcDir)
 		if err != nil {
-			appLogger.Error(fmt.Sprintf("Invalid source directory: %v", err))
-			os.Exit(1)
+			return fmt.Errorf("invalid source directory: %w", err)
 		}
 
 		info, err := os.Stat(absSrc)
 		if err != nil {
-			appLogger.Error(fmt.Sprintf("Cannot access source directory: %v", err))
-			os.Exit(1)
+			return fmt.Errorf("cannot access source directory: %w", err)
 		}
 		if !info.IsDir() {
-			appLogger.Error(fmt.Sprintf("Source path is not a directory: %s", absSrc))
-			os.Exit(1)
+			return fmt.Errorf("source path is not a directory: %s", absSrc)
 		}
 
 		if outPath == "" {
@@ -530,8 +570,7 @@ var rootCmd = &cobra.Command{
 			if dirName == "." || dirName == string(filepath.Separator) {
 				wd, err := os.Getwd()
 				if err != nil {
-					appLogger.Error(fmt.Sprintf("Failed to get working directory: %v", err))
-					os.Exit(1)
+					return fmt.Errorf("failed to get working directory: %w", err)
 				}
 				dirName = filepath.Base(wd)
 			}
@@ -540,13 +579,11 @@ var rootCmd = &cobra.Command{
 
 		absOut, err := paths.Sanitize(outPath)
 		if err != nil {
-			appLogger.Error(fmt.Sprintf("Invalid output path: %v", err))
-			os.Exit(1)
+			return fmt.Errorf("invalid output path: %w", err)
 		}
 
 		if err := paths.ValidateOutput(absOut); err != nil {
-			appLogger.Error(fmt.Sprintf("Output validation failed: %v", err))
-			os.Exit(1)
+			return fmt.Errorf("output validation failed: %w", err)
 		}
 
 		if filepath.Ext(absOut) == "" {
@@ -554,22 +591,24 @@ var rootCmd = &cobra.Command{
 		}
 
 		if absSrc == absOut {
-			appLogger.Error("Cannot write context to source directory root")
-			os.Exit(1)
+			return fmt.Errorf("cannot write context to source directory root")
 		}
 
 		w := writer.NewConcatStrategy(absOut, minify)
-		runScan(cmd.Context(), w, absSrc)
+
+		if err := runScan(cmd.Context(), w, absSrc, cmd); err != nil {
+			return err
+		}
 
 		fmt.Printf("📦 Output: %s\n", absOut)
 		if showTokens {
-			fmt.Printf("🔢 Estimated Tokens: ~%d\n", w.TokenEstimate)
+			fmt.Printf("🔢 Token Count: %d\n", w.TokenCount)
 		}
+		return nil
 	},
 }
 
 func Execute() {
-
 	appLogger = logger.NewStandardLogger(1)
 	if err := rootCmd.Execute(); err != nil {
 		appLogger.Error(fmt.Sprintf("Fatal error: %v", err))
@@ -580,15 +619,40 @@ func Execute() {
 func init() {
 	rootCmd.PersistentFlags().StringVarP(&srcDir, "src", "s", ".", "Source directory to scan")
 	rootCmd.Flags().StringVarP(&outPath, "out", "o", "", "Output file path (default: [dir_name]_context.md)")
-	rootCmd.Flags().BoolVarP(&showTokens, "tokens", "t", false, "Show estimated token count")
-	rootCmd.Flags().BoolVarP(&minify, "minify", "m", true, "Remove comments and extra whitespace to save tokens")
-	rootCmd.Flags().StringVarP(&includeExts, "include", "i", "", "Comma-separated extensions to include (e.g. .vue,.svelte)")
+	rootCmd.Flags().BoolVarP(&showTokens, "tokens", "t", false, "Show precise token count (BPE)")
+	rootCmd.Flags().BoolVarP(&minify, "minify", "m", true, "Remove comments and extra whitespace")
+	rootCmd.Flags().StringVarP(&includeExts, "include", "i", "", "Comma-separated extensions to include")
 	rootCmd.Flags().StringVarP(&ignoreDirs, "exclude", "e", "", "Comma-separated directories to exclude")
+	rootCmd.Flags().StringVarP(&diffRef, "diff", "d", "", "Scan only changed files (e.g. 'main', 'HEAD~1', or empty for staged/unstaged)")
 	rootCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose logging")
 	rootCmd.PersistentFlags().StringVarP(&configFile, "config", "c", "", "Config file path (default: .codepicker.yml)")
 }
 
-func runScan(ctx context.Context, w writer.OutputStrategy, absSrc string) {
+func applyConfig(cmd *cobra.Command, cfgFile *config.ConfigFile) {
+	if srcDir == "." && cfgFile.Src != "" {
+		srcDir = cfgFile.Src
+	}
+	if outPath == "" && cfgFile.Output != "" {
+		outPath = cfgFile.Output
+	}
+	if !cmd.Flags().Changed("minify") && cfgFile.Minify {
+		minify = cfgFile.Minify
+	}
+	if !cmd.Flags().Changed("tokens") && cfgFile.Tokens {
+		showTokens = cfgFile.Tokens
+	}
+	if cfgFile.Verbose {
+		appLogger = logger.NewStandardLogger(2)
+	}
+	if len(cfgFile.Include) > 0 && includeExts == "" {
+		includeExts = strings.Join(cfgFile.Include, ",")
+	}
+	if len(cfgFile.Exclude) > 0 && ignoreDirs == "" {
+		ignoreDirs = strings.Join(cfgFile.Exclude, ",")
+	}
+}
+
+func runScan(ctx context.Context, w writer.OutputStrategy, absSrc string, cmd *cobra.Command) error {
 	start := time.Now()
 	appLogger.Info(fmt.Sprintf("Scanning directory: %s", absSrc))
 
@@ -605,8 +669,16 @@ func runScan(ctx context.Context, w writer.OutputStrategy, absSrc string) {
 		appLogger.Debug(fmt.Sprintf("Excluding directories: %v", dirs))
 	}
 
+	hasDiff := false
+	if cmd.Flags().Lookup("diff") != nil {
+		hasDiff = flagChanged(cmd.Flags(), "diff") || diffRef != ""
+	}
+
 	if w.Name() != "Tree" {
 		fmt.Printf("🚇 Scanning: %s\n", absSrc)
+		if hasDiff {
+			fmt.Printf("🔄 Diff Mode: %s\n", diffRef)
+		}
 		if includeExts != "" {
 			fmt.Printf("➕ Including: %s\n", includeExts)
 		}
@@ -617,9 +689,22 @@ func runScan(ctx context.Context, w writer.OutputStrategy, absSrc string) {
 
 	s := scanner.NewScanner(absSrc, w, cfg, appLogger)
 
+	if hasDiff {
+		files, err := git.GetChangedFiles(diffRef)
+		if err != nil {
+			return fmt.Errorf("diff mode failed: %w", err)
+		}
+		if len(files) == 0 {
+			appLogger.Warn("No changed files found via git diff.")
+			return nil
+		}
+		appLogger.Info(fmt.Sprintf("Restricting scan to %d changed files", len(files)))
+		s.SetWhitelist(files)
+	}
+
 	if err := s.Scan(ctx); err != nil {
 		appLogger.Error(fmt.Sprintf("Scan failed: %v", err))
-		os.Exit(1)
+		return err
 	}
 
 	if w.Name() != "Tree" {
@@ -627,6 +712,11 @@ func runScan(ctx context.Context, w writer.OutputStrategy, absSrc string) {
 		fmt.Printf("✅ Done in %v\n", elapsed)
 		appLogger.Debug(fmt.Sprintf("Scan completed in %v", elapsed))
 	}
+	return nil
+}
+
+func flagChanged(flags interface{ Changed(string) bool }, name string) bool {
+	return flags.Changed(name)
 }
 ```
 
@@ -636,7 +726,6 @@ package cmd
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 
 	"github.com/david22573/codepicker/internal/writer"
@@ -651,7 +740,7 @@ var (
 var treeCmd = &cobra.Command{
 	Use:   "tree",
 	Short: "Print a visual tree of the project",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		opts := writer.TreeOptions{
 			CopyToClipboard: treeCopy,
 			OutPath:         treeOut,
@@ -660,13 +749,12 @@ var treeCmd = &cobra.Command{
 
 		absSrc, err := filepath.Abs(srcDir)
 		if err != nil {
-			appLogger.Error(fmt.Sprintf("Invalid source path: %v", err))
-			os.Exit(1)
+			return fmt.Errorf("invalid source path: %w", err)
 		}
 
 		appLogger.Info(fmt.Sprintf("Generating tree for: %s", absSrc))
 
-		runScan(cmd.Context(), w, absSrc)
+		return runScan(cmd.Context(), w, absSrc, cmd)
 	},
 }
 
@@ -812,6 +900,32 @@ func LoadConfigFile(path string) (*ConfigFile, error) {
 }
 ```
 
+## File: internal/constants/constants.go
+```go
+package constants
+
+import "time"
+
+const (
+	// Application Info
+	AppName = "codepicker"
+
+	// API Defaults
+	DefaultModel    = "xiaomi/mimo-v2-flash:free"
+	MinAPIKeyLength = 10
+	MaxRetries      = 3
+	RetryDelay      = 1 * time.Second
+
+	// File System limits
+	MaxFileSize    = 100 * 1024 * 1024 // 100MB
+	DefaultOutPath = "codepicker_context.md"
+
+	// Output Formatting
+	ContextHeader = "# Codebase Context Dump\n"
+	GeneratedBy   = "Generated by codepicker\n\n"
+)
+```
+
 ## File: internal/errors/errors.go
 ```go
 package errors
@@ -931,6 +1045,48 @@ func NewPathError(op, path string, err error) error {
 		Path: path,
 		Err:  err,
 	}
+}
+```
+
+## File: internal/git/git.go
+```go
+package git
+
+import (
+	"bytes"
+	"fmt"
+	"os/exec"
+	"strings"
+)
+
+func GetChangedFiles(diffRef string) (map[string]bool, error) {
+	var cmd *exec.Cmd
+
+	if diffRef == "" || diffRef == "staged" {
+
+		cmd = exec.Command("git", "diff", "--name-only")
+	} else {
+
+		cmd = exec.Command("git", "diff", "--name-only", diffRef)
+	}
+
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	err := cmd.Run()
+	if err != nil {
+		return nil, fmt.Errorf("git execution failed (is this a git repo?): %w", err)
+	}
+
+	files := make(map[string]bool)
+	lines := strings.Split(out.String(), "\n")
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" {
+			files[trimmed] = true
+		}
+	}
+
+	return files, nil
 }
 ```
 
@@ -1211,6 +1367,76 @@ func Minify(content []byte, ext string) []byte {
 }
 ```
 
+## File: internal/minifier/minifier_test.go
+```go
+package minifier
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestMinify(t *testing.T) {
+	tests := []struct {
+		name     string
+		content  string
+		ext      string
+		contains []string
+		excludes []string
+	}{
+		{
+			name: "Go Minification",
+			content: `package main
+// This is a comment
+func main() {
+	println("hello")
+}`,
+			ext:      ".go",
+			contains: []string{"package main", "func main", "println"},
+			excludes: []string{"// This is a comment"},
+		},
+		{
+			name: "JS Minification",
+			content: `function test() {
+    // a comment
+    return true;
+}`,
+			ext:      ".js",
+			contains: []string{"function test", "return true"},
+			excludes: []string{"// a comment"},
+		},
+		{
+			name: "Python Minification",
+			content: `def foo():
+    # python comment
+    print("bar")`,
+			ext:      ".py",
+			contains: []string{"def foo", "print"},
+			excludes: []string{"# python comment"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Minify([]byte(tt.content), tt.ext)
+			gotStr := string(got)
+
+			for _, c := range tt.contains {
+				if !strings.Contains(gotStr, c) {
+					t.Errorf("Expected output to contain '%s', but it didn't.\nOutput:\n%s", c, gotStr)
+				}
+			}
+
+			for _, e := range tt.excludes {
+				if strings.Contains(gotStr, e) {
+					t.Errorf("Expected output to exclude '%s', but it remained.\nOutput:\n%s", e, gotStr)
+				}
+			}
+		})
+	}
+}
+```
+
 ## File: internal/minifier/python_minifier.go
 ```go
 package minifier
@@ -1362,6 +1588,8 @@ type Scanner struct {
 	GitIgnore    *ignore.GitIgnore
 	CustomIgnore *ignore.GitIgnore
 	Logger       logger.Logger
+
+	Whitelist map[string]bool
 }
 
 func NewScanner(root string, w writer.OutputStrategy, cfg *config.Config, log logger.Logger) *Scanner {
@@ -1389,6 +1617,10 @@ func NewScanner(root string, w writer.OutputStrategy, cfg *config.Config, log lo
 	return s
 }
 
+func (s *Scanner) SetWhitelist(files map[string]bool) {
+	s.Whitelist = files
+}
+
 func (s *Scanner) Scan(ctx context.Context) error {
 	if err := s.Writer.Init(); err != nil {
 		return fmt.Errorf("writer init failed: %w", err)
@@ -1403,7 +1635,6 @@ func (s *Scanner) Scan(ctx context.Context) error {
 		}
 
 		if err != nil {
-
 			if path == s.Root {
 				return err
 			}
@@ -1414,6 +1645,18 @@ func (s *Scanner) Scan(ctx context.Context) error {
 		relPath, _ := filepath.Rel(s.Root, path)
 		if relPath == "." {
 			return nil
+		}
+
+		cleanRel := filepath.ToSlash(relPath)
+
+		if s.Whitelist != nil {
+			if d.IsDir() {
+
+			} else {
+				if !s.Whitelist[cleanRel] {
+					return nil
+				}
+			}
 		}
 
 		if s.GitIgnore != nil && s.GitIgnore.MatchesPath(relPath) {
@@ -1462,6 +1705,124 @@ func (s *Scanner) Scan(ctx context.Context) error {
 }
 ```
 
+## File: internal/scanner/scanner_test.go
+```go
+package scanner
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/david22573/codepicker/internal/config"
+	"github.com/david22573/codepicker/internal/logger"
+)
+
+type MockWriter struct {
+	Files []string
+}
+
+func (m *MockWriter) Init() error                 { return nil }
+func (m *MockWriter) Close() error                { return nil }
+func (m *MockWriter) ShouldSkip(path string) bool { return false }
+func (m *MockWriter) Name() string                { return "Mock" }
+func (m *MockWriter) Write(abs, rel string) error {
+	m.Files = append(m.Files, rel)
+	return nil
+}
+
+func TestScanner(t *testing.T) {
+
+	tmpDir := t.TempDir()
+
+	createFile(t, tmpDir, "main.go", "package main")
+	createFile(t, tmpDir, "utils.go", "package main")
+	createFile(t, tmpDir, "ignored.log", "log data")
+
+	subDir := filepath.Join(tmpDir, "internal")
+	os.Mkdir(subDir, 0755)
+	createFile(t, subDir, "logic.go", "package logic")
+
+	vendorDir := filepath.Join(tmpDir, "vendor")
+	os.Mkdir(vendorDir, 0755)
+	createFile(t, vendorDir, "dep.go", "package dep")
+
+	cfg := config.NewConfig()
+
+	mockW := &MockWriter{}
+	nopLogger := &logger.NoOpLogger{}
+
+	s := NewScanner(tmpDir, mockW, cfg, nopLogger)
+
+	err := s.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("Scan failed: %v", err)
+	}
+
+	expected := map[string]bool{
+		"main.go":           true,
+		"utils.go":          true,
+		"internal/logic.go": true,
+	}
+
+	unexpected := map[string]bool{
+		"ignored.log":   true,
+		"vendor/dep.go": true,
+	}
+
+	found := make(map[string]bool)
+	for _, f := range mockW.Files {
+		found[filepath.ToSlash(f)] = true
+	}
+
+	for f := range expected {
+		if !found[f] {
+			t.Errorf("Expected to find file %s, but did not. Found: %v", f, mockW.Files)
+		}
+	}
+
+	for f := range unexpected {
+		if found[f] {
+			t.Errorf("Found unexpected file %s (should have been ignored)", f)
+		}
+	}
+}
+
+func createFile(t *testing.T, dir, name, content string) {
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("Failed to create test file %s: %v", path, err)
+	}
+}
+```
+
+## File: internal/tokenizer/tokenizer.go
+```go
+package tokenizer
+
+import (
+	"github.com/pkoukk/tiktoken-go"
+)
+
+func CountTokens(text string) int {
+
+	tkm, err := tiktoken.GetEncoding("cl100k_base")
+	if err != nil {
+
+		return len(text) / 4
+	}
+
+	tokenized := tkm.Encode(text, nil, nil)
+	return len(tokenized)
+}
+
+func EstimateCost(tokens int) float64 {
+
+	return float64(tokens) / 1_000_000 * 0.50
+}
+```
+
 ## File: internal/writer/writer.go
 ```go
 package writer
@@ -1476,10 +1837,10 @@ import (
 	"unicode/utf8"
 
 	"github.com/atotto/clipboard"
+	"github.com/david22573/codepicker/internal/constants"
 	"github.com/david22573/codepicker/internal/minifier"
+	"github.com/david22573/codepicker/internal/tokenizer"
 )
-
-const maxFileSize = 100 * 1024 * 1024 // 100MB
 
 type OutputStrategy interface {
 	Init() error
@@ -1490,10 +1851,10 @@ type OutputStrategy interface {
 }
 
 type ConcatStrategy struct {
-	OutputPath    string
-	file          *os.File
-	TokenEstimate int
-	Minify        bool
+	OutputPath string
+	file       *os.File
+	TokenCount int
+	Minify     bool
 }
 
 func NewConcatStrategy(path string, minify bool) *ConcatStrategy {
@@ -1511,8 +1872,8 @@ func (c *ConcatStrategy) Init() error {
 		return err
 	}
 	c.file = f
-	fmt.Fprintf(c.file, "# Codebase Context Dump\n")
-	fmt.Fprintf(c.file, "Generated by codepicker\n\n")
+	fmt.Fprintf(c.file, constants.ContextHeader)
+	fmt.Fprintf(c.file, constants.GeneratedBy)
 	return nil
 }
 
@@ -1532,14 +1893,12 @@ func (c *ConcatStrategy) Write(absPath, relPath string) error {
 		return err
 	}
 
-	if info.Size() > maxFileSize {
-
-		fmt.Printf("⚠️  Skipping large file (>100MB): %s\n", relPath)
+	if info.Size() > constants.MaxFileSize {
+		fmt.Printf("⚠️  Skipping large file (>%dMB): %s\n", constants.MaxFileSize/(1024*1024), relPath)
 		return nil
 	}
 
-	content, err := io.ReadAll(io.LimitReader(f, maxFileSize))
-
+	content, err := io.ReadAll(io.LimitReader(f, constants.MaxFileSize))
 	if err != nil {
 		return err
 	}
@@ -1558,21 +1917,22 @@ func (c *ConcatStrategy) Write(absPath, relPath string) error {
 		ext = "text"
 	}
 
-	fmt.Fprintf(c.file, "## File: %s\n", relPath)
-	fmt.Fprintf(c.file, "```%s\n", ext)
-	n, err := c.file.Write(content)
-	if err != nil {
-		return err
-	}
+	var fileBuffer bytes.Buffer
+	fmt.Fprintf(&fileBuffer, "## File: %s\n", relPath)
+	fmt.Fprintf(&fileBuffer, "```%s\n", ext)
+	fileBuffer.Write(content)
 
 	if len(content) > 0 && content[len(content)-1] != '\n' {
-		c.file.Write([]byte("\n"))
-		n++
+		fileBuffer.Write([]byte("\n"))
 	}
+	fmt.Fprintf(&fileBuffer, "```\n\n")
 
-	c.TokenEstimate += n / 4
-	fmt.Fprintf(c.file, "```\n\n")
-	return nil
+	finalBytes := fileBuffer.Bytes()
+
+	c.TokenCount += tokenizer.CountTokens(string(finalBytes))
+
+	_, err = c.file.Write(finalBytes)
+	return err
 }
 
 func (c *ConcatStrategy) Close() error {
@@ -1606,8 +1966,8 @@ func (c *CopyStrategy) Write(absPath, relPath string) error {
 	defer src.Close()
 	dst, _ := os.Create(targetPath)
 	defer dst.Close()
-	io.Copy(dst, src)
-	return nil
+	_, err := io.Copy(dst, src)
+	return err
 }
 
 func (c *CopyStrategy) Close() error { return nil }
@@ -1703,12 +2063,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/david22573/codepicker/internal/constants"
 	"github.com/david22573/codepicker/internal/errors"
-)
-
-const (
-	maxRetries = 3
-	retryDelay = 1 * time.Second
 )
 
 func (c *Client) CreateChatCompletion(ctx context.Context, req ChatCompletionRequest) (*ChatCompletionResponse, error) {
@@ -1767,9 +2123,9 @@ func (c *Client) CreateChatCompletionStream(ctx context.Context, req ChatComplet
 	req.Stream = true
 
 	var lastErr error
-	for attempt := 0; attempt < maxRetries; attempt++ {
+	for attempt := 0; attempt < constants.MaxRetries; attempt++ {
 		if attempt > 0 {
-			time.Sleep(retryDelay * time.Duration(attempt))
+			time.Sleep(constants.RetryDelay * time.Duration(attempt))
 		}
 
 		httpReq, err := c.newRequest(ctx, http.MethodPost, "/chat/completions", req)

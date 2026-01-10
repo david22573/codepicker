@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 
 	"github.com/david22573/codepicker/internal/writer"
@@ -12,28 +11,26 @@ import (
 var copyCmd = &cobra.Command{
 	Use:   "copy",
 	Short: "Copy files to a directory preserving structure",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		absOut, err := filepath.Abs(outPath)
 		if err != nil {
-			appLogger.Error(fmt.Sprintf("Invalid output path: %v", err))
-			os.Exit(1)
+			return fmt.Errorf("invalid output path: %w", err)
 		}
 
 		absSrc, err := filepath.Abs(srcDir)
 		if err != nil {
-			appLogger.Error(fmt.Sprintf("Invalid source directory: %v", err))
-			os.Exit(1)
+			return fmt.Errorf("invalid source directory: %w", err)
 		}
 
 		if absSrc == absOut {
-			appLogger.Error("Cannot copy to source directory")
-			os.Exit(1)
+			return fmt.Errorf("cannot copy to source directory")
 		}
 
 		appLogger.Info(fmt.Sprintf("Copy mode: output to %s", absOut))
 		w := writer.NewCopyStrategy(absOut)
 
-		runScan(cmd.Context(), w, absSrc)
+		// Updated: Pass 'cmd'
+		return runScan(cmd.Context(), w, absSrc, cmd)
 	},
 }
 

@@ -12,6 +12,7 @@ import (
 	"github.com/atotto/clipboard"
 	"github.com/david22573/codepicker/internal/constants"
 	"github.com/david22573/codepicker/internal/minifier"
+	"github.com/david22573/codepicker/internal/tokenizer"
 )
 
 type OutputStrategy interface {
@@ -25,7 +26,7 @@ type OutputStrategy interface {
 type ConcatStrategy struct {
 	OutputPath    string
 	file          *os.File
-	TokenEstimate int
+	TokenCount    int
 	Minify        bool
 }
 
@@ -71,7 +72,6 @@ func (c *ConcatStrategy) Write(absPath, relPath string) error {
 	}
 
 	content, err := io.ReadAll(io.LimitReader(f, constants.MaxFileSize))
-
 	if err != nil {
 		return err
 	}
@@ -90,21 +90,24 @@ func (c *ConcatStrategy) Write(absPath, relPath string) error {
 		ext = "text"
 	}
 
-	fmt.Fprintf(c.file, "## File: %s\n", relPath)
-	fmt.Fprintf(c.file, "```%s\n", ext)
-	n, err := c.file.Write(content)
-	if err != nil {
-		return err
-	}
-
+	// Buffer the output for this file so we can count tokens accurately on what gets written
+	var fileBuffer bytes.Buffer
+	fmt.Fprintf(&fileBuffer, "## File: %s\n", relPath)
+	fmt.Fprintf(&fileBuffer, "```%s\n", ext)
+	fileBuffer.Write(content)
+	
 	if len(content) > 0 && content[len(content)-1] != '\n' {
-		c.file.Write([]byte("\n"))
-		n++
+		fileBuffer.Write([]byte("\n"))
 	}
+	fmt.Fprintf(&fileBuffer, "```\n\n")
 
-	c.TokenEstimate += n / 4
-	fmt.Fprintf(c.file, "```\n\n")
-	return nil
+	finalBytes := fileBuffer.Bytes()
+	
+	// Count tokens using the real tokenizer
+	c.TokenCount += tokenizer.CountTokens(string(finalBytes))
+
+	_, err = c.file.Write(finalBytes)
+	return err
 }
 
 func (c *ConcatStrategy) Close() error {
@@ -138,8 +141,8 @@ func (c *CopyStrategy) Write(absPath, relPath string) error {
 	defer src.Close()
 	dst, _ := os.Create(targetPath)
 	defer dst.Close()
-	io.Copy(dst, src)
-	return nil
+	_, err := io.Copy(dst, src)
+	return err
 }
 
 func (c *CopyStrategy) Close() error { return nil }
@@ -208,4 +211,3 @@ func (t *TreeStrategy) Close() error {
 	fmt.Println()
 	return nil
 }
-
