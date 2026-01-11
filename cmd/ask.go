@@ -22,6 +22,7 @@ var (
 	askModel  string
 	focusFile string
 	smartMode bool
+	rawOutput bool // New flag to suppress headers for piping
 )
 
 type PathCollector struct {
@@ -79,7 +80,6 @@ func validateFocusFiles(focusList string) ([]string, error) {
 	return validated, nil
 }
 
-// Phase 1.2: Added context parameter to allow cancellation
 func callLLMForPaths(ctx context.Context, apiKey, model, sysMsg, userMsg string) []string {
 	client := openrouter.NewClient(apiKey)
 	req := openrouter.ChatCompletionRequest{
@@ -91,7 +91,6 @@ func callLLMForPaths(ctx context.Context, apiKey, model, sysMsg, userMsg string)
 		ResponseFormat: &openrouter.ResponseFormat{Type: "json_object"},
 	}
 
-	// Use passed context instead of Background()
 	resp, err := client.CreateChatCompletion(ctx, req)
 	if err != nil {
 		appLogger.Warn(fmt.Sprintf("Smart planning failed (API error or cancellation): %v. Falling back to normal scan.", err))
@@ -109,6 +108,7 @@ func callLLMForPaths(ctx context.Context, apiKey, model, sysMsg, userMsg string)
 	}
 
 	content := strings.TrimSpace(contentStr)
+	// Strip markdown code fences if present
 	if strings.HasPrefix(content, "```json") {
 		content = strings.TrimPrefix(content, "```json")
 		content = strings.TrimSuffix(content, "```")
@@ -143,16 +143,18 @@ var askCmd = &cobra.Command{
 
 		apiKey, err := validateAPIKey()
 		if err != nil {
-			fmt.Println("\n💡 To fix this:")
-			fmt.Println("   1. Get your API key from https://openrouter.ai/settings/keys")
-			fmt.Println("   2. Set it: export OPENROUTER_API_KEY=your_key_here")
-			fmt.Println("   3. Or create a .env file with: OPENROUTER_API_KEY=your_key_here")
-			fmt.Println("\n⚠️  WARNING: Never commit your API key!")
+			// Only show help text if we aren't in raw mode (to keep stderr clean-ish)
+			if !rawOutput {
+				fmt.Fprintln(os.Stderr, "\n💡 To fix this:")
+				fmt.Fprintln(os.Stderr, "   1. Get your API key from https://openrouter.ai/settings/keys")
+				fmt.Fprintln(os.Stderr, "   2. Set it: export OPENROUTER_API_KEY=your_key_here")
+				fmt.Fprintln(os.Stderr, "   3. Or create a .env file with: OPENROUTER_API_KEY=your_key_here")
+				fmt.Fprintln(os.Stderr, "\n⚠️  WARNING: Never commit your API key!")
+			}
 			return err
 		}
 		appLogger.Info("API key validated")
 
-		// Phase 1.2: Propagate command context (handles Ctrl+C)
 		ctx := cmd.Context()
 
 		if smartMode && focusFile == "" {
@@ -174,7 +176,6 @@ var askCmd = &cobra.Command{
 
 			s := scanner.NewScanner(absSrc, collector, cfg, appLogger)
 
-			// Scan uses ctx
 			if err := s.Scan(ctx); err == nil && len(collector.Paths) > 0 {
 				fileList := strings.Join(collector.Paths, "\n")
 				appLogger.Info(fmt.Sprintf("Found %d files. Asking AI to select relevant ones...", len(collector.Paths)))
@@ -187,7 +188,6 @@ If no specific code is needed, return { "files": [] }.`
 
 				userMsg := fmt.Sprintf("Files:\n%s\n\nQuery: %s", fileList, query)
 
-				// Pass context to AI call
 				selectedFiles := callLLMForPaths(ctx, apiKey, askModel, sysMsg, userMsg)
 
 				if len(selectedFiles) > 0 {
@@ -201,7 +201,6 @@ If no specific code is needed, return { "files": [] }.`
 			}
 		}
 
-		// Check context before heavy lifting
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -241,7 +240,8 @@ If no specific code is needed, return { "files": [] }.`
 					abs, err := filepath.Abs(f)
 					if err == nil {
 						rel, _ := filepath.Rel(".", abs)
-						fmt.Printf("   + %s\n", rel)
+						// Use Logger instead of fmt.Printf
+						appLogger.Info(fmt.Sprintf("   + %s", rel))
 						if err := w.Write(abs, rel); err != nil {
 							appLogger.Warn(fmt.Sprintf("Failed to write %s: %v", rel, err))
 						}
@@ -264,7 +264,6 @@ If no specific code is needed, return { "files": [] }.`
 
 			s := scanner.NewScanner(absSrc, w, cfg, appLogger)
 
-			// Scan uses ctx
 			if err := s.Scan(ctx); err != nil {
 				return fmt.Errorf("scan failed: %w", err)
 			}
@@ -310,7 +309,6 @@ If no specific code is needed, return { "files": [] }.`
 
 		appLogger.Info(fmt.Sprintf("Sending request to model: %s", askModel))
 
-		// Phase 1.2: Stream uses ctx
 		stream, err := client.CreateChatCompletionStream(ctx, req)
 		if err != nil {
 			appLogger.Error(fmt.Sprintf("API Error: %v", err))
@@ -319,8 +317,11 @@ If no specific code is needed, return { "files": [] }.`
 		}
 		defer stream.Close()
 
-		fmt.Println("\n🤖 AI Response:")
-		fmt.Println(strings.Repeat("─", 60))
+		// ONLY Print headers if NOT in raw mode
+		if !rawOutput {
+			fmt.Println("\n🤖 AI Response:")
+			fmt.Println(strings.Repeat("─", 60))
+		}
 
 		for {
 			resp, err := stream.Recv()
@@ -334,7 +335,11 @@ If no specific code is needed, return { "files": [] }.`
 				}
 			}
 		}
-		fmt.Println()
+
+		if !rawOutput {
+			fmt.Println()
+		}
+
 		appLogger.Info("Response streaming completed")
 		return nil
 	},
@@ -345,5 +350,6 @@ func init() {
 	askCmd.Flags().StringVarP(&askModel, "model", "m", constants.DefaultModel, "Model ID")
 	askCmd.Flags().StringVarP(&focusFile, "focus", "f", "", "Comma-separated list of files to scan")
 	askCmd.Flags().BoolVarP(&smartMode, "smart", "S", false, "Use AI to intelligently select relevant files")
+	// NEW FLAG
+	askCmd.Flags().BoolVarP(&rawOutput, "raw", "r", false, "Output only the raw AI response (no headers) for piping")
 }
-

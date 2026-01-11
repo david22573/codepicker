@@ -112,9 +112,11 @@ var rootCmd = &cobra.Command{
 			return err
 		}
 
-		fmt.Printf("📦 Output: %s\n", absOut)
+		// It is safe to print the final output location to Stdout for the main command,
+		// but using appLogger ensures it doesn't break pipelines if someone does `codepicker | ...`
+		appLogger.Info(fmt.Sprintf("Output: %s", absOut))
 		if showTokens {
-			fmt.Printf("🔢 Token Count: %d\n", w.TokenCount)
+			appLogger.Info(fmt.Sprintf("Token Count: %d", w.TokenCount))
 		}
 		return nil
 	},
@@ -165,13 +167,8 @@ func applyConfig(cmd *cobra.Command, cfgFile *config.ConfigFile) {
 }
 
 func runScan(ctx context.Context, w writer.OutputStrategy, absSrc string, cmd *cobra.Command) error {
-	// FIX: Added lifecycle management here for commands that use this helper.
-	if err := w.Init(); err != nil {
-		return fmt.Errorf("failed to initialize writer: %w", err)
-	}
-	defer w.Close()
-
 	start := time.Now()
+	// Change: Use appLogger (Stderr) instead of fmt.Printf (Stdout)
 	appLogger.Info(fmt.Sprintf("Scanning directory: %s", absSrc))
 
 	cfg := config.NewConfig()
@@ -193,15 +190,16 @@ func runScan(ctx context.Context, w writer.OutputStrategy, absSrc string, cmd *c
 	}
 
 	if w.Name() != "Tree" {
-		fmt.Printf("🚇 Scanning: %s\n", absSrc)
+		// Change: Use appLogger (Stderr)
+		appLogger.Info(fmt.Sprintf("Scanning: %s", absSrc))
 		if hasDiff {
-			fmt.Printf("🔄 Diff Mode: %s\n", diffRef)
+			appLogger.Info(fmt.Sprintf("Diff Mode: %s", diffRef))
 		}
 		if includeExts != "" {
-			fmt.Printf("➕ Including: %s\n", includeExts)
+			appLogger.Info(fmt.Sprintf("Including: %s", includeExts))
 		}
 		if minify {
-			fmt.Println("✂️  Minification enabled (AST-based)")
+			appLogger.Info("Minification enabled (AST-based)")
 		}
 	}
 
@@ -227,7 +225,7 @@ func runScan(ctx context.Context, w writer.OutputStrategy, absSrc string, cmd *c
 
 	if w.Name() != "Tree" {
 		elapsed := time.Since(start)
-		fmt.Printf("✅ Done in %v\n", elapsed)
+		// Change: Use appLogger (Stderr)
 		appLogger.Debug(fmt.Sprintf("Scan completed in %v", elapsed))
 	}
 	return nil
@@ -236,4 +234,3 @@ func runScan(ctx context.Context, w writer.OutputStrategy, absSrc string, cmd *c
 func flagChanged(flags interface{ Changed(string) bool }, name string) bool {
 	return flags.Changed(name)
 }
-
