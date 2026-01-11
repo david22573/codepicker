@@ -31,7 +31,6 @@ func NewScanner(root string, w writer.OutputStrategy, cfg *config.Config, log lo
 		Logger: log,
 	}
 
-	// Initialize Output Strategy (Create file/folder)
 	if err := s.Writer.Init(); err != nil {
 		s.Logger.Error(fmt.Sprintf("Failed to init writer: %v", err))
 	}
@@ -58,8 +57,8 @@ func (s *Scanner) SetWhitelist(files map[string]bool) {
 }
 
 func (s *Scanner) Scan(ctx context.Context) error {
-	// Ensure Writer is closed when scan finishes
-	defer s.Writer.Close()
+	// FIX: Removed "defer s.Writer.Close()" to prevent double-closing in the daemon.
+	// The caller is now responsible for closing the writer.
 
 	return filepath.WalkDir(s.Root, func(path string, d os.DirEntry, err error) error {
 		select {
@@ -81,7 +80,6 @@ func (s *Scanner) Scan(ctx context.Context) error {
 			return nil
 		}
 
-		// 1. Check if Writer wants to skip this file (e.g. it is the output file)
 		if s.Writer.ShouldSkip(path) {
 			if d.IsDir() {
 				return filepath.SkipDir
@@ -91,7 +89,6 @@ func (s *Scanner) Scan(ctx context.Context) error {
 
 		cleanRel := filepath.ToSlash(relPath)
 
-		// 2. Whitelist Check (Git Diff mode)
 		if s.Whitelist != nil {
 			if !d.IsDir() {
 				if !s.Whitelist[cleanRel] {
@@ -100,7 +97,6 @@ func (s *Scanner) Scan(ctx context.Context) error {
 			}
 		}
 
-		// 3. Ignore Files Check
 		if s.GitIgnore != nil && s.GitIgnore.MatchesPath(relPath) {
 			if d.IsDir() {
 				return filepath.SkipDir
@@ -114,7 +110,6 @@ func (s *Scanner) Scan(ctx context.Context) error {
 			return nil
 		}
 
-		// 4. Config Exclusion Check
 		if d.IsDir() {
 			if strings.HasPrefix(d.Name(), ".") && d.Name() != "." {
 				return filepath.SkipDir
@@ -125,7 +120,6 @@ func (s *Scanner) Scan(ctx context.Context) error {
 			return nil
 		}
 
-		// 5. Extension Check
 		ext := strings.ToLower(filepath.Ext(path))
 		name := strings.ToLower(d.Name())
 		if !s.Config.AllowedExts[ext] && !config.IsSpecialFile(name) {
@@ -139,3 +133,4 @@ func (s *Scanner) Scan(ctx context.Context) error {
 		return s.Writer.Write(path, relPath)
 	})
 }
+

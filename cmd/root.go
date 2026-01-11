@@ -27,6 +27,7 @@ var (
 	configFile  string
 	verbose     bool
 	diffRef     string
+	overwrite   bool // NEW: Flag to control overwriting
 )
 
 var appLogger logger.Logger
@@ -106,8 +107,20 @@ var rootCmd = &cobra.Command{
 			return fmt.Errorf("cannot write context to source directory root")
 		}
 
-		// FIX: Pass 'showTokens' to the writer so it knows whether to run the tokenizer
+		// NEW: Check if output file exists and handle overwrite logic
+		if _, err := os.Stat(absOut); err == nil {
+			if !overwrite {
+				appLogger.Warn(fmt.Sprintf("Output file already exists: %s", absOut))
+				appLogger.Info("Use -y to overwrite. Aborting.")
+				return nil
+			}
+			appLogger.Info("Overwriting existing output file...")
+		}
+
 		w := writer.NewConcatStrategy(absOut, minify, showTokens)
+
+		// FIX: Manually close the writer now that Scanner doesn't do it automatically.
+		defer w.Close()
 
 		if err := runScan(cmd.Context(), w, absSrc, cmd); err != nil {
 			return err
@@ -138,6 +151,10 @@ func init() {
 	rootCmd.Flags().StringVarP(&ignoreDirs, "exclude", "e", "", "Comma-separated directories to exclude")
 	rootCmd.Flags().StringVarP(&diffRef, "diff", "d", "", "Scan only changed files (e.g. 'main', 'HEAD~1', or empty for staged/unstaged)")
 	rootCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose logging")
+
+	// NEW: Register the overwrite flag
+	rootCmd.Flags().BoolVarP(&overwrite, "yes", "y", false, "Overwrite output file if it exists")
+
 	rootCmd.PersistentFlags().StringVarP(&configFile, "config", "c", "", "Config file path (default: .codepicker.yml)")
 }
 
