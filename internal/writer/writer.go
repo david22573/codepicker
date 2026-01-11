@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,8 +16,6 @@ import (
 	"github.com/david22573/codepicker/internal/tokenizer"
 )
 
-// --- Interfaces ---
-
 type OutputStrategy interface {
 	Init() error
 	Write(absPath, relPath string) error
@@ -24,8 +23,6 @@ type OutputStrategy interface {
 	ShouldSkip(path string) bool
 	Name() string
 }
-
-// --- Concat Strategy (Combines files into one) ---
 
 type ConcatStrategy struct {
 	OutputPath    string
@@ -63,8 +60,6 @@ func (c *ConcatStrategy) Init() error {
 }
 
 func (c *ConcatStrategy) ShouldSkip(path string) bool {
-	// FIX: Robust check. Convert the candidate path to absolute
-	// so we don't accidentally scan our own output file.
 	absCandidate, err := filepath.Abs(path)
 	if err != nil {
 		return false
@@ -84,12 +79,31 @@ func (c *ConcatStrategy) Write(absPath, relPath string) error {
 		return err
 	}
 
+	// Sniff for binary content
+	buffer := make([]byte, 512)
+	n, err := f.Read(buffer)
+	if err != nil && err != io.EOF {
+		return err
+	}
+
+	// Reset file pointer to beginning
+	if _, err := f.Seek(0, 0); err != nil {
+		return err
+	}
+
+	contentType := http.DetectContentType(buffer[:n])
+	isBinary := strings.HasPrefix(contentType, "application/octet-stream")
+
+	if n > 0 && isBinary {
+		fmt.Printf("⚠️  Skipping binary file detected: %s (%s)\n", relPath, contentType)
+		return nil
+	}
+
 	if info.Size() > constants.MaxFileSize {
 		fmt.Printf("⚠️  Skipping large file (>%dMB): %s\n", constants.MaxFileSize/(1024*1024), relPath)
 		return nil
 	}
 
-	// Read file into memory (Safe on Termux)
 	content, err := io.ReadAll(io.LimitReader(f, constants.MaxFileSize))
 	if err != nil {
 		return err
@@ -136,8 +150,6 @@ func (c *ConcatStrategy) Close() error {
 	return nil
 }
 
-// --- Copy Strategy (Copies files preserving structure) ---
-
 type CopyStrategy struct {
 	OutputDir string
 }
@@ -153,7 +165,6 @@ func (c *CopyStrategy) Init() error {
 }
 
 func (c *CopyStrategy) ShouldSkip(path string) bool {
-	// Prevent copying the output folder into itself
 	rel, err := filepath.Rel(c.OutputDir, path)
 	if err != nil {
 		return false
@@ -180,9 +191,6 @@ func (c *CopyStrategy) Write(absPath, relPath string) error {
 	}
 	defer dst.Close()
 
-	// FIX: CRITICAL FOR TERMUX/ANDROID
-	// io.Copy uses 'sendfile' syscall which fails on Android with "invalid argument".
-	// io.CopyBuffer forces a userspace copy which is 100% compatible.
 	buf := make([]byte, 32*1024)
 	if _, err := io.CopyBuffer(dst, src, buf); err != nil {
 		return fmt.Errorf("failed to copy content to %s: %w", targetPath, err)
@@ -192,8 +200,6 @@ func (c *CopyStrategy) Write(absPath, relPath string) error {
 }
 
 func (c *CopyStrategy) Close() error { return nil }
-
-// --- Tree Strategy (Visual tree) ---
 
 type TreeOptions struct {
 	CopyToClipboard bool
@@ -223,7 +229,6 @@ func (t *TreeStrategy) Init() error {
 
 func (t *TreeStrategy) ShouldSkip(path string) bool {
 	if t.opts.OutPath != "" {
-		// Use suffix check as a simple heuristic
 		return strings.HasSuffix(path, t.opts.OutPath)
 	}
 	return false

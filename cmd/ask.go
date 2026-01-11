@@ -13,6 +13,7 @@ import (
 	"github.com/david22573/codepicker/internal/constants"
 	"github.com/david22573/codepicker/internal/paths"
 	"github.com/david22573/codepicker/internal/scanner"
+	"github.com/david22573/codepicker/internal/tokenizer"
 	"github.com/david22573/codepicker/internal/writer"
 	"github.com/david22573/codepicker/pkg/openrouter"
 	"github.com/spf13/cobra"
@@ -22,7 +23,7 @@ var (
 	askModel  string
 	focusFile string
 	smartMode bool
-	rawOutput bool // New flag to suppress headers for piping
+	rawOutput bool
 )
 
 type PathCollector struct {
@@ -34,51 +35,6 @@ func (p *PathCollector) Write(abs, rel string) error { p.Paths = append(p.Paths,
 func (p *PathCollector) Close() error                { return nil }
 func (p *PathCollector) ShouldSkip(path string) bool { return false }
 func (p *PathCollector) Name() string                { return "Collector" }
-
-func validateAPIKey() (string, error) {
-	apiKey := os.Getenv("OPENROUTER_API_KEY")
-
-	if apiKey == "" {
-		return "", fmt.Errorf("OPENROUTER_API_KEY environment variable is not set")
-	}
-
-	if len(apiKey) < constants.MinAPIKeyLength {
-		return "", fmt.Errorf("API key appears invalid (length < %d)", constants.MinAPIKeyLength)
-	}
-
-	return apiKey, nil
-}
-
-func validateFocusFiles(focusList string) ([]string, error) {
-	if focusList == "" {
-		return nil, nil
-	}
-
-	files := strings.Split(focusList, ",")
-	var validated []string
-
-	for _, f := range files {
-		clean, err := paths.Sanitize(f)
-		if err != nil {
-			return nil, fmt.Errorf("invalid focus file path '%s': %w", f, err)
-		}
-
-		info, err := os.Stat(clean)
-		if err != nil {
-			appLogger.Warn(fmt.Sprintf("Focus file not found (skipping): %s", clean))
-			continue
-		}
-
-		if info.IsDir() {
-			return nil, fmt.Errorf("focus file is a directory (use -s for directories): %s", clean)
-		}
-
-		validated = append(validated, clean)
-		appLogger.Debug(fmt.Sprintf("Validated focus file: %s", clean))
-	}
-
-	return validated, nil
-}
 
 func callLLMForPaths(ctx context.Context, apiKey, model, sysMsg, userMsg string) []string {
 	client := openrouter.NewClient(apiKey)
@@ -108,7 +64,7 @@ func callLLMForPaths(ctx context.Context, apiKey, model, sysMsg, userMsg string)
 	}
 
 	content := strings.TrimSpace(contentStr)
-	// Strip markdown code fences if present
+
 	if strings.HasPrefix(content, "```json") {
 		content = strings.TrimPrefix(content, "```json")
 		content = strings.TrimSuffix(content, "```")
@@ -143,7 +99,6 @@ var askCmd = &cobra.Command{
 
 		apiKey, err := validateAPIKey()
 		if err != nil {
-			// Only show help text if we aren't in raw mode (to keep stderr clean-ish)
 			if !rawOutput {
 				fmt.Fprintln(os.Stderr, "\n💡 To fix this:")
 				fmt.Fprintln(os.Stderr, "   1. Get your API key from https://openrouter.ai/settings/keys")
@@ -157,7 +112,7 @@ var askCmd = &cobra.Command{
 
 		ctx := cmd.Context()
 
-		if smartMode && focusFile == "" {
+		if smartMode {
 			appLogger.Info("🧠 Smart mode enabled: Planning context...")
 
 			absSrc, err := paths.Sanitize(srcDir)
@@ -191,8 +146,40 @@ If no specific code is needed, return { "files": [] }.`
 				selectedFiles := callLLMForPaths(ctx, apiKey, askModel, sysMsg, userMsg)
 
 				if len(selectedFiles) > 0 {
-					focusFile = strings.Join(selectedFiles, ",")
+					aiFiles := strings.Join(selectedFiles, ",")
+
+					if focusFile != "" {
+						focusFile = focusFile + "," + aiFiles
+					} else {
+						focusFile = aiFiles
+					}
 					appLogger.Info(fmt.Sprintf("🤖 AI selected %d files: %v", len(selectedFiles), selectedFiles))
+
+					// Token Estimation Logic
+					client := openrouter.NewClient(apiKey)
+					modelInfo, err := client.GetModelInfo(ctx, askModel)
+					if err == nil {
+						var totalTokens int
+						for _, f := range selectedFiles {
+							content, err := os.ReadFile(f)
+							if err == nil {
+								totalTokens += tokenizer.CountTokens(string(content))
+							}
+						}
+
+						// Buffer for system prompt (~1000 tokens) + output
+						estimatedTotal := totalTokens + 1000
+						limit := modelInfo.ContextLength
+
+						appLogger.Info(fmt.Sprintf("📊 Estimated context: %d tokens (Model limit: %d)", totalTokens, limit))
+
+						if limit > 0 && estimatedTotal > limit {
+							appLogger.Warn(fmt.Sprintf("⚠️  WARNING: Context size (%d) exceeds model limit (%d). Output may be truncated.", estimatedTotal, limit))
+						} else if limit > 0 && float64(estimatedTotal) > float64(limit)*0.9 {
+							appLogger.Warn(fmt.Sprintf("⚠️  WARNING: Approaching model context limit (%d%% used).", int(float64(estimatedTotal)/float64(limit)*100)))
+						}
+					}
+
 				} else {
 					appLogger.Info("🤖 AI decided no files are needed (or failed to pick), proceeding with full context.")
 				}
@@ -240,7 +227,7 @@ If no specific code is needed, return { "files": [] }.`
 					abs, err := filepath.Abs(f)
 					if err == nil {
 						rel, _ := filepath.Rel(".", abs)
-						// Use Logger instead of fmt.Printf
+
 						appLogger.Info(fmt.Sprintf("   + %s", rel))
 						if err := w.Write(abs, rel); err != nil {
 							appLogger.Warn(fmt.Sprintf("Failed to write %s: %v", rel, err))
@@ -278,7 +265,10 @@ If no specific code is needed, return { "files": [] }.`
 			return fmt.Errorf("failed to read context: %w", err)
 		}
 
-		if len(contextBytes) == 0 && !smartMode {
+		if len(contextBytes) == 0 {
+			if smartMode {
+				return fmt.Errorf("smart mode yielded no relevant files (try standard mode or broader query)")
+			}
 			return fmt.Errorf("no context generated (check your filters)")
 		}
 
@@ -317,7 +307,6 @@ If no specific code is needed, return { "files": [] }.`
 		}
 		defer stream.Close()
 
-		// ONLY Print headers if NOT in raw mode
 		if !rawOutput {
 			fmt.Println("\n🤖 AI Response:")
 			fmt.Println(strings.Repeat("─", 60))
@@ -350,7 +339,5 @@ func init() {
 	askCmd.Flags().StringVarP(&askModel, "model", "m", constants.DefaultModel, "Model ID")
 	askCmd.Flags().StringVarP(&focusFile, "focus", "f", "", "Comma-separated list of files to scan")
 	askCmd.Flags().BoolVarP(&smartMode, "smart", "S", false, "Use AI to intelligently select relevant files")
-	// NEW FLAG
 	askCmd.Flags().BoolVarP(&rawOutput, "raw", "r", false, "Output only the raw AI response (no headers) for piping")
 }
-

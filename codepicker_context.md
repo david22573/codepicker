@@ -62,6 +62,7 @@ import (
 	"github.com/david22573/codepicker/internal/constants"
 	"github.com/david22573/codepicker/internal/paths"
 	"github.com/david22573/codepicker/internal/scanner"
+	"github.com/david22573/codepicker/internal/tokenizer"
 	"github.com/david22573/codepicker/internal/writer"
 	"github.com/david22573/codepicker/pkg/openrouter"
 	"github.com/spf13/cobra"
@@ -71,7 +72,7 @@ var (
 	askModel  string
 	focusFile string
 	smartMode bool
-	rawOutput bool // New flag to suppress headers for piping
+	rawOutput bool
 )
 
 type PathCollector struct {
@@ -83,51 +84,6 @@ func (p *PathCollector) Write(abs, rel string) error { p.Paths = append(p.Paths,
 func (p *PathCollector) Close() error                { return nil }
 func (p *PathCollector) ShouldSkip(path string) bool { return false }
 func (p *PathCollector) Name() string                { return "Collector" }
-
-func validateAPIKey() (string, error) {
-	apiKey := os.Getenv("OPENROUTER_API_KEY")
-
-	if apiKey == "" {
-		return "", fmt.Errorf("OPENROUTER_API_KEY environment variable is not set")
-	}
-
-	if len(apiKey) < constants.MinAPIKeyLength {
-		return "", fmt.Errorf("API key appears invalid (length < %d)", constants.MinAPIKeyLength)
-	}
-
-	return apiKey, nil
-}
-
-func validateFocusFiles(focusList string) ([]string, error) {
-	if focusList == "" {
-		return nil, nil
-	}
-
-	files := strings.Split(focusList, ",")
-	var validated []string
-
-	for _, f := range files {
-		clean, err := paths.Sanitize(f)
-		if err != nil {
-			return nil, fmt.Errorf("invalid focus file path '%s': %w", f, err)
-		}
-
-		info, err := os.Stat(clean)
-		if err != nil {
-			appLogger.Warn(fmt.Sprintf("Focus file not found (skipping): %s", clean))
-			continue
-		}
-
-		if info.IsDir() {
-			return nil, fmt.Errorf("focus file is a directory (use -s for directories): %s", clean)
-		}
-
-		validated = append(validated, clean)
-		appLogger.Debug(fmt.Sprintf("Validated focus file: %s", clean))
-	}
-
-	return validated, nil
-}
 
 func callLLMForPaths(ctx context.Context, apiKey, model, sysMsg, userMsg string) []string {
 	client := openrouter.NewClient(apiKey)
@@ -192,7 +148,6 @@ var askCmd = &cobra.Command{
 
 		apiKey, err := validateAPIKey()
 		if err != nil {
-
 			if !rawOutput {
 				fmt.Fprintln(os.Stderr, "\n💡 To fix this:")
 				fmt.Fprintln(os.Stderr, "   1. Get your API key from https://openrouter.ai/settings/keys")
@@ -206,7 +161,7 @@ var askCmd = &cobra.Command{
 
 		ctx := cmd.Context()
 
-		if smartMode && focusFile == "" {
+		if smartMode {
 			appLogger.Info("🧠 Smart mode enabled: Planning context...")
 
 			absSrc, err := paths.Sanitize(srcDir)
@@ -240,8 +195,38 @@ If no specific code is needed, return { "files": [] }.`
 				selectedFiles := callLLMForPaths(ctx, apiKey, askModel, sysMsg, userMsg)
 
 				if len(selectedFiles) > 0 {
-					focusFile = strings.Join(selectedFiles, ",")
+					aiFiles := strings.Join(selectedFiles, ",")
+
+					if focusFile != "" {
+						focusFile = focusFile + "," + aiFiles
+					} else {
+						focusFile = aiFiles
+					}
 					appLogger.Info(fmt.Sprintf("🤖 AI selected %d files: %v", len(selectedFiles), selectedFiles))
+
+					client := openrouter.NewClient(apiKey)
+					modelInfo, err := client.GetModelInfo(ctx, askModel)
+					if err == nil {
+						var totalTokens int
+						for _, f := range selectedFiles {
+							content, err := os.ReadFile(f)
+							if err == nil {
+								totalTokens += tokenizer.CountTokens(string(content))
+							}
+						}
+
+						estimatedTotal := totalTokens + 1000
+						limit := modelInfo.ContextLength
+
+						appLogger.Info(fmt.Sprintf("📊 Estimated context: %d tokens (Model limit: %d)", totalTokens, limit))
+
+						if limit > 0 && estimatedTotal > limit {
+							appLogger.Warn(fmt.Sprintf("⚠️  WARNING: Context size (%d) exceeds model limit (%d). Output may be truncated.", estimatedTotal, limit))
+						} else if limit > 0 && float64(estimatedTotal) > float64(limit)*0.9 {
+							appLogger.Warn(fmt.Sprintf("⚠️  WARNING: Approaching model context limit (%d%% used).", int(float64(estimatedTotal)/float64(limit)*100)))
+						}
+					}
+
 				} else {
 					appLogger.Info("🤖 AI decided no files are needed (or failed to pick), proceeding with full context.")
 				}
@@ -327,7 +312,10 @@ If no specific code is needed, return { "files": [] }.`
 			return fmt.Errorf("failed to read context: %w", err)
 		}
 
-		if len(contextBytes) == 0 && !smartMode {
+		if len(contextBytes) == 0 {
+			if smartMode {
+				return fmt.Errorf("smart mode yielded no relevant files (try standard mode or broader query)")
+			}
 			return fmt.Errorf("no context generated (check your filters)")
 		}
 
@@ -398,8 +386,200 @@ func init() {
 	askCmd.Flags().StringVarP(&askModel, "model", "m", constants.DefaultModel, "Model ID")
 	askCmd.Flags().StringVarP(&focusFile, "focus", "f", "", "Comma-separated list of files to scan")
 	askCmd.Flags().BoolVarP(&smartMode, "smart", "S", false, "Use AI to intelligently select relevant files")
-
 	askCmd.Flags().BoolVarP(&rawOutput, "raw", "r", false, "Output only the raw AI response (no headers) for piping")
+}
+```
+
+## File: cmd/chat.go
+```go
+package cmd
+
+import (
+	"bufio"
+	"fmt"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/david22573/codepicker/internal/constants"
+	"github.com/david22573/codepicker/internal/contextgen"
+	"github.com/david22573/codepicker/pkg/openrouter"
+	"github.com/spf13/cobra"
+)
+
+var chatModel string
+
+var chatCmd = &cobra.Command{
+	Use:   "chat",
+	Short: "Start an interactive chat session with your codebase",
+	RunE: func(cmd *cobra.Command, args []string) error {
+
+		apiKey, err := validateAPIKey()
+		if err != nil {
+			return err
+		}
+
+		appLogger.Info("Analyzing codebase...")
+
+		focusList, err := validateFocusFiles(focusFile)
+		if err != nil {
+			return err
+		}
+
+		opts := contextgen.Options{
+			SrcDir:      srcDir,
+			FocusFiles:  focusList,
+			Minify:      minify,
+			IncludeExts: includeExts,
+			IgnoreDirs:  ignoreDirs,
+		}
+
+		codeContext, err := contextgen.Generate(cmd.Context(), opts, appLogger)
+		if err != nil {
+			return err
+		}
+
+		appLogger.Info(fmt.Sprintf("Context loaded (%d chars). Starting chat...", len(codeContext)))
+		fmt.Println("\n💬 Interactive Chat Mode (type 'exit' to quit)")
+		fmt.Println(strings.Repeat("─", 60))
+
+		client := openrouter.NewClient(apiKey)
+		history := []openrouter.ChatMessage{
+			{
+				Role: "system",
+				Content: fmt.Sprintf("You are an expert coding assistant. Date: %s.\nCodebase Context:\n%s",
+					time.Now().Format("2006-01-02"), codeContext),
+			},
+			{Role: "assistant", Content: "I've analyzed your code. What would you like to know?"},
+		}
+
+		scanner := bufio.NewScanner(os.Stdin)
+		for {
+			fmt.Print("\n👉 You: ")
+			if !scanner.Scan() {
+				break
+			}
+
+			input := strings.TrimSpace(scanner.Text())
+			if input == "" {
+				continue
+			}
+			if input == "exit" || input == "quit" {
+				break
+			}
+
+			history = append(history, openrouter.ChatMessage{Role: "user", Content: input})
+
+			req := openrouter.ChatCompletionRequest{
+				Model:    chatModel,
+				Messages: history,
+				Stream:   true,
+			}
+
+			fmt.Print("🤖 AI: ")
+			stream, err := client.CreateChatCompletionStream(cmd.Context(), req)
+			if err != nil {
+				appLogger.Error(fmt.Sprintf("Stream error: %v", err))
+				continue
+			}
+
+			var responseBuf strings.Builder
+			for {
+				resp, err := stream.Recv()
+				if err != nil {
+					break
+				}
+				if len(resp.Choices) > 0 {
+					if content, ok := resp.Choices[0].Delta.Content.(string); ok {
+						fmt.Print(content)
+						responseBuf.WriteString(content)
+					}
+				}
+			}
+			stream.Close()
+			fmt.Println()
+
+			history = append(history, openrouter.ChatMessage{Role: "assistant", Content: responseBuf.String()})
+		}
+		return nil
+	},
+}
+
+func init() {
+	rootCmd.AddCommand(chatCmd)
+	chatCmd.Flags().StringVarP(&chatModel, "model", "m", constants.DefaultModel, "Model ID")
+	chatCmd.Flags().StringVarP(&focusFile, "focus", "f", "", "Comma-separated list of files")
+}
+```
+
+## File: cmd/common.go
+```go
+package cmd
+
+import (
+	"fmt"
+	"os"
+	"strings"
+
+	"github.com/david22573/codepicker/internal/constants"
+	"github.com/david22573/codepicker/internal/paths"
+)
+
+func validateAPIKey() (string, error) {
+	apiKey := os.Getenv("OPENROUTER_API_KEY")
+
+	if apiKey == "" {
+		return "", fmt.Errorf("OPENROUTER_API_KEY environment variable is not set")
+	}
+
+	if len(apiKey) < constants.MinAPIKeyLength {
+		return "", fmt.Errorf("API key appears invalid (length < %d)", constants.MinAPIKeyLength)
+	}
+
+	return apiKey, nil
+}
+
+func validateFocusFiles(focusList string) ([]string, error) {
+	if focusList == "" {
+		return nil, nil
+	}
+
+	files := strings.Split(focusList, ",")
+	var validated []string
+
+	for _, f := range files {
+		f = strings.TrimSpace(f)
+		if f == "" {
+			continue
+		}
+
+		clean, err := paths.Sanitize(f)
+		if err != nil {
+			appLogger.Warn(fmt.Sprintf("Invalid focus file path '%s': %v (skipping)", f, err))
+			continue
+		}
+
+		if strings.Contains(clean, "/.git/") || strings.HasSuffix(clean, "/.git") {
+			appLogger.Warn(fmt.Sprintf("Refusing to focus on git internal file: %s", clean))
+			continue
+		}
+
+		info, err := os.Stat(clean)
+		if err != nil {
+			appLogger.Warn(fmt.Sprintf("Focus file not found (skipping): %s", clean))
+			continue
+		}
+
+		if info.IsDir() {
+			appLogger.Warn(fmt.Sprintf("Focus path is a directory (skipping, use source dir for full scan): %s", clean))
+			continue
+		}
+
+		validated = append(validated, clean)
+		appLogger.Debug(fmt.Sprintf("Validated focus file: %s", clean))
+	}
+
+	return validated, nil
 }
 ```
 
@@ -537,6 +717,7 @@ import (
 	"github.com/david22573/codepicker/internal/paths"
 	"github.com/david22573/codepicker/internal/scanner"
 	"github.com/david22573/codepicker/internal/writer"
+	"github.com/joho/godotenv" // Added for .env support
 	"github.com/spf13/cobra"
 )
 
@@ -550,7 +731,7 @@ var (
 	configFile  string
 	verbose     bool
 	diffRef     string
-	overwrite   bool // NEW: Flag to control overwriting
+	overwrite   bool
 )
 
 var appLogger logger.Logger
@@ -664,6 +845,11 @@ func Execute() {
 }
 
 func init() {
+
+	if err := godotenv.Load(); err != nil {
+
+	}
+
 	rootCmd.PersistentFlags().StringVarP(&srcDir, "src", "s", ".", "Source directory to scan")
 	rootCmd.Flags().StringVarP(&outPath, "out", "o", "", "Output file path (default: [dir_name]_context.md)")
 	rootCmd.Flags().BoolVarP(&showTokens, "tokens", "t", false, "Show precise token count (BPE)")
@@ -798,15 +984,14 @@ var serverState ServerState
 type AskRequest struct {
 	Query     string `json:"query"`
 	Model     string `json:"model"`
-	Focus     string `json:"focus"`     // Optional: Focus on a specific file
-	Overwrite bool   `json:"overwrite"` // True = Force regeneration (-y)
+	Focus     string `json:"focus"`
+	Overwrite bool   `json:"overwrite"`
 }
 
 var serveCmd = &cobra.Command{
 	Use:   "serve",
 	Short: "Start the codepicker daemon service",
 	RunE: func(cmd *cobra.Command, args []string) error {
-
 		if outPath == "" {
 			absSrc, _ := filepath.Abs(srcDir)
 			dirName := filepath.Base(absSrc)
@@ -816,9 +1001,30 @@ var serveCmd = &cobra.Command{
 		appLogger.Info(fmt.Sprintf("🚀 Daemon started on port %s", serverState.Port))
 		appLogger.Info(fmt.Sprintf("📂 Source: %s | 💾 Cache: %s", srcDir, outPath))
 
-		http.HandleFunc("/ask", handleAsk)
+		http.HandleFunc("/ask", enableCORS(handleAsk))
+
+		http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		})
+
 		return http.ListenAndServe(":"+serverState.Port, nil)
 	},
+}
+
+func enableCORS(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		next(w, r)
+	}
 }
 
 func handleAsk(w http.ResponseWriter, r *http.Request) {
@@ -829,7 +1035,13 @@ func handleAsk(w http.ResponseWriter, r *http.Request) {
 
 	var req AskRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid JSON body", http.StatusBadRequest)
+		appLogger.Error(fmt.Sprintf("Invalid JSON: %v", err))
+		http.Error(w, fmt.Sprintf("Invalid JSON body: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	if req.Query == "" {
+		http.Error(w, "Query cannot be empty", http.StatusBadRequest)
 		return
 	}
 
@@ -857,7 +1069,6 @@ func handleAsk(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-
 		status := "🔄 Cache Miss"
 		if req.Overwrite {
 			status = "🔨 Force Overwrite"
@@ -872,9 +1083,6 @@ func handleAsk(w http.ResponseWriter, r *http.Request) {
 
 		absSrc, _ := paths.Sanitize(srcDir)
 		cfg := config.NewConfig()
-		if includeExts != "" {
-
-		}
 
 		s := scanner.NewScanner(absSrc, wStrat, cfg, appLogger)
 		if err := s.Scan(r.Context()); err != nil {
@@ -893,7 +1101,6 @@ func handleAsk(w http.ResponseWriter, r *http.Request) {
 	contextType := "Codebase"
 	if req.Focus != "" {
 		contextType = "Active File"
-
 	}
 
 	systemMsg := fmt.Sprintf(
@@ -904,9 +1111,14 @@ func handleAsk(w http.ResponseWriter, r *http.Request) {
 
 	userMsg := fmt.Sprintf("Context:\n%s\n\nQuestion: %s", string(contextBytes), req.Query)
 
+	model := req.Model
+	if model == "" {
+		model = "xiaomi/mimo-v2-flash:free"
+	}
+
 	client := openrouter.NewClient(apiKey)
 	chatReq := openrouter.ChatCompletionRequest{
-		Model: req.Model,
+		Model: model,
 		Messages: []openrouter.ChatMessage{
 			{Role: "system", Content: systemMsg},
 			{Role: "user", Content: userMsg},
@@ -916,6 +1128,7 @@ func handleAsk(w http.ResponseWriter, r *http.Request) {
 
 	stream, err := client.CreateChatCompletionStream(r.Context(), chatReq)
 	if err != nil {
+		appLogger.Error(fmt.Sprintf("OpenRouter Error: %v", err))
 		http.Error(w, fmt.Sprintf("OpenRouter Error: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -927,6 +1140,13 @@ func handleAsk(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no")
 
 	for {
+		select {
+		case <-r.Context().Done():
+			appLogger.Info("Client disconnected, aborting stream.")
+			return
+		default:
+		}
+
 		resp, err := stream.Recv()
 		if err != nil {
 			break
@@ -1155,6 +1375,90 @@ const (
 	ContextHeader = "# Codebase Context Dump\n"
 	GeneratedBy   = "Generated by codepicker\n\n"
 )
+```
+
+## File: internal/contextgen/generator.go
+```go
+package contextgen
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/david22573/codepicker/internal/config"
+	"github.com/david22573/codepicker/internal/logger"
+	"github.com/david22573/codepicker/internal/paths"
+	"github.com/david22573/codepicker/internal/scanner"
+	"github.com/david22573/codepicker/internal/writer"
+)
+
+type Options struct {
+	SrcDir      string
+	FocusFiles  []string
+	Minify      bool
+	IncludeExts string
+	IgnoreDirs  string
+}
+
+func Generate(ctx context.Context, opts Options, log logger.Logger) (string, error) {
+
+	tmpFile, err := os.CreateTemp("", "codepicker_context_*.md")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	tmpFile.Close()
+	defer os.Remove(tmpPath)
+
+	w := writer.NewConcatStrategy(tmpPath, opts.Minify, false)
+	if err := w.Init(); err != nil {
+		return "", fmt.Errorf("failed to init writer: %w", err)
+	}
+
+	if len(opts.FocusFiles) > 0 {
+		log.Info(fmt.Sprintf("Focus mode: %d file(s) selected", len(opts.FocusFiles)))
+		for _, f := range opts.FocusFiles {
+			abs, _ := filepath.Abs(f)
+			rel, _ := filepath.Rel(".", abs)
+			if err := w.Write(abs, rel); err != nil {
+				log.Warn(fmt.Sprintf("Failed to write %s: %v", rel, err))
+			}
+		}
+	} else {
+
+		absSrc, err := paths.Sanitize(opts.SrcDir)
+		if err != nil {
+			return "", err
+		}
+
+		cfg := config.NewConfig()
+		if opts.IncludeExts != "" {
+			cfg.AddAllowedExtensions(strings.Split(opts.IncludeExts, ","))
+		}
+		if opts.IgnoreDirs != "" {
+			cfg.AddIgnoredDirs(strings.Split(opts.IgnoreDirs, ","))
+		}
+
+		s := scanner.NewScanner(absSrc, w, cfg, log)
+		if err := s.Scan(ctx); err != nil {
+			return "", err
+		}
+	}
+
+	if err := w.Close(); err != nil {
+		return "", err
+	}
+
+	content, err := os.ReadFile(tmpPath)
+	if err != nil {
+		return "", err
+	}
+
+	return string(content), nil
+}
 ```
 
 ## File: internal/errors/errors.go
@@ -2058,6 +2362,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -2113,7 +2418,6 @@ func (c *ConcatStrategy) Init() error {
 }
 
 func (c *ConcatStrategy) ShouldSkip(path string) bool {
-
 	absCandidate, err := filepath.Abs(path)
 	if err != nil {
 		return false
@@ -2131,6 +2435,24 @@ func (c *ConcatStrategy) Write(absPath, relPath string) error {
 	info, err := f.Stat()
 	if err != nil {
 		return err
+	}
+
+	buffer := make([]byte, 512)
+	n, err := f.Read(buffer)
+	if err != nil && err != io.EOF {
+		return err
+	}
+
+	if _, err := f.Seek(0, 0); err != nil {
+		return err
+	}
+
+	contentType := http.DetectContentType(buffer[:n])
+	isBinary := strings.HasPrefix(contentType, "application/octet-stream")
+
+	if n > 0 && isBinary {
+		fmt.Printf("⚠️  Skipping binary file detected: %s (%s)\n", relPath, contentType)
+		return nil
 	}
 
 	if info.Size() > constants.MaxFileSize {
@@ -2199,7 +2521,6 @@ func (c *CopyStrategy) Init() error {
 }
 
 func (c *CopyStrategy) ShouldSkip(path string) bool {
-
 	rel, err := filepath.Rel(c.OutputDir, path)
 	if err != nil {
 		return false
@@ -2264,7 +2585,6 @@ func (t *TreeStrategy) Init() error {
 
 func (t *TreeStrategy) ShouldSkip(path string) bool {
 	if t.opts.OutPath != "" {
-
 		return strings.HasSuffix(path, t.opts.OutPath)
 	}
 	return false
@@ -2475,7 +2795,7 @@ import (
 const (
 	defaultBaseURL = "https://openrouter.ai/api/v1"
 	contentType    = "application/json"
-	defaultTimeout = 30 * time.Second // Phase 1.1: Enforce sane default timeout
+	defaultTimeout = 30 * time.Second
 )
 
 type Client struct {
@@ -2516,7 +2836,6 @@ func NewClient(apiKey string, opts ...Option) *Client {
 	c := &Client{
 		apiKey:  apiKey,
 		baseURL: defaultBaseURL,
-
 		httpClient: &http.Client{
 			Timeout: defaultTimeout,
 		},
@@ -2525,6 +2844,20 @@ func NewClient(apiKey string, opts ...Option) *Client {
 		opt(c)
 	}
 	return c
+}
+
+func (c *Client) GetModelInfo(ctx context.Context, modelID string) (*Model, error) {
+	list, err := c.ListModels(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, m := range list.Data {
+		if m.ID == modelID {
+			return &m, nil
+		}
+	}
+	return nil, fmt.Errorf("model %s not found", modelID)
 }
 
 func (c *Client) ListModels(ctx context.Context) (*ListModelsResponse, error) {
@@ -2567,7 +2900,6 @@ func (c *Client) newRequest(ctx context.Context, method, path string, payload in
 func (c *Client) sendRequest(req *http.Request, v any) error {
 	res, err := c.httpClient.Do(req)
 	if err != nil {
-
 		if goerrors.Is(err, context.Canceled) || goerrors.Is(err, context.DeadlineExceeded) {
 			return err
 		}

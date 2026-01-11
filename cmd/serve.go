@@ -16,26 +16,23 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// ServerState holds configuration ensuring we respect flags passed during startup
 type ServerState struct {
 	Port string
 }
 
 var serverState ServerState
 
-// AskRequest defines the JSON payload from the Lua client
 type AskRequest struct {
 	Query     string `json:"query"`
 	Model     string `json:"model"`
-	Focus     string `json:"focus"`     // Optional: Focus on a specific file
-	Overwrite bool   `json:"overwrite"` // True = Force regeneration (-y)
+	Focus     string `json:"focus"`
+	Overwrite bool   `json:"overwrite"`
 }
 
 var serveCmd = &cobra.Command{
 	Use:   "serve",
 	Short: "Start the codepicker daemon service",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// Ensure output path defaults are set (logic borrowed from root.go)
 		if outPath == "" {
 			absSrc, _ := filepath.Abs(srcDir)
 			dirName := filepath.Base(absSrc)
@@ -45,9 +42,30 @@ var serveCmd = &cobra.Command{
 		appLogger.Info(fmt.Sprintf("🚀 Daemon started on port %s", serverState.Port))
 		appLogger.Info(fmt.Sprintf("📂 Source: %s | 💾 Cache: %s", srcDir, outPath))
 
-		http.HandleFunc("/ask", handleAsk)
+		http.HandleFunc("/ask", enableCORS(handleAsk))
+
+		http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		})
+
 		return http.ListenAndServe(":"+serverState.Port, nil)
 	},
+}
+
+func enableCORS(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		next(w, r)
+	}
 }
 
 func handleAsk(w http.ResponseWriter, r *http.Request) {
@@ -56,21 +74,24 @@ func handleAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. Parse Request
 	var req AskRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid JSON body", http.StatusBadRequest)
+		appLogger.Error(fmt.Sprintf("Invalid JSON: %v", err))
+		http.Error(w, fmt.Sprintf("Invalid JSON body: %v", err), http.StatusBadRequest)
 		return
 	}
 
-	// 2. Validate API Key
+	if req.Query == "" {
+		http.Error(w, "Query cannot be empty", http.StatusBadRequest)
+		return
+	}
+
 	apiKey := os.Getenv("OPENROUTER_API_KEY")
 	if apiKey == "" {
 		http.Error(w, "OPENROUTER_API_KEY not set on server", http.StatusUnauthorized)
 		return
 	}
 
-	// 3. Cache Logic
 	absOut, err := paths.Sanitize(outPath)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Invalid output path: %v", err), http.StatusInternalServerError)
@@ -81,7 +102,6 @@ func handleAsk(w http.ResponseWriter, r *http.Request) {
 	_, statErr := os.Stat(absOut)
 	cacheExists := statErr == nil
 
-	// IF cache exists AND we are NOT overwriting -> USE CACHE
 	if cacheExists && !req.Overwrite {
 		appLogger.Info("⚡ Cache Hit: Using existing context file")
 		contextBytes, err = os.ReadFile(absOut)
@@ -90,28 +110,20 @@ func handleAsk(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		// ELSE -> REGENERATE
 		status := "🔄 Cache Miss"
 		if req.Overwrite {
 			status = "🔨 Force Overwrite"
 		}
 		appLogger.Info(fmt.Sprintf("%s: Regenerating context...", status))
 
-		// Initialize Writer
 		wStrat := writer.NewConcatStrategy(absOut, minify, false)
 		if err := wStrat.Init(); err != nil {
 			http.Error(w, fmt.Sprintf("Writer init failed: %v", err), http.StatusInternalServerError)
 			return
 		}
 
-		// Initialize Scanner
 		absSrc, _ := paths.Sanitize(srcDir)
 		cfg := config.NewConfig()
-		if includeExts != "" {
-			// Apply include flags if they were passed to 'serve'
-			// Note: rudimentary parsing here, robust app might share config logic better
-			// For now, relies on global 'includeExts' being set by Cobra
-		}
 
 		s := scanner.NewScanner(absSrc, wStrat, cfg, appLogger)
 		if err := s.Scan(r.Context()); err != nil {
@@ -120,7 +132,6 @@ func handleAsk(w http.ResponseWriter, r *http.Request) {
 		}
 		wStrat.Close()
 
-		// Read the fresh file
 		contextBytes, err = os.ReadFile(absOut)
 		if err != nil {
 			http.Error(w, "Failed to read generated context", http.StatusInternalServerError)
@@ -128,12 +139,9 @@ func handleAsk(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 4. Construct Prompt
 	contextType := "Codebase"
 	if req.Focus != "" {
 		contextType = "Active File"
-		// If focusing, we might want to strictly limit context, 
-		// but for now we append the full context + focus instruction.
 	}
 
 	systemMsg := fmt.Sprintf(
@@ -144,10 +152,14 @@ func handleAsk(w http.ResponseWriter, r *http.Request) {
 
 	userMsg := fmt.Sprintf("Context:\n%s\n\nQuestion: %s", string(contextBytes), req.Query)
 
-	// 5. Stream Response from OpenRouter
+	model := req.Model
+	if model == "" {
+		model = "xiaomi/mimo-v2-flash:free"
+	}
+
 	client := openrouter.NewClient(apiKey)
 	chatReq := openrouter.ChatCompletionRequest{
-		Model: req.Model,
+		Model: model,
 		Messages: []openrouter.ChatMessage{
 			{Role: "system", Content: systemMsg},
 			{Role: "user", Content: userMsg},
@@ -157,18 +169,25 @@ func handleAsk(w http.ResponseWriter, r *http.Request) {
 
 	stream, err := client.CreateChatCompletionStream(r.Context(), chatReq)
 	if err != nil {
+		appLogger.Error(fmt.Sprintf("OpenRouter Error: %v", err))
 		http.Error(w, fmt.Sprintf("OpenRouter Error: %v", err), http.StatusInternalServerError)
 		return
 	}
 	defer stream.Close()
 
-	// Headers for streaming
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no") // Nginx-friendly
+	w.Header().Set("X-Accel-Buffering", "no")
 
 	for {
+		select {
+		case <-r.Context().Done():
+			appLogger.Info("Client disconnected, aborting stream.")
+			return
+		default:
+		}
+
 		resp, err := stream.Recv()
 		if err != nil {
 			break
@@ -191,3 +210,4 @@ func init() {
 	rootCmd.AddCommand(serveCmd)
 	serveCmd.Flags().StringVarP(&serverState.Port, "port", "p", "22573", "Port to listen on")
 }
+

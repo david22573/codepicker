@@ -17,7 +17,7 @@ import (
 const (
 	defaultBaseURL = "https://openrouter.ai/api/v1"
 	contentType    = "application/json"
-	defaultTimeout = 30 * time.Second // Phase 1.1: Enforce sane default timeout
+	defaultTimeout = 30 * time.Second
 )
 
 type Client struct {
@@ -58,7 +58,6 @@ func NewClient(apiKey string, opts ...Option) *Client {
 	c := &Client{
 		apiKey:  apiKey,
 		baseURL: defaultBaseURL,
-		// Phase 1.1: Initialize with a timeout to prevent hanging forever
 		httpClient: &http.Client{
 			Timeout: defaultTimeout,
 		},
@@ -67,6 +66,21 @@ func NewClient(apiKey string, opts ...Option) *Client {
 		opt(c)
 	}
 	return c
+}
+
+// GetModelInfo retrieves details for a specific model ID
+func (c *Client) GetModelInfo(ctx context.Context, modelID string) (*Model, error) {
+	list, err := c.ListModels(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, m := range list.Data {
+		if m.ID == modelID {
+			return &m, nil
+		}
+	}
+	return nil, fmt.Errorf("model %s not found", modelID)
 }
 
 func (c *Client) ListModels(ctx context.Context) (*ListModelsResponse, error) {
@@ -109,7 +123,6 @@ func (c *Client) newRequest(ctx context.Context, method, path string, payload in
 func (c *Client) sendRequest(req *http.Request, v any) error {
 	res, err := c.httpClient.Do(req)
 	if err != nil {
-		// Go's http client returns an error for context cancellation
 		if goerrors.Is(err, context.Canceled) || goerrors.Is(err, context.DeadlineExceeded) {
 			return err
 		}
