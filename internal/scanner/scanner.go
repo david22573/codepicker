@@ -20,8 +20,7 @@ type Scanner struct {
 	GitIgnore    *ignore.GitIgnore
 	CustomIgnore *ignore.GitIgnore
 	Logger       logger.Logger
-
-	Whitelist map[string]bool
+	Whitelist    map[string]bool
 }
 
 func NewScanner(root string, w writer.OutputStrategy, cfg *config.Config, log logger.Logger) *Scanner {
@@ -30,6 +29,11 @@ func NewScanner(root string, w writer.OutputStrategy, cfg *config.Config, log lo
 		Writer: w,
 		Config: cfg,
 		Logger: log,
+	}
+
+	// Initialize Output Strategy (Create file/folder)
+	if err := s.Writer.Init(); err != nil {
+		s.Logger.Error(fmt.Sprintf("Failed to init writer: %v", err))
 	}
 
 	gitIgnorePath := filepath.Join(root, ".gitignore")
@@ -54,8 +58,8 @@ func (s *Scanner) SetWhitelist(files map[string]bool) {
 }
 
 func (s *Scanner) Scan(ctx context.Context) error {
-	// FIX: Lifecycle management (Init/Close) removed from here.
-	// The caller (cmd) is now responsible for opening and closing the writer.
+	// Ensure Writer is closed when scan finishes
+	defer s.Writer.Close()
 
 	return filepath.WalkDir(s.Root, func(path string, d os.DirEntry, err error) error {
 		select {
@@ -77,33 +81,7 @@ func (s *Scanner) Scan(ctx context.Context) error {
 			return nil
 		}
 
-		cleanRel := filepath.ToSlash(relPath)
-
-		if s.Whitelist != nil {
-			if d.IsDir() {
-				// Allow directories if they contain whitelisted files?
-				// Simple approach: don't block dirs here, filter files only
-			} else {
-				if !s.Whitelist[cleanRel] {
-					return nil
-				}
-			}
-		}
-
-		if s.GitIgnore != nil && s.GitIgnore.MatchesPath(relPath) {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		if s.CustomIgnore != nil && s.CustomIgnore.MatchesPath(relPath) {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
+		// 1. Check if Writer wants to skip this file (e.g. it is the output file)
 		if s.Writer.ShouldSkip(path) {
 			if d.IsDir() {
 				return filepath.SkipDir
@@ -111,6 +89,32 @@ func (s *Scanner) Scan(ctx context.Context) error {
 			return nil
 		}
 
+		cleanRel := filepath.ToSlash(relPath)
+
+		// 2. Whitelist Check (Git Diff mode)
+		if s.Whitelist != nil {
+			if !d.IsDir() {
+				if !s.Whitelist[cleanRel] {
+					return nil
+				}
+			}
+		}
+
+		// 3. Ignore Files Check
+		if s.GitIgnore != nil && s.GitIgnore.MatchesPath(relPath) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if s.CustomIgnore != nil && s.CustomIgnore.MatchesPath(relPath) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		// 4. Config Exclusion Check
 		if d.IsDir() {
 			if strings.HasPrefix(d.Name(), ".") && d.Name() != "." {
 				return filepath.SkipDir
@@ -121,6 +125,7 @@ func (s *Scanner) Scan(ctx context.Context) error {
 			return nil
 		}
 
+		// 5. Extension Check
 		ext := strings.ToLower(filepath.Ext(path))
 		name := strings.ToLower(d.Name())
 		if !s.Config.AllowedExts[ext] && !config.IsSpecialFile(name) {
@@ -134,4 +139,3 @@ func (s *Scanner) Scan(ctx context.Context) error {
 		return s.Writer.Write(path, relPath)
 	})
 }
-

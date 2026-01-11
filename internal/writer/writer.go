@@ -15,6 +15,8 @@ import (
 	"github.com/david22573/codepicker/internal/tokenizer"
 )
 
+// --- Interfaces ---
+
 type OutputStrategy interface {
 	Init() error
 	Write(absPath, relPath string) error
@@ -23,18 +25,22 @@ type OutputStrategy interface {
 	Name() string
 }
 
+// --- Concat Strategy (Combines files into one) ---
+
 type ConcatStrategy struct {
 	OutputPath    string
+	absOutputPath string // Cached absolute path for safer comparison
 	file          *os.File
 	TokenCount    int
 	Minify        bool
-	ComputeTokens bool // New flag
+	ComputeTokens bool
 }
 
-// Updated Constructor
 func NewConcatStrategy(path string, minify bool, computeTokens bool) *ConcatStrategy {
+	abs, _ := filepath.Abs(path)
 	return &ConcatStrategy{
 		OutputPath:    path,
+		absOutputPath: abs,
 		Minify:        minify,
 		ComputeTokens: computeTokens,
 	}
@@ -57,7 +63,13 @@ func (c *ConcatStrategy) Init() error {
 }
 
 func (c *ConcatStrategy) ShouldSkip(path string) bool {
-	return path == c.OutputPath
+	// FIX: Robust check. Convert the candidate path to absolute
+	// so we don't accidentally scan our own output file.
+	absCandidate, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	return absCandidate == c.absOutputPath
 }
 
 func (c *ConcatStrategy) Write(absPath, relPath string) error {
@@ -77,6 +89,7 @@ func (c *ConcatStrategy) Write(absPath, relPath string) error {
 		return nil
 	}
 
+	// Read file into memory (Safe on Termux)
 	content, err := io.ReadAll(io.LimitReader(f, constants.MaxFileSize))
 	if err != nil {
 		return err
@@ -108,7 +121,6 @@ func (c *ConcatStrategy) Write(absPath, relPath string) error {
 
 	finalBytes := fileBuffer.Bytes()
 
-	// FIX: Only run tokenizer if explicitly requested
 	if c.ComputeTokens {
 		c.TokenCount += tokenizer.CountTokens(string(finalBytes))
 	}
@@ -118,8 +130,13 @@ func (c *ConcatStrategy) Write(absPath, relPath string) error {
 }
 
 func (c *ConcatStrategy) Close() error {
-	return c.file.Close()
+	if c.file != nil {
+		return c.file.Close()
+	}
+	return nil
 }
+
+// --- Copy Strategy (Copies files preserving structure) ---
 
 type CopyStrategy struct {
 	OutputDir string
@@ -136,10 +153,9 @@ func (c *CopyStrategy) Init() error {
 }
 
 func (c *CopyStrategy) ShouldSkip(path string) bool {
-	// Simple check to prevent copying output dir into itself
+	// Prevent copying the output folder into itself
 	rel, err := filepath.Rel(c.OutputDir, path)
 	if err != nil {
-		// different roots
 		return false
 	}
 	return !strings.HasPrefix(rel, "..")
@@ -164,7 +180,11 @@ func (c *CopyStrategy) Write(absPath, relPath string) error {
 	}
 	defer dst.Close()
 
-	if _, err := io.Copy(dst, src); err != nil {
+	// FIX: CRITICAL FOR TERMUX/ANDROID
+	// io.Copy uses 'sendfile' syscall which fails on Android with "invalid argument".
+	// io.CopyBuffer forces a userspace copy which is 100% compatible.
+	buf := make([]byte, 32*1024)
+	if _, err := io.CopyBuffer(dst, src, buf); err != nil {
 		return fmt.Errorf("failed to copy content to %s: %w", targetPath, err)
 	}
 
@@ -172,6 +192,8 @@ func (c *CopyStrategy) Write(absPath, relPath string) error {
 }
 
 func (c *CopyStrategy) Close() error { return nil }
+
+// --- Tree Strategy (Visual tree) ---
 
 type TreeOptions struct {
 	CopyToClipboard bool
@@ -201,6 +223,7 @@ func (t *TreeStrategy) Init() error {
 
 func (t *TreeStrategy) ShouldSkip(path string) bool {
 	if t.opts.OutPath != "" {
+		// Use suffix check as a simple heuristic
 		return strings.HasSuffix(path, t.opts.OutPath)
 	}
 	return false
@@ -237,3 +260,4 @@ func (t *TreeStrategy) Close() error {
 	fmt.Println()
 	return nil
 }
+
