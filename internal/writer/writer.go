@@ -24,14 +24,20 @@ type OutputStrategy interface {
 }
 
 type ConcatStrategy struct {
-	OutputPath string
-	file       *os.File
-	TokenCount int
-	Minify     bool
+	OutputPath    string
+	file          *os.File
+	TokenCount    int
+	Minify        bool
+	ComputeTokens bool // New flag
 }
 
-func NewConcatStrategy(path string, minify bool) *ConcatStrategy {
-	return &ConcatStrategy{OutputPath: path, Minify: minify}
+// Updated Constructor
+func NewConcatStrategy(path string, minify bool, computeTokens bool) *ConcatStrategy {
+	return &ConcatStrategy{
+		OutputPath:    path,
+		Minify:        minify,
+		ComputeTokens: computeTokens,
+	}
 }
 
 func (c *ConcatStrategy) Name() string { return "Concat" }
@@ -102,7 +108,10 @@ func (c *ConcatStrategy) Write(absPath, relPath string) error {
 
 	finalBytes := fileBuffer.Bytes()
 
-	c.TokenCount += tokenizer.CountTokens(string(finalBytes))
+	// FIX: Only run tokenizer if explicitly requested
+	if c.ComputeTokens {
+		c.TokenCount += tokenizer.CountTokens(string(finalBytes))
+	}
 
 	_, err = c.file.Write(finalBytes)
 	return err
@@ -127,28 +136,22 @@ func (c *CopyStrategy) Init() error {
 }
 
 func (c *CopyStrategy) ShouldSkip(path string) bool {
-	// Phase 0.1: Fix invalid API usage.
-	// filepath.HasPrefix does not exist. We use filepath.Rel to check containment.
+	// Simple check to prevent copying output dir into itself
 	rel, err := filepath.Rel(c.OutputDir, path)
 	if err != nil {
-		// If paths are on different drives or cannot be related, assume it's not inside.
+		// different roots
 		return false
 	}
-
-	// If the relative path does NOT start with "..", it implies the path
-	// is inside the OutputDir (or is the OutputDir itself).
 	return !strings.HasPrefix(rel, "..")
 }
 
 func (c *CopyStrategy) Write(absPath, relPath string) error {
 	targetPath := filepath.Join(c.OutputDir, relPath)
 
-	// Phase 0.3: Ensure parent directories exist before writing
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
 		return fmt.Errorf("failed to create parent dir for %s: %w", relPath, err)
 	}
 
-	// Phase 0.2: Stop ignoring filesystem errors
 	src, err := os.Open(absPath)
 	if err != nil {
 		return fmt.Errorf("failed to open source %s: %w", absPath, err)
@@ -234,4 +237,3 @@ func (t *TreeStrategy) Close() error {
 	fmt.Println()
 	return nil
 }
-

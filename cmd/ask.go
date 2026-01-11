@@ -221,7 +221,7 @@ If no specific code is needed, return { "files": [] }.`
 
 		appLogger.Debug(fmt.Sprintf("Temporary context file: %s", tmpPath))
 
-		w := writer.NewConcatStrategy(tmpPath, minify)
+		w := writer.NewConcatStrategy(tmpPath, minify, false)
 		if err := w.Init(); err != nil {
 			return fmt.Errorf("failed to initialize writer: %w", err)
 		}
@@ -353,3 +353,4 @@ func init() {
 	// NEW FLAG
 	askCmd.Flags().BoolVarP(&rawOutput, "raw", "r", false, "Output only the raw AI response (no headers) for piping")
 }
+
