@@ -174,18 +174,51 @@ var askCmd = &cobra.Command{
 
 		// 5. Handle Clipboard Copy
 		if askCopy {
-			cleanResponse := responseBuf.String()
+			rawResponse := responseBuf.String()
+
+			// Clean up the markdown
+			cleanResponse := stripMarkdown(rawResponse)
+
 			if cleanResponse != "" {
 				if err := clipboard.WriteAll(cleanResponse); err != nil {
 					appLogger.Warn(fmt.Sprintf("Failed to copy to clipboard: %v", err))
 				} else {
-					appLogger.Info("≡ƒôï Response copied to clipboard!")
+					if cleanResponse != rawResponse {
+						appLogger.Info("≡ƒôï Code extracted and copied to clipboard!")
+					} else {
+						appLogger.Info("≡ƒôï Response copied to clipboard!")
+					}
 				}
 			}
 		}
-
 		return nil
 	},
+}
+
+// Helper function to strip Markdown code blocks
+func stripMarkdown(content string) string {
+	content = strings.TrimSpace(content)
+
+	// Check if it looks like a code block
+	if strings.HasPrefix(content, "```") && strings.HasSuffix(content, "```") {
+		lines := strings.Split(content, "\n")
+
+		// Ensure we have enough lines to strip (start + end + content)
+		if len(lines) >= 2 {
+			// Remove the first line (```language)
+			lines = lines[1:]
+
+			// Remove the last line (```)
+			if strings.TrimSpace(lines[len(lines)-1]) == "```" {
+				lines = lines[:len(lines)-1]
+			}
+
+			return strings.Join(lines, "\n")
+		}
+	}
+
+	// If it's not a code block, or multiple blocks, return as is
+	return content
 }
 
 func init() {
