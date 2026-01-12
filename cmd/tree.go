@@ -37,7 +37,6 @@ var treeCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(treeCmd)
-	treeCmd.Flags().BoolVarP(&treeCopy, "copy", "c", false, "Copy tree output to clipboard")
+	treeCmd.Flags().BoolVarP(&treeCopy, "copy", "C", false, "Copy tree output to clipboard")
 	treeCmd.Flags().StringVarP(&treeOut, "out", "o", "", "Save tree output to a text file")
 }
-
