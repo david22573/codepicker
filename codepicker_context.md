@@ -45,25 +45,20 @@ clean:
 	rm -rf codepicker_out
 ```
 
-## File: cmd/ask.go
+## File: cmd\ask.go
 ```go
 package cmd
 
 import (
-	"context"
-	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/david22573/codepicker/internal/config"
+	"github.com/atotto/clipboard"
 	"github.com/david22573/codepicker/internal/constants"
-	"github.com/david22573/codepicker/internal/paths"
-	"github.com/david22573/codepicker/internal/scanner"
-	"github.com/david22573/codepicker/internal/tokenizer"
-	"github.com/david22573/codepicker/internal/writer"
+	"github.com/david22573/codepicker/internal/contextgen"
+	"github.com/david22573/codepicker/internal/planner"
 	"github.com/david22573/codepicker/pkg/openrouter"
 	"github.com/spf13/cobra"
 )
@@ -73,70 +68,8 @@ var (
 	focusFile string
 	smartMode bool
 	rawOutput bool
+	askCopy   bool // New flag variable
 )
-
-type PathCollector struct {
-	Paths []string
-}
-
-func (p *PathCollector) Init() error                 { return nil }
-func (p *PathCollector) Write(abs, rel string) error { p.Paths = append(p.Paths, rel); return nil }
-func (p *PathCollector) Close() error                { return nil }
-func (p *PathCollector) ShouldSkip(path string) bool { return false }
-func (p *PathCollector) Name() string                { return "Collector" }
-
-func callLLMForPaths(ctx context.Context, apiKey, model, sysMsg, userMsg string) []string {
-	client := openrouter.NewClient(apiKey)
-	req := openrouter.ChatCompletionRequest{
-		Model: model,
-		Messages: []openrouter.ChatMessage{
-			{Role: "system", Content: sysMsg},
-			{Role: "user", Content: userMsg},
-		},
-		ResponseFormat: &openrouter.ResponseFormat{Type: "json_object"},
-	}
-
-	resp, err := client.CreateChatCompletion(ctx, req)
-	if err != nil {
-		appLogger.Warn(fmt.Sprintf("Smart planning failed (API error or cancellation): %v. Falling back to normal scan.", err))
-		return nil
-	}
-
-	if len(resp.Choices) == 0 || resp.Choices[0].Message == nil {
-		return nil
-	}
-
-	contentStr, ok := resp.Choices[0].Message.Content.(string)
-	if !ok {
-		appLogger.Warn("Failed to parse AI response content (not a string)")
-		return nil
-	}
-
-	content := strings.TrimSpace(contentStr)
-
-	if strings.HasPrefix(content, "```json") {
-		content = strings.TrimPrefix(content, "```json")
-		content = strings.TrimSuffix(content, "```")
-	} else if strings.HasPrefix(content, "```") {
-		content = strings.TrimPrefix(content, "```")
-		content = strings.TrimSuffix(content, "```")
-	}
-
-	var resultObj struct {
-		Files []string `json:"files"`
-	}
-	if err := json.Unmarshal([]byte(content), &resultObj); err == nil && len(resultObj.Files) > 0 {
-		return resultObj.Files
-	}
-
-	var paths []string
-	if err := json.Unmarshal([]byte(content), &paths); err == nil {
-		return paths
-	}
-
-	appLogger.Warn(fmt.Sprintf("Failed to parse AI planning JSON. Response was: %s", content))
-	return nil
-}
 
 var askCmd = &cobra.Command{
 	Use:   "ask [query]",
@@ -149,11 +82,11 @@ var askCmd = &cobra.Command{
 		apiKey, err := validateAPIKey()
 		if err != nil {
 			if !rawOutput {
-				fmt.Fprintln(os.Stderr, "\n💡 To fix this:")
+				fmt.Fprintln(os.Stderr, "\n≡ƒÆí To fix this:")
 				fmt.Fprintln(os.Stderr, "   1. Get your API key from https://openrouter.ai/settings/keys")
 				fmt.Fprintln(os.Stderr, "   2. Set it: export OPENROUTER_API_KEY=your_key_here")
 				fmt.Fprintln(os.Stderr, "   3. Or create a .env file with: OPENROUTER_API_KEY=your_key_here")
-				fmt.Fprintln(os.Stderr, "\n⚠️  WARNING: Never commit your API key!")
+				fmt.Fprintln(os.Stderr, "\nΓÜá∩╕Å  WARNING: Never commit your API key!")
 			}
 			return err
 		}
@@ -162,76 +95,27 @@ var askCmd = &cobra.Command{
 		ctx := cmd.Context()
 
 		if smartMode {
-			appLogger.Info("🧠 Smart mode enabled: Planning context...")
+			planOpts := planner.Options{
+				APIKey:      apiKey,
+				Model:       askModel,
+				SrcDir:      srcDir,
+				Query:       query,
+				IncludeExts: includeExts,
+				IgnoreDirs:  ignoreDirs,
+			}
 
-			absSrc, err := paths.Sanitize(srcDir)
+			selectedFiles, err := planner.SelectRelevantFiles(ctx, planOpts, appLogger)
 			if err != nil {
-				return fmt.Errorf("invalid source directory: %w", err)
-			}
-
-			collector := &PathCollector{}
-			cfg := config.NewConfig()
-			if includeExts != "" {
-				cfg.AddAllowedExtensions(strings.Split(includeExts, ","))
-			}
-			if ignoreDirs != "" {
-				cfg.AddIgnoredDirs(strings.Split(ignoreDirs, ","))
-			}
-
-			s := scanner.NewScanner(absSrc, collector, cfg, appLogger)
-
-			if err := s.Scan(ctx); err == nil && len(collector.Paths) > 0 {
-				fileList := strings.Join(collector.Paths, "\n")
-				appLogger.Info(fmt.Sprintf("Found %d files. Asking AI to select relevant ones...", len(collector.Paths)))
-
-				sysMsg := `You are a senior developer. You have a list of files in a codebase.
-Based on the user's query, identify exactly which files contain the relevant code to answer the question.
-Return ONLY a valid JSON object with a single key "files" containing the list of strings.
-Example: { "files": ["cmd/main.go", "internal/utils.go"] }
-If no specific code is needed, return { "files": [] }.`
-
-				userMsg := fmt.Sprintf("Files:\n%s\n\nQuery: %s", fileList, query)
-
-				selectedFiles := callLLMForPaths(ctx, apiKey, askModel, sysMsg, userMsg)
-
-				if len(selectedFiles) > 0 {
-					aiFiles := strings.Join(selectedFiles, ",")
-
-					if focusFile != "" {
-						focusFile = focusFile + "," + aiFiles
-					} else {
-						focusFile = aiFiles
-					}
-					appLogger.Info(fmt.Sprintf("🤖 AI selected %d files: %v", len(selectedFiles), selectedFiles))
-
-					client := openrouter.NewClient(apiKey)
-					modelInfo, err := client.GetModelInfo(ctx, askModel)
-					if err == nil {
-						var totalTokens int
-						for _, f := range selectedFiles {
-							content, err := os.ReadFile(f)
-							if err == nil {
-								totalTokens += tokenizer.CountTokens(string(content))
-							}
-						}
-
-						estimatedTotal := totalTokens + 1000
-						limit := modelInfo.ContextLength
-
-						appLogger.Info(fmt.Sprintf("📊 Estimated context: %d tokens (Model limit: %d)", totalTokens, limit))
-
-						if limit > 0 && estimatedTotal > limit {
-							appLogger.Warn(fmt.Sprintf("⚠️  WARNING: Context size (%d) exceeds model limit (%d). Output may be truncated.", estimatedTotal, limit))
-						} else if limit > 0 && float64(estimatedTotal) > float64(limit)*0.9 {
-							appLogger.Warn(fmt.Sprintf("⚠️  WARNING: Approaching model context limit (%d%% used).", int(float64(estimatedTotal)/float64(limit)*100)))
-						}
-					}
-
+				appLogger.Warn(fmt.Sprintf("Smart planning failed: %v", err))
+			} else if len(selectedFiles) > 0 {
+				aiFiles := strings.Join(selectedFiles, ",")
+				if focusFile != "" {
+					focusFile = focusFile + "," + aiFiles
 				} else {
-					appLogger.Info("🤖 AI decided no files are needed (or failed to pick), proceeding with full context.")
+					focusFile = aiFiles
 				}
 			} else {
-				appLogger.Warn("Scanner found no files for planning. Proceeding normally.")
+				appLogger.Warn("Smart mode could not identify relevant files. Proceeding with user defaults.")
 			}
 		}
 
@@ -241,89 +125,41 @@ If no specific code is needed, return { "files": [] }.`
 		default:
 		}
 
-		tmpFile, err := os.CreateTemp("", "agent_context_*.md")
-		if err != nil {
-			return fmt.Errorf("failed to create temp file: %w", err)
-		}
-		tmpPath := tmpFile.Name()
-		tmpFile.Close()
-		defer func() {
-			if err := os.Remove(tmpPath); err != nil {
-				appLogger.Warn(fmt.Sprintf("Failed to remove temp file: %v", err))
-			}
-		}()
+		appLogger.Info("Generating context...")
 
-		appLogger.Debug(fmt.Sprintf("Temporary context file: %s", tmpPath))
-
-		w := writer.NewConcatStrategy(tmpPath, minify, false)
-		if err := w.Init(); err != nil {
-			return fmt.Errorf("failed to initialize writer: %w", err)
-		}
-
+		var focusList []string
 		if focusFile != "" {
-			validatedFiles, err := validateFocusFiles(focusFile)
+			focusList, err = validateFocusFiles(focusFile)
 			if err != nil {
 				return err
 			}
-
-			if len(validatedFiles) == 0 {
-				appLogger.Warn("No valid files in focus list. Generating empty context.")
-			} else {
-				appLogger.Info(fmt.Sprintf("Focus mode: %d file(s) selected", len(validatedFiles)))
-				for _, f := range validatedFiles {
-					abs, err := filepath.Abs(f)
-					if err == nil {
-						rel, _ := filepath.Rel(".", abs)
-
-						appLogger.Info(fmt.Sprintf("   + %s", rel))
-						if err := w.Write(abs, rel); err != nil {
-							appLogger.Warn(fmt.Sprintf("Failed to write %s: %v", rel, err))
-						}
-					}
-				}
-			}
-		} else {
-			absSrc, err := paths.Sanitize(srcDir)
-			if err != nil {
-				return fmt.Errorf("invalid source directory: %w", err)
-			}
-
-			cfg := config.NewConfig()
-			if includeExts != "" {
-				cfg.AddAllowedExtensions(strings.Split(includeExts, ","))
-			}
-			if ignoreDirs != "" {
-				cfg.AddIgnoredDirs(strings.Split(ignoreDirs, ","))
-			}
-
-			s := scanner.NewScanner(absSrc, w, cfg, appLogger)
-
-			if err := s.Scan(ctx); err != nil {
-				return fmt.Errorf("scan failed: %w", err)
-			}
 		}
 
-		if err := w.Close(); err != nil {
-			return fmt.Errorf("failed to write context: %w", err)
+		genOpts := contextgen.Options{
+			SrcDir:      srcDir,
+			FocusFiles:  focusList,
+			Minify:      minify,
+			IncludeExts: includeExts,
+			IgnoreDirs:  ignoreDirs,
 		}
 
-		contextBytes, err := os.ReadFile(tmpPath)
+		contextString, err := contextgen.Generate(ctx, genOpts, appLogger)
 		if err != nil {
-			return fmt.Errorf("failed to read context: %w", err)
+			return fmt.Errorf("failed to generate context: %w", err)
 		}
 
-		if len(contextBytes) == 0 {
+		if len(contextString) == 0 {
 			if smartMode {
 				return fmt.Errorf("smart mode yielded no relevant files (try standard mode or broader query)")
 			}
 			return fmt.Errorf("no context generated (check your filters)")
 		}
 
-		appLogger.Info(fmt.Sprintf("Context generated: %d bytes", len(contextBytes)))
+		appLogger.Info(fmt.Sprintf("Context generated: %d chars", len(contextString)))
 
 		client := openrouter.NewClient(apiKey)
 		contextType := "Codebase"
-		if focusFile != "" {
+		if len(focusList) > 0 {
 			contextType = "Active File"
 		}
 
@@ -333,7 +169,7 @@ If no specific code is needed, return { "files": [] }.`
 			time.Now().Format("2006-01-02"), contextType,
 		)
 
-		userMsg := fmt.Sprintf("Context:\n%s\n\nQuestion: %s", string(contextBytes), query)
+		userMsg := fmt.Sprintf("Context:\n%s\n\nQuestion: %s", contextString, query)
 
 		req := openrouter.ChatCompletionRequest{
 			Model: askModel,
@@ -349,15 +185,17 @@ If no specific code is needed, return { "files": [] }.`
 		stream, err := client.CreateChatCompletionStream(ctx, req)
 		if err != nil {
 			appLogger.Error(fmt.Sprintf("API Error: %v", err))
-			appLogger.Info("💡 Check your API key and network connection")
+			appLogger.Info("≡ƒÆí Check your API key and network connection")
 			return err
 		}
 		defer stream.Close()
 
 		if !rawOutput {
-			fmt.Println("\n🤖 AI Response:")
-			fmt.Println(strings.Repeat("─", 60))
+			fmt.Println("\n≡ƒñû AI Response:")
+			fmt.Println(strings.Repeat("ΓöÇ", 60))
 		}
+
+		var responseBuf strings.Builder // Buffer to capture full response for clipboard
 
 		for {
 			resp, err := stream.Recv()
@@ -368,6 +206,7 @@ If no specific code is needed, return { "files": [] }.`
 				content := resp.Choices[0].Delta.Content
 				if str, ok := content.(string); ok {
 					fmt.Print(str)
+					responseBuf.WriteString(str)
 				}
 			}
 		}
@@ -377,6 +216,18 @@ If no specific code is needed, return { "files": [] }.`
 		}
 
 		appLogger.Info("Response streaming completed")
+
+		if askCopy {
+			cleanResponse := responseBuf.String()
+			if cleanResponse != "" {
+				if err := clipboard.WriteAll(cleanResponse); err != nil {
+					appLogger.Warn(fmt.Sprintf("Failed to copy to clipboard: %v", err))
+				} else {
+					appLogger.Info("≡ƒôï Response copied to clipboard!")
+				}
+			}
+		}
+
 		return nil
 	},
 }
@@ -387,10 +238,11 @@ func init() {
 	askCmd.Flags().StringVarP(&focusFile, "focus", "f", "", "Comma-separated list of files to scan")
 	askCmd.Flags().BoolVarP(&smartMode, "smart", "S", false, "Use AI to intelligently select relevant files")
 	askCmd.Flags().BoolVarP(&rawOutput, "raw", "r", false, "Output only the raw AI response (no headers) for piping")
+	askCmd.Flags().BoolVarP(&askCopy, "copy", "c", false, "Copy the AI response to system clipboard")
 }
 ```
 
-## File: cmd/chat.go
+## File: cmd\chat.go
 ```go
 package cmd
 
@@ -512,7 +364,7 @@ func init() {
 }
 ```
 
-## File: cmd/common.go
+## File: cmd\common.go
 ```go
 package cmd
 
@@ -583,7 +435,7 @@ func validateFocusFiles(focusList string) ([]string, error) {
 }
 ```
 
-## File: cmd/copy.go
+## File: cmd\copy.go
 ```go
 package cmd
 
@@ -626,7 +478,7 @@ func init() {
 }
 ```
 
-## File: cmd/init.go
+## File: cmd\init.go
 ```go
 package cmd
 
@@ -699,7 +551,7 @@ func init() {
 }
 ```
 
-## File: cmd/root.go
+## File: cmd\root.go
 ```go
 package cmd
 
@@ -955,7 +807,7 @@ func flagChanged(flags interface{ Changed(string) bool }, name string) bool {
 }
 ```
 
-## File: cmd/serve.go
+## File: cmd\serve.go
 ```go
 package cmd
 
@@ -1171,7 +1023,7 @@ func init() {
 }
 ```
 
-## File: cmd/tree.go
+## File: cmd\tree.go
 ```go
 package cmd
 
@@ -1216,7 +1068,7 @@ func init() {
 }
 ```
 
-## File: internal/config/config.go
+## File: internal\config\config.go
 ```go
 package config
 
@@ -1296,7 +1148,7 @@ func (c *Config) AddIgnoredDirs(dirs []string) {
 }
 ```
 
-## File: internal/config/configfile.go
+## File: internal\config\configfile.go
 ```go
 package config
 
@@ -1351,7 +1203,7 @@ func LoadConfigFile(path string) (*ConfigFile, error) {
 }
 ```
 
-## File: internal/constants/constants.go
+## File: internal\constants\constants.go
 ```go
 package constants
 
@@ -1377,7 +1229,7 @@ const (
 )
 ```
 
-## File: internal/contextgen/generator.go
+## File: internal\contextgen\generator.go
 ```go
 package contextgen
 
@@ -1461,7 +1313,7 @@ func Generate(ctx context.Context, opts Options, log logger.Logger) (string, err
 }
 ```
 
-## File: internal/errors/errors.go
+## File: internal\errors\errors.go
 ```go
 package errors
 
@@ -1583,7 +1435,7 @@ func NewPathError(op, path string, err error) error {
 }
 ```
 
-## File: internal/git/git.go
+## File: internal\git\git.go
 ```go
 package git
 
@@ -1625,7 +1477,7 @@ func GetChangedFiles(diffRef string) (map[string]bool, error) {
 }
 ```
 
-## File: internal/logger/logger.go
+## File: internal\logger\logger.go
 ```go
 package logger
 
@@ -1683,7 +1535,7 @@ func (l *NoOpLogger) Debug(msg string) {}
 func (l *NoOpLogger) Error(msg string) {}
 ```
 
-## File: internal/minifier/generic.go
+## File: internal\minifier\generic.go
 ```go
 package minifier
 
@@ -1729,7 +1581,7 @@ func SqueezeVerticalWhitespace(content []byte) []byte {
 }
 ```
 
-## File: internal/minifier/go_minifier.go
+## File: internal\minifier\go_minifier.go
 ```go
 package minifier
 
@@ -1780,7 +1632,7 @@ func (m *GoMinifier) Minify(content []byte) []byte {
 }
 ```
 
-## File: internal/minifier/js_minifier.go
+## File: internal\minifier\js_minifier.go
 ```go
 package minifier
 
@@ -1844,7 +1696,7 @@ func (m *JSMinifier) Minify(content []byte) []byte {
 }
 ```
 
-## File: internal/minifier/minifier.go
+## File: internal\minifier\minifier.go
 ```go
 package minifier
 
@@ -1902,7 +1754,7 @@ func Minify(content []byte, ext string) []byte {
 }
 ```
 
-## File: internal/minifier/minifier_test.go
+## File: internal\minifier\minifier_test.go
 ```go
 package minifier
 
@@ -1972,7 +1824,7 @@ func main() {
 }
 ```
 
-## File: internal/minifier/python_minifier.go
+## File: internal\minifier\python_minifier.go
 ```go
 package minifier
 
@@ -2024,7 +1876,7 @@ func (m *PythonMinifier) Minify(content []byte) []byte {
 }
 ```
 
-## File: internal/paths/validator.go
+## File: internal\paths\validator.go
 ```go
 package paths
 
@@ -2099,7 +1951,182 @@ func ValidateOutput(out string) error {
 }
 ```
 
-## File: internal/scanner/scanner.go
+## File: internal\planner\planner.go
+```go
+package planner
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"strings"
+
+	"github.com/david22573/codepicker/internal/config"
+	"github.com/david22573/codepicker/internal/logger"
+	"github.com/david22573/codepicker/internal/paths"
+	"github.com/david22573/codepicker/internal/scanner"
+	"github.com/david22573/codepicker/internal/tokenizer"
+	"github.com/david22573/codepicker/pkg/openrouter"
+)
+
+type PathCollector struct {
+	Paths []string
+}
+
+func (p *PathCollector) Init() error                 { return nil }
+func (p *PathCollector) Write(abs, rel string) error { p.Paths = append(p.Paths, rel); return nil }
+func (p *PathCollector) Close() error                { return nil }
+func (p *PathCollector) ShouldSkip(path string) bool { return false }
+func (p *PathCollector) Name() string                { return "Collector" }
+
+type Options struct {
+	APIKey      string
+	Model       string
+	SrcDir      string
+	Query       string
+	IncludeExts string
+	IgnoreDirs  string
+}
+
+func SelectRelevantFiles(ctx context.Context, opts Options, log logger.Logger) ([]string, error) {
+	log.Info("ƒºá Smart mode enabled: Planning context...")
+
+	absSrc, err := paths.Sanitize(opts.SrcDir)
+	if err != nil {
+		return nil, fmt.Errorf("invalid source directory: %w", err)
+	}
+
+	collector := &PathCollector{}
+	cfg := config.NewConfig()
+	if opts.IncludeExts != "" {
+		cfg.AddAllowedExtensions(strings.Split(opts.IncludeExts, ","))
+	}
+	if opts.IgnoreDirs != "" {
+		cfg.AddIgnoredDirs(strings.Split(opts.IgnoreDirs, ","))
+	}
+
+	s := scanner.NewScanner(absSrc, collector, cfg, log)
+	if err := s.Scan(ctx); err != nil {
+		return nil, fmt.Errorf("scan failed during planning: %w", err)
+	}
+
+	if len(collector.Paths) == 0 {
+		log.Warn("Scanner found no files for planning.")
+		return nil, nil
+	}
+
+	fileList := strings.Join(collector.Paths, "\n")
+	log.Info(fmt.Sprintf("Found %d files. Asking AI to select relevant ones...", len(collector.Paths)))
+
+	sysMsg := `You are a senior developer.
+You have a list of files in a codebase.
+Based on the user's query, identify exactly which files contain the relevant code to answer the question.
+Return ONLY a valid JSON object with a single key "files" containing the list of strings.
+Example: { "files": ["cmd/main.go", "internal/utils.go"] }
+If no specific code is needed, return { "files": [] }.`
+
+	userMsg := fmt.Sprintf("Files:\n%s\n\nQuery: %s", fileList, opts.Query)
+
+	selectedFiles := callLLM(ctx, opts.APIKey, opts.Model, sysMsg, userMsg, log)
+
+	if len(selectedFiles) > 0 {
+		log.Info(fmt.Sprintf("ƒñû AI selected %d files: %v", len(selectedFiles), selectedFiles))
+		estimateTokenUsage(ctx, opts.APIKey, opts.Model, selectedFiles, log)
+	} else {
+		log.Info("ƒñû AI decided no files are needed (or failed to pick).")
+	}
+
+	return selectedFiles, nil
+}
+
+func callLLM(ctx context.Context, apiKey, model, sysMsg, userMsg string, log logger.Logger) []string {
+	client := openrouter.NewClient(apiKey)
+	req := openrouter.ChatCompletionRequest{
+		Model: model,
+		Messages: []openrouter.ChatMessage{
+			{Role: "system", Content: sysMsg},
+			{Role: "user", Content: userMsg},
+		},
+		ResponseFormat: &openrouter.ResponseFormat{Type: "json_object"},
+	}
+
+	resp, err := client.CreateChatCompletion(ctx, req)
+	if err != nil {
+		log.Warn(fmt.Sprintf("Smart planning failed: %v. Falling back to normal scan.", err))
+		return nil
+	}
+
+	if len(resp.Choices) == 0 || resp.Choices[0].Message == nil {
+		return nil
+	}
+
+	contentStr, ok := resp.Choices[0].Message.Content.(string)
+	if !ok {
+		log.Warn("Failed to parse AI response content (not a string)")
+		return nil
+	}
+
+	return parseJSONResponse(contentStr, log)
+}
+
+func parseJSONResponse(content string, log logger.Logger) []string {
+	content = strings.TrimSpace(content)
+
+	if strings.HasPrefix(content, "```json") {
+		content = strings.TrimPrefix(content, "```json")
+		content = strings.TrimSuffix(content, "```")
+	} else if strings.HasPrefix(content, "```") {
+		content = strings.TrimPrefix(content, "```")
+		content = strings.TrimSuffix(content, "```")
+	}
+
+	var resultObj struct {
+		Files []string `json:"files"`
+	}
+	if err := json.Unmarshal([]byte(content), &resultObj); err == nil && len(resultObj.Files) > 0 {
+		return resultObj.Files
+	}
+
+	var paths []string
+	if err := json.Unmarshal([]byte(content), &paths); err == nil {
+		return paths
+	}
+
+	log.Warn(fmt.Sprintf("Failed to parse AI planning JSON. Response was: %s", content))
+	return nil
+}
+
+func estimateTokenUsage(ctx context.Context, apiKey, model string, files []string, log logger.Logger) {
+	client := openrouter.NewClient(apiKey)
+	modelInfo, err := client.GetModelInfo(ctx, model)
+	if err != nil {
+		return
+	}
+
+	var totalTokens int
+	for _, f := range files {
+		content, err := os.ReadFile(f)
+		if err == nil {
+			totalTokens += tokenizer.CountTokens(string(content))
+		}
+	}
+
+	estimatedTotal := totalTokens + 1000
+	limit := modelInfo.ContextLength
+
+	log.Info(fmt.Sprintf("ƒôè Estimated context: %d tokens (Model limit: %d)", totalTokens, limit))
+
+	if limit > 0 && estimatedTotal > limit {
+		log.Warn(fmt.Sprintf("ΓÜáÅ  WARNING: Context size (%d) exceeds model limit (%d). Output may be truncated.", estimatedTotal, limit))
+	} else if limit > 0 && float64(estimatedTotal) > float64(limit)*0.9 {
+		usagePercent := int(float64(estimatedTotal) / float64(limit) * 100)
+		log.Warn(fmt.Sprintf("ΓÜáÅ  WARNING: Approaching model context limit (%d%% used).", usagePercent))
+	}
+}
+```
+
+## File: internal\scanner\scanner.go
 ```go
 package scanner
 
@@ -2236,7 +2263,7 @@ func (s *Scanner) Scan(ctx context.Context) error {
 }
 ```
 
-## File: internal/scanner/scanner_test.go
+## File: internal\scanner\scanner_test.go
 ```go
 package scanner
 
@@ -2328,7 +2355,7 @@ func createFile(t *testing.T, dir, name, content string) {
 }
 ```
 
-## File: internal/tokenizer/tokenizer.go
+## File: internal\tokenizer\tokenizer.go
 ```go
 package tokenizer
 
@@ -2354,7 +2381,7 @@ func EstimateCost(tokens int) float64 {
 }
 ```
 
-## File: internal/writer/writer.go
+## File: internal\writer\writer.go
 ```go
 package writer
 
@@ -2634,7 +2661,7 @@ func main() {
 }
 ```
 
-## File: pkg/openrouter/chat.go
+## File: pkg\openrouter\chat.go
 ```go
 package openrouter
 
@@ -2643,7 +2670,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -2675,28 +2701,33 @@ type ChatCompletionStream struct {
 
 func (s *ChatCompletionStream) Recv() (*ChatCompletionResponse, error) {
 	for {
+
 		line, err := s.reader.ReadBytes('\n')
 		if err != nil {
 			return nil, err
 		}
 
 		line = bytes.TrimSpace(line)
+
 		if len(line) == 0 {
 			continue
 		}
 
 		if !bytes.HasPrefix(line, []byte("data: ")) {
+
 			continue
 		}
 
 		data := bytes.TrimPrefix(line, []byte("data: "))
+
 		if string(data) == "[DONE]" {
 			return nil, io.EOF
 		}
 
 		var response ChatCompletionResponse
 		if err := json.Unmarshal(data, &response); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal stream data: %w", err)
+
+			return nil, fmt.Errorf("unmarshal error on stream frame: %w | data: %s", err, string(data))
 		}
 		return &response, nil
 	}
@@ -2709,26 +2740,29 @@ func (s *ChatCompletionStream) Close() error {
 func (c *Client) CreateChatCompletionStream(ctx context.Context, req ChatCompletionRequest) (*ChatCompletionStream, error) {
 	req.Stream = true
 
+	reqBytes, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
 	var lastErr error
+
 	for attempt := 0; attempt < constants.MaxRetries; attempt++ {
-
 		if attempt > 0 {
-
 			baseDelay := constants.RetryDelay * time.Duration(1<<attempt)
-
 			jitter := time.Duration(float64(baseDelay) * (rand.Float64() * 0.2))
 
-			sleepDuration := baseDelay + jitter
-
+			t := time.NewTimer(baseDelay + jitter)
 			select {
 			case <-ctx.Done():
+				t.Stop()
 				return nil, ctx.Err()
-			case <-time.After(sleepDuration):
+			case <-t.C:
 
 			}
 		}
 
-		httpReq, err := c.newRequest(ctx, http.MethodPost, "/chat/completions", req)
+		httpReq, err := c.newRequestWithBytes(ctx, http.MethodPost, "/chat/completions", reqBytes)
 		if err != nil {
 			return nil, err
 		}
@@ -2737,26 +2771,30 @@ func (c *Client) CreateChatCompletionStream(ctx context.Context, req ChatComplet
 		if err != nil {
 			lastErr = err
 
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return nil, err
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
 			}
 
 			if errs.IsRetryable(err) {
 				continue
 			}
-			return nil, fmt.Errorf("failed to execute stream request: %w", err)
+			return nil, fmt.Errorf("stream request failed: %w", err)
 		}
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			defer resp.Body.Close()
-			body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-			apiErr := errs.NewAPIError(resp.StatusCode, string(body), req.Model, "/chat/completions")
-			lastErr = apiErr
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 
+			var errMsg string
 			var errResp ErrorResponse
-			if decodeErr := json.Unmarshal(body, &errResp); decodeErr == nil && errResp.Error.Message != "" {
-				lastErr = fmt.Errorf("api error (status %d): %s - %s", resp.StatusCode, errResp.Error.Type, errResp.Error.Message)
+			if jsonErr := json.Unmarshal(body, &errResp); jsonErr == nil && errResp.Error.Message != "" {
+				errMsg = fmt.Sprintf("%s: %s", errResp.Error.Type, errResp.Error.Message)
+			} else {
+				errMsg = string(body)
 			}
+
+			apiErr := errs.NewAPIError(resp.StatusCode, errMsg, req.Model, "/chat/completions")
+			lastErr = apiErr
 
 			if errs.IsRetryable(apiErr) {
 				continue
@@ -2774,7 +2812,7 @@ func (c *Client) CreateChatCompletionStream(ctx context.Context, req ChatComplet
 }
 ```
 
-## File: pkg/openrouter/client.go
+## File: pkg\openrouter\client.go
 ```go
 package openrouter
 
@@ -2872,14 +2910,10 @@ func (c *Client) ListModels(ctx context.Context) (*ListModelsResponse, error) {
 	return &resp, nil
 }
 
-func (c *Client) newRequest(ctx context.Context, method, path string, payload interface{}) (*http.Request, error) {
+func (c *Client) newRequestWithBytes(ctx context.Context, method, path string, payload []byte) (*http.Request, error) {
 	var body io.Reader
 	if payload != nil {
-		b, err := json.Marshal(payload)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal request body: %w", err)
-		}
-		body = bytes.NewReader(b)
+		body = bytes.NewReader(payload)
 	}
 	url := fmt.Sprintf("%s%s", c.baseURL, path)
 	req, err := http.NewRequestWithContext(ctx, method, url, body)
@@ -2897,6 +2931,18 @@ func (c *Client) newRequest(ctx context.Context, method, path string, payload in
 	return req, nil
 }
 
+func (c *Client) newRequest(ctx context.Context, method, path string, payload interface{}) (*http.Request, error) {
+	var b []byte
+	var err error
+	if payload != nil {
+		b, err = json.Marshal(payload)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal request body: %w", err)
+		}
+	}
+	return c.newRequestWithBytes(ctx, method, path, b)
+}
+
 func (c *Client) sendRequest(req *http.Request, v any) error {
 	res, err := c.httpClient.Do(req)
 	if err != nil {
@@ -2906,10 +2952,13 @@ func (c *Client) sendRequest(req *http.Request, v any) error {
 		return errors.NewAPIError(0, err.Error(), "", req.URL.Path)
 	}
 	defer res.Body.Close()
+
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(res.Body, 512))
+
+		body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
 		return errors.NewAPIError(res.StatusCode, string(body), "", req.URL.Path)
 	}
+
 	if v == nil {
 		return nil
 	}
@@ -2920,7 +2969,7 @@ func (c *Client) sendRequest(req *http.Request, v any) error {
 }
 ```
 
-## File: pkg/openrouter/models.go
+## File: pkg\openrouter\models.go
 ```go
 package openrouter
 

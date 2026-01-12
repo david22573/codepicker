@@ -95,14 +95,11 @@ func (c *Client) ListModels(ctx context.Context) (*ListModelsResponse, error) {
 	return &resp, nil
 }
 
-func (c *Client) newRequest(ctx context.Context, method, path string, payload interface{}) (*http.Request, error) {
+// Helper to create a request with a reusable body reader
+func (c *Client) newRequestWithBytes(ctx context.Context, method, path string, payload []byte) (*http.Request, error) {
 	var body io.Reader
 	if payload != nil {
-		b, err := json.Marshal(payload)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal request body: %w", err)
-		}
-		body = bytes.NewReader(b)
+		body = bytes.NewReader(payload)
 	}
 	url := fmt.Sprintf("%s%s", c.baseURL, path)
 	req, err := http.NewRequestWithContext(ctx, method, url, body)
@@ -120,6 +117,19 @@ func (c *Client) newRequest(ctx context.Context, method, path string, payload in
 	return req, nil
 }
 
+// Kept for backward compatibility if needed, but we prefer newRequestWithBytes internally
+func (c *Client) newRequest(ctx context.Context, method, path string, payload interface{}) (*http.Request, error) {
+	var b []byte
+	var err error
+	if payload != nil {
+		b, err = json.Marshal(payload)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal request body: %w", err)
+		}
+	}
+	return c.newRequestWithBytes(ctx, method, path, b)
+}
+
 func (c *Client) sendRequest(req *http.Request, v any) error {
 	res, err := c.httpClient.Do(req)
 	if err != nil {
@@ -129,10 +139,13 @@ func (c *Client) sendRequest(req *http.Request, v any) error {
 		return errors.NewAPIError(0, err.Error(), "", req.URL.Path)
 	}
 	defer res.Body.Close()
+
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(res.Body, 512))
+		// FIX: Increased buffer to 4KB to catch full error descriptions
+		body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
 		return errors.NewAPIError(res.StatusCode, string(body), "", req.URL.Path)
 	}
+
 	if v == nil {
 		return nil
 	}
@@ -141,4 +154,3 @@ func (c *Client) sendRequest(req *http.Request, v any) error {
 	}
 	return nil
 }
-
