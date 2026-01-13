@@ -218,18 +218,45 @@ var askCmd = &cobra.Command{
 		appLogger.Info("Response streaming completed")
 
 		if askCopy {
-			cleanResponse := responseBuf.String()
+			rawResponse := responseBuf.String()
+
+			cleanResponse := stripMarkdown(rawResponse)
+
 			if cleanResponse != "" {
 				if err := clipboard.WriteAll(cleanResponse); err != nil {
 					appLogger.Warn(fmt.Sprintf("Failed to copy to clipboard: %v", err))
 				} else {
-					appLogger.Info("≡ƒôï Response copied to clipboard!")
+					if cleanResponse != rawResponse {
+						appLogger.Info("≡ƒôï Code extracted and copied to clipboard!")
+					} else {
+						appLogger.Info("≡ƒôï Response copied to clipboard!")
+					}
 				}
 			}
 		}
-
 		return nil
 	},
+}
+
+func stripMarkdown(content string) string {
+	content = strings.TrimSpace(content)
+
+	if strings.HasPrefix(content, "```") && strings.HasSuffix(content, "```") {
+		lines := strings.Split(content, "\n")
+
+		if len(lines) >= 2 {
+
+			lines = lines[1:]
+
+			if strings.TrimSpace(lines[len(lines)-1]) == "```" {
+				lines = lines[:len(lines)-1]
+			}
+
+			return strings.Join(lines, "\n")
+		}
+	}
+
+	return content
 }
 
 func init() {
@@ -238,7 +265,7 @@ func init() {
 	askCmd.Flags().StringVarP(&focusFile, "focus", "f", "", "Comma-separated list of files to scan")
 	askCmd.Flags().BoolVarP(&smartMode, "smart", "S", false, "Use AI to intelligently select relevant files")
 	askCmd.Flags().BoolVarP(&rawOutput, "raw", "r", false, "Output only the raw AI response (no headers) for piping")
-	askCmd.Flags().BoolVarP(&askCopy, "copy", "c", false, "Copy the AI response to system clipboard")
+	askCmd.Flags().BoolVarP(&askCopy, "copy", "C", false, "Copy the AI response to system clipboard")
 }
 ```
 
@@ -1063,7 +1090,7 @@ var treeCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(treeCmd)
-	treeCmd.Flags().BoolVarP(&treeCopy, "copy", "c", false, "Copy tree output to clipboard")
+	treeCmd.Flags().BoolVarP(&treeCopy, "copy", "C", false, "Copy tree output to clipboard")
 	treeCmd.Flags().StringVarP(&treeOut, "out", "o", "", "Save tree output to a text file")
 }
 ```
