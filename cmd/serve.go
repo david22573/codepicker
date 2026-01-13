@@ -45,7 +45,7 @@ var serveCmd = &cobra.Command{
 		srv := server.New(port, engine, appLogger)
 
 		appLogger.Info(fmt.Sprintf("📂 Context: %s", absSrc))
-		appLogger.Info(fmt.Sprintf("🛡️  Shadow Workspace Active"))
+		appLogger.Info("🛡️  Shadow Workspace Active")
 
 		// 4. Start
 		return srv.Start()
