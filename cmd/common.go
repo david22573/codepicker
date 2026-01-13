@@ -17,7 +17,8 @@ func validateAPIKey() (string, error) {
 	}
 
 	if len(apiKey) < constants.MinAPIKeyLength {
-		return "", fmt.Errorf("API key appears invalid (length < %d)", constants.MinAPIKeyLength)
+		// Changed: Generic error message to prevent leaking details in logs
+		return "", fmt.Errorf("API key appears invalid")
 	}
 
 	return apiKey, nil
@@ -37,13 +38,14 @@ func validateFocusFiles(focusList string) ([]string, error) {
 			continue
 		}
 
+		// Use the new hardened Sanitize function
 		clean, err := paths.Sanitize(f)
 		if err != nil {
 			appLogger.Warn(fmt.Sprintf("Invalid focus file path '%s': %v (skipping)", f, err))
 			continue
 		}
 
-		// Hard Safety Check
+		// Additional git check (kept from original)
 		if strings.Contains(clean, "/.git/") || strings.HasSuffix(clean, "/.git") {
 			appLogger.Warn(fmt.Sprintf("Refusing to focus on git internal file: %s", clean))
 			continue
@@ -66,4 +68,3 @@ func validateFocusFiles(focusList string) ([]string, error) {
 
 	return validated, nil
 }
-

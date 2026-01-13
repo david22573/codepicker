@@ -45,7 +45,7 @@ clean:
 	rm -rf codepicker_out
 ```
 
-## File: cmd\ask.go
+## File: cmd/ask.go
 ```go
 package cmd
 
@@ -269,7 +269,7 @@ func init() {
 }
 ```
 
-## File: cmd\chat.go
+## File: cmd/chat.go
 ```go
 package cmd
 
@@ -391,7 +391,7 @@ func init() {
 }
 ```
 
-## File: cmd\common.go
+## File: cmd/common.go
 ```go
 package cmd
 
@@ -462,7 +462,7 @@ func validateFocusFiles(focusList string) ([]string, error) {
 }
 ```
 
-## File: cmd\copy.go
+## File: cmd/copy.go
 ```go
 package cmd
 
@@ -505,7 +505,7 @@ func init() {
 }
 ```
 
-## File: cmd\init.go
+## File: cmd/init.go
 ```go
 package cmd
 
@@ -578,7 +578,7 @@ func init() {
 }
 ```
 
-## File: cmd\root.go
+## File: cmd/root.go
 ```go
 package cmd
 
@@ -834,7 +834,7 @@ func flagChanged(flags interface{ Changed(string) bool }, name string) bool {
 }
 ```
 
-## File: cmd\serve.go
+## File: cmd/serve.go
 ```go
 package cmd
 
@@ -1050,7 +1050,7 @@ func init() {
 }
 ```
 
-## File: cmd\tree.go
+## File: cmd/tree.go
 ```go
 package cmd
 
@@ -1095,7 +1095,7 @@ func init() {
 }
 ```
 
-## File: internal\config\config.go
+## File: internal/config/config.go
 ```go
 package config
 
@@ -1175,7 +1175,7 @@ func (c *Config) AddIgnoredDirs(dirs []string) {
 }
 ```
 
-## File: internal\config\configfile.go
+## File: internal/config/configfile.go
 ```go
 package config
 
@@ -1230,7 +1230,7 @@ func LoadConfigFile(path string) (*ConfigFile, error) {
 }
 ```
 
-## File: internal\constants\constants.go
+## File: internal/constants/constants.go
 ```go
 package constants
 
@@ -1256,7 +1256,7 @@ const (
 )
 ```
 
-## File: internal\contextgen\generator.go
+## File: internal/contextgen/generator.go
 ```go
 package contextgen
 
@@ -1340,7 +1340,7 @@ func Generate(ctx context.Context, opts Options, log logger.Logger) (string, err
 }
 ```
 
-## File: internal\errors\errors.go
+## File: internal/errors/errors.go
 ```go
 package errors
 
@@ -1462,7 +1462,7 @@ func NewPathError(op, path string, err error) error {
 }
 ```
 
-## File: internal\git\git.go
+## File: internal/git/git.go
 ```go
 package git
 
@@ -1504,7 +1504,7 @@ func GetChangedFiles(diffRef string) (map[string]bool, error) {
 }
 ```
 
-## File: internal\logger\logger.go
+## File: internal/logger/logger.go
 ```go
 package logger
 
@@ -1562,7 +1562,7 @@ func (l *NoOpLogger) Debug(msg string) {}
 func (l *NoOpLogger) Error(msg string) {}
 ```
 
-## File: internal\minifier\generic.go
+## File: internal/minifier/generic.go
 ```go
 package minifier
 
@@ -1608,7 +1608,7 @@ func SqueezeVerticalWhitespace(content []byte) []byte {
 }
 ```
 
-## File: internal\minifier\go_minifier.go
+## File: internal/minifier/go_minifier.go
 ```go
 package minifier
 
@@ -1659,7 +1659,7 @@ func (m *GoMinifier) Minify(content []byte) []byte {
 }
 ```
 
-## File: internal\minifier\js_minifier.go
+## File: internal/minifier/js_minifier.go
 ```go
 package minifier
 
@@ -1723,7 +1723,7 @@ func (m *JSMinifier) Minify(content []byte) []byte {
 }
 ```
 
-## File: internal\minifier\minifier.go
+## File: internal/minifier/minifier.go
 ```go
 package minifier
 
@@ -1781,7 +1781,7 @@ func Minify(content []byte, ext string) []byte {
 }
 ```
 
-## File: internal\minifier\minifier_test.go
+## File: internal/minifier/minifier_test.go
 ```go
 package minifier
 
@@ -1851,7 +1851,7 @@ func main() {
 }
 ```
 
-## File: internal\minifier\python_minifier.go
+## File: internal/minifier/python_minifier.go
 ```go
 package minifier
 
@@ -1903,7 +1903,7 @@ func (m *PythonMinifier) Minify(content []byte) []byte {
 }
 ```
 
-## File: internal\paths\validator.go
+## File: internal/paths/validator.go
 ```go
 package paths
 
@@ -1978,7 +1978,7 @@ func ValidateOutput(out string) error {
 }
 ```
 
-## File: internal\planner\planner.go
+## File: internal/planner/planner.go
 ```go
 package planner
 
@@ -2153,7 +2153,7 @@ func estimateTokenUsage(ctx context.Context, apiKey, model string, files []strin
 }
 ```
 
-## File: internal\scanner\scanner.go
+## File: internal/scanner/scanner.go
 ```go
 package scanner
 
@@ -2290,7 +2290,7 @@ func (s *Scanner) Scan(ctx context.Context) error {
 }
 ```
 
-## File: internal\scanner\scanner_test.go
+## File: internal/scanner/scanner_test.go
 ```go
 package scanner
 
@@ -2382,7 +2382,7 @@ func createFile(t *testing.T, dir, name, content string) {
 }
 ```
 
-## File: internal\tokenizer\tokenizer.go
+## File: internal/tokenizer/tokenizer.go
 ```go
 package tokenizer
 
@@ -2408,7 +2408,7 @@ func EstimateCost(tokens int) float64 {
 }
 ```
 
-## File: internal\writer\writer.go
+## File: internal/writer/writer.go
 ```go
 package writer
 
@@ -2688,7 +2688,7 @@ func main() {
 }
 ```
 
-## File: pkg\openrouter\chat.go
+## File: pkg/openrouter/chat.go
 ```go
 package openrouter
 
@@ -2839,7 +2839,7 @@ func (c *Client) CreateChatCompletionStream(ctx context.Context, req ChatComplet
 }
 ```
 
-## File: pkg\openrouter\client.go
+## File: pkg/openrouter/client.go
 ```go
 package openrouter
 
@@ -2996,7 +2996,7 @@ func (c *Client) sendRequest(req *http.Request, v any) error {
 }
 ```
 
-## File: pkg\openrouter\models.go
+## File: pkg/openrouter/models.go
 ```go
 package openrouter
 
