@@ -42,6 +42,16 @@ func (s *AgentServer) Start() error {
 	mux.HandleFunc("/agent/task", s.enableCORS(s.handleAgentTask))
 	mux.HandleFunc("/agent/approve", s.enableCORS(s.handleApprovalResponse))
 	mux.HandleFunc("/health", s.handleHealth)
+	mux.HandleFunc("/agent/context", s.enableCORS(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			s.handleGetContext(w, r)
+		case http.MethodPost:
+			s.handleAddContext(w, r)
+		case http.MethodDelete:
+			s.handleDeleteContext(w, r)
+		}
+	}))
 
 	s.Logger.Info(fmt.Sprintf("🚀 Agent Daemon listening on :%s", s.Port))
 
