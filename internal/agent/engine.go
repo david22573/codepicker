@@ -11,14 +11,13 @@ import (
 )
 
 type Engine struct {
-	Client   *openrouter.Client
-	Model    string
-	Sentinel *Sentinel
-	Shadow   *shadow.Manager
-	Memory   *WorkingMemory // <--- NEW
-	Logger   logger.Logger
-	SrcRoot  string
-
+	Client           *openrouter.Client
+	Model            string
+	Sentinel         *Sentinel
+	Shadow           *shadow.Manager
+	Memory           *WorkingMemory
+	Logger           logger.Logger
+	SrcRoot          string
 	ApprovalCallback func(command string, reason string) bool
 }
 
@@ -33,7 +32,7 @@ func NewEngine(client *openrouter.Client, model, srcRoot string, log logger.Logg
 		Model:            model,
 		Sentinel:         NewSentinel(),
 		Shadow:           shadowMgr,
-		Memory:           NewMemory(srcRoot), // <--- Init Memory
+		Memory:           NewMemory(srcRoot),
 		Logger:           log,
 		SrcRoot:          srcRoot,
 		ApprovalCallback: func(c, r string) bool { return false },
@@ -41,15 +40,14 @@ func NewEngine(client *openrouter.Client, model, srcRoot string, log logger.Logg
 }
 
 func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openrouter.ChatMessage)) (string, error) {
-	// Base System Prompt
-	baseSystemPrompt := `You are an autonomous AI developer agent. 
-	RULES:
-	1. Code context is provided in "ACTIVE SOURCE FILES". 
-	2. If you need to see a file not listed there, use 'read_file' to add it to context.
-	3. DO NOT output code for files already in context unless you are changing them.
-	4. Use 'write_shadow_file' to propose changes.`
 
-	// Initial History
+	baseSystemPrompt := `You are an autonomous AI developer agent.
+RULES:
+1. Code context is provided in "ACTIVE SOURCE FILES".
+2. If you need to see a file not listed there, use 'read_file' to add it to context.
+3. DO NOT output code for files already in context unless you are changing them.
+4. Use 'write_shadow_file' to propose changes.`
+
 	messages := []openrouter.ChatMessage{
 		{Role: "user", Content: task},
 	}
@@ -63,12 +61,9 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 		default:
 		}
 
-		// <--- DYNAMIC CONTEXT INJECTION
-		// We reconstruct the System Prompt every turn to include the latest Memory state.
 		currentContext := e.Memory.FormatContext()
 		fullSystemMsg := baseSystemPrompt + "\n" + currentContext
 
-		// Construct the transient request messages (System + History)
 		requestMessages := append([]openrouter.ChatMessage{{Role: "system", Content: fullSystemMsg}}, messages...)
 
 		req := openrouter.ChatCompletionRequest{
@@ -77,7 +72,7 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 			Tools:    Tools,
 		}
 
-		e.Logger.Info(fmt.Sprintf("🤖 Agent thinking (Turn %d)...", i+1))
+		e.Logger.Info(fmt.Sprintf("Agent thinking (Turn %d)...", i+1))
 
 		resp, err := e.Client.CreateChatCompletion(ctx, req)
 		if err != nil {
@@ -86,7 +81,6 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 
 		msg := resp.Choices[0].Message
 
-		// Add thought to history (but NOT the massive system prompt)
 		messages = append(messages, *msg)
 		if updateHistory != nil {
 			updateHistory(*msg)
@@ -106,7 +100,6 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 				}
 				json.Unmarshal([]byte(tool.Function.Arguments), &args)
 
-				// <--- UPDATED LOGIC: Add to Memory
 				err := e.Memory.Add(args.Path)
 				if err != nil {
 					resultStr = fmt.Sprintf("Error reading file: %v", err)
@@ -114,11 +107,47 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 					resultStr = fmt.Sprintf("File '%s' added to Active Context.", args.Path)
 				}
 
-			// ... (write_shadow_file and run_shell logic remains the same as previous) ...
+			case "write_shadow_file":
+				var args struct {
+					Path    string `json:"path"`
+					Content string `json:"content"`
+				}
+				json.Unmarshal([]byte(tool.Function.Arguments), &args)
+
+				path, err := e.Shadow.WriteFile(args.Path, []byte(args.Content))
+				if err != nil {
+					resultStr = fmt.Sprintf("Error writing shadow file: %v", err)
+				} else {
+					resultStr = fmt.Sprintf("Changes written to shadow file: %s", path)
+				}
+
 			case "run_shell":
-				// ... (Same Sentinel logic) ...
-				// For brevity, assuming previous implementation
-				resultStr = "Shell command executed (simulated for brevity)"
+				var args struct {
+					Command string `json:"command"`
+				}
+				if err := json.Unmarshal([]byte(tool.Function.Arguments), &args); err != nil {
+					resultStr = fmt.Sprintf("Error parsing arguments: %v", err)
+					break
+				}
+
+				// 1. Analyze the command safely
+				needsApproval, reason, binary, cmdArgs := e.Sentinel.CheckCommand(args.Command)
+
+				// 2. Seek Approval if necessary
+				if needsApproval {
+					if !e.ApprovalCallback(args.Command, reason) {
+						resultStr = "Command denied by user."
+						break
+					}
+				}
+
+				// 3. Execute safely without shell
+				output, err := e.Sentinel.Execute(binary, cmdArgs)
+				if err != nil {
+					resultStr = fmt.Sprintf("Error: %v\nOutput: %s", err, output)
+				} else {
+					resultStr = output
+				}
 			}
 
 			toolMsg := openrouter.ChatMessage{

@@ -4,10 +4,11 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+
+	"github.com/google/shlex"
 )
 
 type Sentinel struct {
-	// Whitelist of binaries that are always safe to run read-only
 	SafeBinaries map[string]bool
 }
 
@@ -20,44 +21,51 @@ func NewSentinel() *Sentinel {
 			"find":  true,
 			"pwd":   true,
 			"echo":  true,
-			"mkdir": true, // Usually safe in context of creating new project dirs
+			"mkdir": true,
 		},
 	}
 }
 
-// CheckCommand analyzes a command string and determines if it requires human approval.
-// Returns (needsApproval bool, reason string)
-func (s *Sentinel) CheckCommand(cmdStr string) (bool, string) {
-	parts := strings.Fields(cmdStr)
-	if len(parts) == 0 {
-		return false, "empty command"
+// CheckCommand analyzes the command string and determines if it requires approval.
+// It returns (needsApproval bool, reason string, binary string, args []string).
+func (s *Sentinel) CheckCommand(cmdStr string) (bool, string, string, []string) {
+	// 1. Use shlex to parse the command string properly (handling quotes)
+	parts, err := shlex.Split(cmdStr)
+	if err != nil || len(parts) == 0 {
+		return false, "empty or malformed command", "", nil
 	}
 
 	binary := parts[0]
+	args := parts[1:]
 
-	// 1. Check Whitelist
+	// 2. Strict Whitelist Check
 	if s.SafeBinaries[binary] {
-		return false, ""
+		// Scan args for suspicious shell operators just in case
+		for _, arg := range args {
+			if strings.ContainsAny(arg, "&|;`$") {
+				return true, "Suspicious shell characters detected in arguments", binary, args
+			}
+		}
+		return false, "", binary, args
 	}
 
-	// 2. Specific flagging for dangerous operations
-	if binary == "rm" || binary == "mv" {
-		return true, fmt.Sprintf("File system modification detected: %s", binary)
+	// 3. Dangerous Binaries
+	if binary == "rm" || binary == "mv" || binary == "cp" || binary == "chmod" {
+		return true, fmt.Sprintf("File system modification detected: %s", binary), binary, args
 	}
 
-	// 3. Network/Package managers usually need approval
+	// 4. External Tools (Network/Build)
 	if binary == "go" || binary == "npm" || binary == "git" || binary == "curl" || binary == "wget" {
-		// We might refine this later (e.g., 'go list' is safe, 'go run' is not)
-		return true, fmt.Sprintf("External tool execution: %s", binary)
+		return true, fmt.Sprintf("External tool execution: %s", binary), binary, args
 	}
 
-	// Default to cautious
-	return true, fmt.Sprintf("Unrecognized binary: %s", binary)
+	return true, fmt.Sprintf("Unrecognized binary: %s", binary), binary, args
 }
 
-func (s *Sentinel) Execute(cmdStr string) (string, error) {
-	// NOTE: This basic implementation assumes Linux/Termux shell (sh/bash)
-	cmd := exec.Command("sh", "-c", cmdStr)
+// Execute runs the command directly without a shell wrapper.
+// This kills the class of attacks where an LLM chains commands (e.g. "ls && rm -rf /").
+func (s *Sentinel) Execute(binary string, args []string) (string, error) {
+	cmd := exec.Command(binary, args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return string(output), fmt.Errorf("command failed: %w", err)

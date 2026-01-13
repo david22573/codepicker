@@ -6,7 +6,6 @@ import (
 	"github.com/david22573/codepicker/pkg/openrouter"
 )
 
-// Tools defines the capabilities available to the Agent
 var Tools = []openrouter.Tool{
 	{
 		Type: "function",

@@ -96,29 +96,43 @@ func (c *Client) ListModels(ctx context.Context) (*ListModelsResponse, error) {
 }
 
 // Helper to create a request with a reusable body reader
-func (c *Client) newRequestWithBytes(ctx context.Context, method, path string, payload []byte) (*http.Request, error) {
+func (c *Client) newRequestWithBytes(
+	ctx context.Context,
+	method, path string,
+	payload []byte,
+) (*http.Request, error) {
+
 	var body io.Reader
 	if payload != nil {
 		body = bytes.NewReader(payload)
 	}
+
 	url := fmt.Sprintf("%s%s", c.baseURL, path)
 	req, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
 		return nil, err
 	}
+
 	req.Header.Set("Content-Type", contentType)
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.apiKey))
+
 	if c.httpReferer != "" {
 		req.Header.Set("HTTP-Referer", c.httpReferer)
 	}
 	if c.xTitle != "" {
 		req.Header.Set("X-Title", c.xTitle)
 	}
+
 	return req, nil
 }
 
-// Kept for backward compatibility if needed, but we prefer newRequestWithBytes internally
-func (c *Client) newRequest(ctx context.Context, method, path string, payload interface{}) (*http.Request, error) {
+// Kept for backward compatibility
+func (c *Client) newRequest(
+	ctx context.Context,
+	method, path string,
+	payload interface{},
+) (*http.Request, error) {
+
 	var b []byte
 	var err error
 	if payload != nil {
@@ -136,21 +150,33 @@ func (c *Client) sendRequest(req *http.Request, v any) error {
 		if goerrors.Is(err, context.Canceled) || goerrors.Is(err, context.DeadlineExceeded) {
 			return err
 		}
-		return errors.NewAPIError(0, err.Error(), "", req.URL.Path)
+		return errors.NewInternalError(
+			"openrouter.http",
+			err,
+		)
 	}
 	defer res.Body.Close()
 
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		// FIX: Increased buffer to 4KB to catch full error descriptions
 		body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
-		return errors.NewAPIError(res.StatusCode, string(body), "", req.URL.Path)
+		return errors.NewInternalError(
+			"openrouter.http",
+			fmt.Errorf(
+				"status %d on %s: %s",
+				res.StatusCode,
+				req.URL.Path,
+				string(body),
+			),
+		)
 	}
 
 	if v == nil {
 		return nil
 	}
+
 	if err := json.NewDecoder(res.Body).Decode(v); err != nil {
 		return fmt.Errorf("failed to decode response: %w", err)
 	}
+
 	return nil
 }

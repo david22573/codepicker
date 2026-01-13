@@ -1,7 +1,6 @@
 package writer
 
 import (
-	"bufio"
 	"bytes"
 	"fmt"
 	"io"
@@ -9,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync" // Added for thread safety
 	"unicode/utf8"
 
 	"github.com/atotto/clipboard"
@@ -25,13 +25,15 @@ type OutputStrategy interface {
 	Name() string
 }
 
+// ConcatStrategy combines all files into one document.
 type ConcatStrategy struct {
 	OutputPath    string
-	absOutputPath string // Cached absolute path for safer comparison
+	absOutputPath string
 	file          *os.File
 	TokenCount    int
 	Minify        bool
 	ComputeTokens bool
+	mu            sync.Mutex // Mutex ensures atomic writes from concurrent workers
 }
 
 func NewConcatStrategy(path string, minify bool, computeTokens bool) *ConcatStrategy {
@@ -50,7 +52,7 @@ func (c *ConcatStrategy) Init() error {
 	if err := os.MkdirAll(filepath.Dir(c.OutputPath), 0755); err != nil {
 		return err
 	}
-	// O_APPEND | O_CREATE | O_WRONLY ensures we don't accidentally wipe if logic fails elsewhere
+
 	f, err := os.OpenFile(c.OutputPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
 		return err
@@ -69,10 +71,12 @@ func (c *ConcatStrategy) ShouldSkip(path string) bool {
 	return absCandidate == c.absOutputPath
 }
 
+// Write processes a single file. It is now thread-safe.
 func (c *ConcatStrategy) Write(absPath, relPath string) error {
+	// 1. Heavy lifting (IO + CPU) happens BEFORE the lock
 	f, err := os.Open(absPath)
 	if err != nil {
-		return err // Logging handled by scanner
+		return err
 	}
 	defer f.Close()
 
@@ -86,13 +90,12 @@ func (c *ConcatStrategy) Write(absPath, relPath string) error {
 		return nil
 	}
 
-	// 1. Read header for Binary Detection
 	header := make([]byte, 512)
 	n, err := f.Read(header)
 	if err != nil && err != io.EOF {
 		return err
 	}
-	// Reset file pointer after reading header
+
 	if _, err := f.Seek(0, 0); err != nil {
 		return err
 	}
@@ -105,91 +108,55 @@ func (c *ConcatStrategy) Write(absPath, relPath string) error {
 		return nil
 	}
 
-	// 2. Prepare Header
+	// Prepare content in memory buffer first
+	var contentBuffer bytes.Buffer
+
 	ext := strings.TrimPrefix(filepath.Ext(relPath), ".")
 	if ext == "" {
 		ext = "text"
 	}
 
-	// Write file header to output (buffered to minimize syscalls)
-	// We use a temporary buffer for the small headers to avoid partial writes
-	var metaBuf bytes.Buffer
-	fmt.Fprintf(&metaBuf, "## File: %s\n", relPath)
-	fmt.Fprintf(&metaBuf, "```%s\n", ext)
-	if _, err := c.file.Write(metaBuf.Bytes()); err != nil {
+	fmt.Fprintf(&contentBuffer, "## File: %s\n", relPath)
+	fmt.Fprintf(&contentBuffer, "```%s\n", ext)
+
+	// Read and Minify (CPU intensive work)
+	rawContent, err := io.ReadAll(io.LimitReader(f, constants.MaxFileSize))
+	if err != nil {
 		return err
 	}
 
-	// 3. Process Content
-	var bytesWritten int64
+	if !utf8.Valid(rawContent) {
+		fmt.Printf("⚠️  Skipping invalid UTF-8 file: %s\n", relPath)
+		return nil
+	}
 
-	// If Minification is ON, we must read the file into memory (AST parsing requires it).
-	// We use io.LimitReader to strictly enforce the size limit.
+	var bytesToWrite []byte
+	var tokens int
+
 	if c.Minify {
-		content, err := io.ReadAll(io.LimitReader(f, constants.MaxFileSize))
-		if err != nil {
-			return err
-		}
-
-		if !utf8.Valid(content) {
-			fmt.Printf("⚠️  Skipping invalid UTF-8 file: %s\n", relPath)
-			return nil
-		}
-
 		extStr := strings.ToLower(filepath.Ext(relPath))
-		minified := minifier.Minify(content, extStr)
-
-		if _, err := c.file.Write(minified); err != nil {
-			return err
-		}
-		bytesWritten = int64(len(minified))
-
-		if c.ComputeTokens {
-			c.TokenCount += tokenizer.CountTokens(string(minified))
-		}
-
+		bytesToWrite = minifier.Minify(rawContent, extStr)
 	} else {
-		// STREAMING MODE (Memory Efficient)
-		// We copy directly from source file to output file.
-		// NOTE: Token counting in streaming mode is expensive (requires double read),
-		// so we only estimate or skip it if strict accuracy isn't required.
-		// For this implementation, we buffer the read to count tokens if needed.
-
-		if c.ComputeTokens {
-			// If we need tokens, we have to read it. Streaming + Counting is hard without a TeeReader and buffer.
-			// Fallback to read-all for token counting accuracy, or implement a counting scanner.
-			// For safety, we'll read-all but limited.
-			content, err := io.ReadAll(io.LimitReader(f, constants.MaxFileSize))
-			if err != nil {
-				return err
-			}
-
-			if _, err := c.file.Write(content); err != nil {
-				return err
-			}
-			c.TokenCount += tokenizer.CountTokens(string(content))
-			bytesWritten = int64(len(content))
-		} else {
-			// Pure streaming - super fast, low memory
-			written, err := io.Copy(c.file, io.LimitReader(f, constants.MaxFileSize))
-			if err != nil {
-				return err
-			}
-			bytesWritten = written
-		}
+		bytesToWrite = rawContent
 	}
 
-	// 4. Write Footer
-	// Ensure newline before closing block
-	// We can't easily check the last byte in streaming mode without complex logic,
-	// so we force a newline for safety.
-	if _, err := c.file.Write([]byte("\n```\n\n")); err != nil {
+	if c.ComputeTokens {
+		tokens = tokenizer.CountTokens(string(bytesToWrite))
+	}
+
+	contentBuffer.Write(bytesToWrite)
+	contentBuffer.Write([]byte("\n```\n\n"))
+
+	// 2. Critical Section: Write to shared file handle
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if _, err := c.file.Write(contentBuffer.Bytes()); err != nil {
 		return err
 	}
 
-	// Just for debug visibility
-	if bytesWritten == 0 {
-		// Log?
+	if c.ComputeTokens {
+		c.TokenCount += tokens
 	}
 
 	return nil
@@ -197,14 +164,14 @@ func (c *ConcatStrategy) Write(absPath, relPath string) error {
 
 func (c *ConcatStrategy) Close() error {
 	if c.file != nil {
-		// Sync ensures data is flushed to disk before we close
 		c.file.Sync()
 		return c.file.Close()
 	}
 	return nil
 }
 
-// CopyStrategy and TreeStrategy remain largely the same, ensuring Copy uses io.CopyBuffer
+// CopyStrategy writes to separate files, so it is inherently thread-safe
+// as long as filenames are unique (which the scanner guarantees).
 type CopyStrategy struct {
 	OutputDir string
 }
@@ -246,7 +213,6 @@ func (c *CopyStrategy) Write(absPath, relPath string) error {
 	}
 	defer dst.Close()
 
-	// Use CopyBuffer for efficiency
 	buf := make([]byte, 32*1024)
 	if _, err := io.CopyBuffer(dst, src, buf); err != nil {
 		return fmt.Errorf("failed to copy content to %s: %w", targetPath, err)
@@ -265,6 +231,7 @@ type TreeOptions struct {
 type TreeStrategy struct {
 	opts   TreeOptions
 	buffer *bytes.Buffer
+	mu     sync.Mutex // Protects the shared buffer
 }
 
 func NewTreeStrategy(opts TreeOptions) *TreeStrategy {
@@ -299,7 +266,13 @@ func (t *TreeStrategy) Write(absPath, relPath string) error {
 		indent += "│   "
 	}
 	line := fmt.Sprintf("%s├── %s\n", indent, filename)
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	// Print to stdout immediately (might interleave slightly but acceptable for progress)
 	fmt.Print(line)
+	// Buffer writes must be atomic
 	t.buffer.WriteString(line)
 	return nil
 }

@@ -9,10 +9,10 @@ import (
 )
 
 func (s *AgentServer) handleAgentTask(w http.ResponseWriter, r *http.Request) {
-	// Setup SSE
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "Streaming not supported", http.StatusInternalServerError)
@@ -26,33 +26,21 @@ func (s *AgentServer) handleAgentTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	eventStream := make(chan string)
-
-	// We override the specific approval callback for this request context
-	// so we can inject the Notification into THIS stream.
 	originalCallback := s.Engine.ApprovalCallback
 
-	// Hook: Intercept approval requests to send them down the SSE pipe
+	// --- FIX: Use correct context key "request_id" ---
+	reqID := fmt.Sprintf("%s", r.Context().Value("request_id"))
+	if reqID == "%!s(<nil>)" || reqID == "" {
+		// Fallback if middleware didn't set it
+		reqID = "req_" + taskQuery[:3]
+	}
+
 	s.Engine.ApprovalCallback = func(cmdStr, reason string) bool {
-		// 1. Send the "Approval Needed" JSON to the client
-		// We need to generate the ID here to match the one in WaitForApproval,
-		// but WaitForApproval generates it internally.
-
-		// To fix this race/duplication: We actually just use the Server's base WaitForApproval
-		// but we need to know the ID it generated.
-
-		// SIMPLIFICATION: We implementation the logic fully here for this request context.
-		reqID := fmt.Sprintf("%d", r.Context().Value("req_id_placeholder")) // simplistic
-		if reqID == "%!d(string=<nil>)" {
-			reqID = "req_" + taskQuery[:3]
-		} // fallback
-
-		// Make the channel
 		ch := make(chan bool)
 		s.approvalLock.Lock()
 		s.approvalMap[reqID] = ch
 		s.approvalLock.Unlock()
 
-		// Send Event
 		jsonMsg, _ := json.Marshal(map[string]interface{}{
 			"type":    "approval_req",
 			"id":      reqID,
@@ -61,11 +49,10 @@ func (s *AgentServer) handleAgentTask(w http.ResponseWriter, r *http.Request) {
 		})
 		eventStream <- string(jsonMsg)
 
-		// Wait
+		// Wait for response
 		return <-ch
 	}
 
-	// Restore callback when done
 	defer func() { s.Engine.ApprovalCallback = originalCallback }()
 
 	go func() {
@@ -116,13 +103,11 @@ func (s *AgentServer) handleApprovalResponse(w http.ResponseWriter, r *http.Requ
 	s.approvalLock.Lock()
 	ch, exists := s.approvalMap[req.ID]
 	if exists {
-		// Clean up immediately to prevent reuse
 		delete(s.approvalMap, req.ID)
 	}
 	s.approvalLock.Unlock()
 
 	if exists {
-		// Send signal to the blocked goroutine
 		ch <- req.Approved
 		json.NewEncoder(w).Encode(map[string]string{"status": "received"})
 	} else {

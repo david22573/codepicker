@@ -7,7 +7,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// ConfigFile represents the structure of .codepicker.yml
 type ConfigFile struct {
 	Src     string   `yaml:"src"`
 	Output  string   `yaml:"output"`
@@ -24,10 +23,8 @@ type AIConfig struct {
 	Temperature float32 `yaml:"temperature"`
 }
 
-// LoadConfigFile attempts to load configuration from a YAML file
 func LoadConfigFile(path string) (*ConfigFile, error) {
 	if path == "" {
-		// Try default locations
 		for _, loc := range []string{".codepicker.yml", ".codepicker.yaml", "codepicker.yml"} {
 			if _, err := os.Stat(loc); err == nil {
 				path = loc
@@ -35,7 +32,7 @@ func LoadConfigFile(path string) (*ConfigFile, error) {
 			}
 		}
 		if path == "" {
-			return nil, nil // No config file found, not an error
+			return nil, nil
 		}
 	}
 

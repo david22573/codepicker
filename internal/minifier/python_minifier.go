@@ -6,45 +6,26 @@ import (
 
 type PythonMinifier struct{}
 
+// Minify performs a safe, whitespace-only optimization.
+// PREVIOUSLY: Attempted to parse docstrings/comments, which is unsafe without a lexer.
+// NOW: Removes empty lines and trailing whitespace.
+// CRITICAL: Preserves leading whitespace (indentation) as it is semantically significant in Python.
 func (m *PythonMinifier) Minify(content []byte) []byte {
 	lines := strings.Split(string(content), "\n")
 	var kept []string
 
-	inDocstring := false
-	docstringQuote := ""
-
 	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
+		// Remove trailing whitespace only
+		trimmedRight := strings.TrimRight(line, " \t\r")
+
+		// If the line is completely empty, skip it to reduce vertical token usage
+		if len(strings.TrimSpace(trimmedRight)) == 0 {
 			continue
 		}
 
-		// Handle Docstrings (""" or ''')
-		if !inDocstring {
-			if strings.HasPrefix(trimmed, `"""`) || strings.HasPrefix(trimmed, `'''`) {
-				quoteType := trimmed[:3]
-				// Check for one-liner docstring """..."""
-				if len(trimmed) > 3 && strings.HasSuffix(trimmed, quoteType) {
-					continue
-				}
-				inDocstring = true
-				docstringQuote = quoteType
-				continue
-			}
-		} else {
-			if strings.HasSuffix(trimmed, docstringQuote) {
-				inDocstring = false
-				continue
-			}
-			continue
-		}
-
-		// Handle Comments (#)
-		if strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-
-		kept = append(kept, strings.TrimRight(line, " \r"))
+		// Append the line with original indentation
+		kept = append(kept, trimmedRight)
 	}
+
 	return []byte(strings.Join(kept, "\n"))
 }

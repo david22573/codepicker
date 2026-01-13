@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/david22573/codepicker/internal/config"
 	"github.com/david22573/codepicker/internal/logger"
@@ -31,7 +33,6 @@ func NewScanner(root string, w writer.OutputStrategy, cfg *config.Config, log lo
 		Logger: log,
 	}
 
-	// Move writer init here to ensure it's ready before scan starts
 	if err := s.Writer.Init(); err != nil {
 		s.Logger.Error(fmt.Sprintf("Failed to init writer: %v", err))
 	}
@@ -57,102 +58,154 @@ func (s *Scanner) SetWhitelist(files map[string]bool) {
 	s.Whitelist = files
 }
 
+type scanJob struct {
+	absPath string
+	relPath string
+}
+
+type scanResult struct {
+	path string
+	err  error
+}
+
 func (s *Scanner) Scan(ctx context.Context) error {
-	// Use WalkDir (more efficient than Walk)
-	return filepath.WalkDir(s.Root, func(path string, d os.DirEntry, err error) error {
-		// 1. Check Cancellation Signal
-		select {
-		case <-ctx.Done():
-			// Return special error to stop WalkDir immediately
-			return filepath.SkipAll
-		default:
-		}
+	// 1. Setup Channels
+	jobs := make(chan scanJob, 100)
+	results := make(chan scanResult, 100)
+	var wg sync.WaitGroup
 
-		if err != nil {
-			if path == s.Root {
-				return err
+	// 2. Start Workers
+	// The Writer strategy is now responsible for thread-safety internally.
+	workerCount := runtime.NumCPU()
+	s.Logger.Debug(fmt.Sprintf("Starting scan with %d workers", workerCount))
+
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			for job := range jobs {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+
+				if s.Writer.Name() != "Tree" {
+					s.Logger.Info(fmt.Sprintf("Picked: %s", job.relPath))
+				}
+
+				// Direct write call - Writer handles the locking
+				err := s.Writer.Write(job.absPath, job.relPath)
+
+				results <- scanResult{path: job.relPath, err: err}
 			}
-			// Don't crash on permission errors, just warn and skip
-			s.Logger.Warn(fmt.Sprintf("Skipping %s: access denied or error: %v", path, err))
-			return filepath.SkipDir
-		}
+		}(i)
+	}
 
-		// Calculate relative path for filtering
-		relPath, relErr := filepath.Rel(s.Root, path)
-		if relErr != nil {
-			return nil
-		}
-		if relPath == "." {
-			return nil
-		}
+	// 3. Start Walker
+	go func() {
+		defer close(jobs)
 
-		// 2. Check if Writer says skip (e.g., output file)
-		if s.Writer.ShouldSkip(path) {
-			if d.IsDir() {
+		err := filepath.WalkDir(s.Root, func(path string, d os.DirEntry, err error) error {
+			select {
+			case <-ctx.Done():
+				return filepath.SkipAll
+			default:
+			}
+
+			if err != nil {
+				if path == s.Root {
+					return err
+				}
+				s.Logger.Warn(fmt.Sprintf("Skipping %s: access denied or error: %v", path, err))
 				return filepath.SkipDir
 			}
-			return nil
-		}
 
-		cleanRel := filepath.ToSlash(relPath)
+			relPath, relErr := filepath.Rel(s.Root, path)
+			if relErr != nil {
+				return nil
+			}
+			if relPath == "." {
+				return nil
+			}
 
-		// 3. Diff Mode Whitelist
-		if s.Whitelist != nil {
-			if !d.IsDir() {
-				if !s.Whitelist[cleanRel] {
-					return nil
+			if s.Writer.ShouldSkip(path) {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+
+			cleanRel := filepath.ToSlash(relPath)
+
+			if s.Whitelist != nil {
+				if !d.IsDir() {
+					if !s.Whitelist[cleanRel] {
+						return nil
+					}
 				}
 			}
-		}
 
-		// 4. GitIgnore checks
-		if s.GitIgnore != nil && s.GitIgnore.MatchesPath(relPath) {
+			if s.GitIgnore != nil && s.GitIgnore.MatchesPath(relPath) {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if s.CustomIgnore != nil && s.CustomIgnore.MatchesPath(relPath) {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+
 			if d.IsDir() {
-				return filepath.SkipDir
+				if strings.HasPrefix(d.Name(), ".") && d.Name() != "." {
+					return filepath.SkipDir
+				}
+				if s.Config.IgnoredDirs[d.Name()] {
+					return filepath.SkipDir
+				}
+				return nil
 			}
-			return nil
-		}
-		if s.CustomIgnore != nil && s.CustomIgnore.MatchesPath(relPath) {
-			if d.IsDir() {
-				return filepath.SkipDir
+
+			ext := strings.ToLower(filepath.Ext(path))
+			name := strings.ToLower(d.Name())
+
+			if !s.Config.AllowedExts[ext] && !config.IsSpecialFile(name) {
+				return nil
 			}
+
+			jobs <- scanJob{absPath: path, relPath: relPath}
 			return nil
+		})
+
+		if err != nil {
+			s.Logger.Error(fmt.Sprintf("Walk failed: %v", err))
 		}
+	}()
 
-		// 5. Directory filtering
-		if d.IsDir() {
-			if strings.HasPrefix(d.Name(), ".") && d.Name() != "." {
-				return filepath.SkipDir
-			}
-			if s.Config.IgnoredDirs[d.Name()] {
-				return filepath.SkipDir
-			}
-			return nil
+	// 4. Wait and Cleanup
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// 5. Monitor results
+	var scanErrors []error
+	count := 0
+	for res := range results {
+		if res.err != nil {
+			s.Logger.Warn(fmt.Sprintf("Failed to process %s: %v", res.path, res.err))
+			scanErrors = append(scanErrors, res.err)
+		} else {
+			count++
 		}
+	}
 
-		// 6. Extension filtering
-		ext := strings.ToLower(filepath.Ext(path))
-		name := strings.ToLower(d.Name())
+	if len(scanErrors) > 0 {
+		return fmt.Errorf("scan completed with %d errors", len(scanErrors))
+	}
 
-		// Logic: If it's not an allowed extension AND not a special file (like Dockerfile), skip it
-		if !s.Config.AllowedExts[ext] && !config.IsSpecialFile(name) {
-			return nil
-		}
-
-		// Logging
-		if s.Writer.Name() != "Tree" {
-			s.Logger.Info(fmt.Sprintf("Picked: %s", relPath))
-		}
-
-		// 7. Write to output
-		// This now delegates opening the file to the Writer, which handles closing it.
-		writeErr := s.Writer.Write(path, relPath)
-		if writeErr != nil {
-			s.Logger.Warn(fmt.Sprintf("Failed to write %s: %v", relPath, writeErr))
-			// We don't abort the whole scan on a single file error, usually.
-			return nil
-		}
-
-		return nil
-	})
+	return nil
 }

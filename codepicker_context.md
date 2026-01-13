@@ -28,6 +28,7 @@ exclude:
 ai:
   model: xiaomi/mimo-v2-flash:free
   temperature: 0.7
+
 ```
 
 ## File: Makefile
@@ -267,6 +268,7 @@ func init() {
 	askCmd.Flags().BoolVarP(&rawOutput, "raw", "r", false, "Output only the raw AI response (no headers) for piping")
 	askCmd.Flags().BoolVarP(&askCopy, "copy", "C", false, "Copy the AI response to system clipboard")
 }
+
 ```
 
 ## File: cmd/chat.go
@@ -389,6 +391,7 @@ func init() {
 	chatCmd.Flags().StringVarP(&chatModel, "model", "m", constants.DefaultModel, "Model ID")
 	chatCmd.Flags().StringVarP(&focusFile, "focus", "f", "", "Comma-separated list of files")
 }
+
 ```
 
 ## File: cmd/common.go
@@ -412,7 +415,8 @@ func validateAPIKey() (string, error) {
 	}
 
 	if len(apiKey) < constants.MinAPIKeyLength {
-		return "", fmt.Errorf("API key appears invalid (length < %d)", constants.MinAPIKeyLength)
+
+		return "", fmt.Errorf("API key appears invalid")
 	}
 
 	return apiKey, nil
@@ -460,6 +464,7 @@ func validateFocusFiles(focusList string) ([]string, error) {
 
 	return validated, nil
 }
+
 ```
 
 ## File: cmd/copy.go
@@ -503,6 +508,7 @@ func init() {
 	rootCmd.AddCommand(copyCmd)
 	copyCmd.Flags().StringVarP(&outPath, "out", "o", "codepicker_out", "Output directory")
 }
+
 ```
 
 ## File: cmd/init.go
@@ -576,6 +582,7 @@ func init() {
 	rootCmd.AddCommand(initCmd)
 	initCmd.Flags().BoolVarP(&forceInit, "force", "f", false, "Overwrite existing config file")
 }
+
 ```
 
 ## File: cmd/root.go
@@ -832,6 +839,7 @@ func runScan(ctx context.Context, w writer.OutputStrategy, absSrc string, cmd *c
 func flagChanged(flags interface{ Changed(string) bool }, name string) bool {
 	return flags.Changed(name)
 }
+
 ```
 
 ## File: cmd/serve.go
@@ -844,21 +852,34 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"time"
 
+	"github.com/david22573/codepicker/internal/agent"
 	"github.com/david22573/codepicker/internal/config"
 	"github.com/david22573/codepicker/internal/paths"
 	"github.com/david22573/codepicker/internal/scanner"
+	"github.com/david22573/codepicker/internal/server"
 	"github.com/david22573/codepicker/internal/writer"
 	"github.com/david22573/codepicker/pkg/openrouter"
 	"github.com/spf13/cobra"
 )
+
+var port string
 
 type ServerState struct {
 	Port string
 }
 
 var serverState ServerState
+
+const (
+	MaxQueryLength = 25000       // characters
+	MaxModelLength = 100         // characters
+	MaxBodySize    = 1024 * 1024 // 1MB Max request body
+)
+
+var safeModelName = regexp.MustCompile(`^[a-zA-Z0-9\-\_\.\:\/]+$`)
 
 type AskRequest struct {
 	Query     string `json:"query"`
@@ -869,30 +890,39 @@ type AskRequest struct {
 
 var serveCmd = &cobra.Command{
 	Use:   "serve",
-	Short: "Start the codepicker daemon service",
+	Short: "Start the codepicker agent daemon",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if outPath == "" {
-			absSrc, _ := filepath.Abs(srcDir)
-			dirName := filepath.Base(absSrc)
-			outPath = fmt.Sprintf("%s_context.md", dirName)
+
+		apiKey := os.Getenv("OPENROUTER_API_KEY")
+		if apiKey == "" {
+			return fmt.Errorf("OPENROUTER_API_KEY environment variable required")
 		}
 
-		appLogger.Info(fmt.Sprintf("🚀 Daemon started on port %s", serverState.Port))
-		appLogger.Info(fmt.Sprintf("📂 Source: %s | 💾 Cache: %s", srcDir, outPath))
+		absSrc, err := filepath.Abs(srcDir)
+		if err != nil {
+			return fmt.Errorf("failed to resolve source dir: %w", err)
+		}
 
-		http.HandleFunc("/ask", enableCORS(handleAsk))
+		client := openrouter.NewClient(apiKey)
 
-		http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-		})
+		engine, err := agent.NewEngine(
+			client,
+			"xiaomi/mimo-v2-flash:free",
+			absSrc,
+			appLogger,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to initialize agent engine: %w", err)
+		}
 
-		return http.ListenAndServe(":"+serverState.Port, nil)
+		srv := server.New(port, engine, appLogger)
+		return srv.Start()
 	},
 }
 
 func enableCORS(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
@@ -912,10 +942,12 @@ func handleAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, MaxBodySize)
+
 	var req AskRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		appLogger.Error(fmt.Sprintf("Invalid JSON: %v", err))
-		http.Error(w, fmt.Sprintf("Invalid JSON body: %v", err), http.StatusBadRequest)
+		appLogger.Error(fmt.Sprintf("Invalid JSON or body too large: %v", err))
+		http.Error(w, "Invalid JSON body", http.StatusBadRequest)
 		return
 	}
 
@@ -923,16 +955,38 @@ func handleAsk(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Query cannot be empty", http.StatusBadRequest)
 		return
 	}
+	if len(req.Query) > MaxQueryLength {
+		http.Error(w, "Query too long", http.StatusBadRequest)
+		return
+	}
+
+	model := req.Model
+	if model == "" {
+		model = "xiaomi/mimo-v2-flash:free"
+	}
+	if len(model) > MaxModelLength || !safeModelName.MatchString(model) {
+		http.Error(w, "Invalid model name", http.StatusBadRequest)
+		return
+	}
+
+	if req.Focus != "" {
+		_, err := paths.Sanitize(req.Focus)
+		if err != nil {
+			appLogger.Warn(fmt.Sprintf("Blocked unsafe focus path: %s", req.Focus))
+			http.Error(w, "Invalid focus path", http.StatusBadRequest)
+			return
+		}
+	}
 
 	apiKey := os.Getenv("OPENROUTER_API_KEY")
 	if apiKey == "" {
-		http.Error(w, "OPENROUTER_API_KEY not set on server", http.StatusUnauthorized)
+		http.Error(w, "Server configuration error: API key missing", http.StatusInternalServerError)
 		return
 	}
 
 	absOut, err := paths.Sanitize(outPath)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Invalid output path: %v", err), http.StatusInternalServerError)
+		http.Error(w, "Server configuration error: Invalid output path", http.StatusInternalServerError)
 		return
 	}
 
@@ -960,10 +1014,15 @@ func handleAsk(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		absSrc, _ := paths.Sanitize(srcDir)
-		cfg := config.NewConfig()
+		absSrc, err := paths.Sanitize(srcDir)
+		if err != nil {
+			http.Error(w, "Invalid source directory", http.StatusInternalServerError)
+			return
+		}
 
+		cfg := config.NewConfig()
 		s := scanner.NewScanner(absSrc, wStrat, cfg, appLogger)
+
 		if err := s.Scan(r.Context()); err != nil {
 			http.Error(w, fmt.Sprintf("Scan failed: %v", err), http.StatusInternalServerError)
 			return
@@ -990,11 +1049,6 @@ func handleAsk(w http.ResponseWriter, r *http.Request) {
 
 	userMsg := fmt.Sprintf("Context:\n%s\n\nQuestion: %s", string(contextBytes), req.Query)
 
-	model := req.Model
-	if model == "" {
-		model = "xiaomi/mimo-v2-flash:free"
-	}
-
 	client := openrouter.NewClient(apiKey)
 	chatReq := openrouter.ChatCompletionRequest{
 		Model: model,
@@ -1008,7 +1062,7 @@ func handleAsk(w http.ResponseWriter, r *http.Request) {
 	stream, err := client.CreateChatCompletionStream(r.Context(), chatReq)
 	if err != nil {
 		appLogger.Error(fmt.Sprintf("OpenRouter Error: %v", err))
-		http.Error(w, fmt.Sprintf("OpenRouter Error: %v", err), http.StatusInternalServerError)
+		http.Error(w, "Upstream API Error", http.StatusBadGateway)
 		return
 	}
 	defer stream.Close()
@@ -1046,8 +1100,9 @@ func handleAsk(w http.ResponseWriter, r *http.Request) {
 
 func init() {
 	rootCmd.AddCommand(serveCmd)
-	serveCmd.Flags().StringVarP(&serverState.Port, "port", "p", "22573", "Port to listen on")
+	serveCmd.Flags().StringVarP(&port, "port", "p", "22573", "Port to listen on")
 }
+
 ```
 
 ## File: cmd/tree.go
@@ -1093,11 +1148,360 @@ func init() {
 	treeCmd.Flags().BoolVarP(&treeCopy, "copy", "C", false, "Copy tree output to clipboard")
 	treeCmd.Flags().StringVarP(&treeOut, "out", "o", "", "Save tree output to a text file")
 }
+
+```
+
+## File: internal/agent/engine.go
+```go
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+
+	"github.com/david22573/codepicker/internal/logger"
+	"github.com/david22573/codepicker/internal/shadow"
+	"github.com/david22573/codepicker/pkg/openrouter"
+)
+
+type Engine struct {
+	Client   *openrouter.Client
+	Model    string
+	Sentinel *Sentinel
+	Shadow   *shadow.Manager
+	Memory   *WorkingMemory
+	Logger   logger.Logger
+	SrcRoot  string
+
+	ApprovalCallback func(command string, reason string) bool
+}
+
+func NewEngine(client *openrouter.Client, model, srcRoot string, log logger.Logger) (*Engine, error) {
+	shadowMgr, err := shadow.NewManager(srcRoot)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Engine{
+		Client:           client,
+		Model:            model,
+		Sentinel:         NewSentinel(),
+		Shadow:           shadowMgr,
+		Memory:           NewMemory(srcRoot),
+		Logger:           log,
+		SrcRoot:          srcRoot,
+		ApprovalCallback: func(c, r string) bool { return false },
+	}, nil
+}
+
+func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openrouter.ChatMessage)) (string, error) {
+
+	baseSystemPrompt := `You are an autonomous AI developer agent.
+RULES:
+1. Code context is provided in "ACTIVE SOURCE FILES".
+2. If you need to see a file not listed there, use 'read_file' to add it to context.
+3. DO NOT output code for files already in context unless you are changing them.
+4. Use 'write_shadow_file' to propose changes.`
+
+	messages := []openrouter.ChatMessage{
+		{Role: "user", Content: task},
+	}
+
+	const maxTurns = 15
+
+	for i := 0; i < maxTurns; i++ {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		default:
+		}
+
+		currentContext := e.Memory.FormatContext()
+		fullSystemMsg := baseSystemPrompt + "\n" + currentContext
+
+		requestMessages := append([]openrouter.ChatMessage{{Role: "system", Content: fullSystemMsg}}, messages...)
+
+		req := openrouter.ChatCompletionRequest{
+			Model:    e.Model,
+			Messages: requestMessages,
+			Tools:    Tools,
+		}
+
+		e.Logger.Info(fmt.Sprintf("Agent thinking (Turn %d)...", i+1))
+
+		resp, err := e.Client.CreateChatCompletion(ctx, req)
+		if err != nil {
+			return "", fmt.Errorf("LLM error: %w", err)
+		}
+
+		msg := resp.Choices[0].Message
+
+		messages = append(messages, *msg)
+		if updateHistory != nil {
+			updateHistory(*msg)
+		}
+
+		if len(msg.ToolCalls) == 0 {
+			return fmt.Sprintf("%v", msg.Content), nil
+		}
+
+		for _, tool := range msg.ToolCalls {
+			resultStr := ""
+
+			switch tool.Function.Name {
+			case "read_file":
+				var args struct {
+					Path string `json:"path"`
+				}
+				json.Unmarshal([]byte(tool.Function.Arguments), &args)
+
+				err := e.Memory.Add(args.Path)
+				if err != nil {
+					resultStr = fmt.Sprintf("Error reading file: %v", err)
+				} else {
+					resultStr = fmt.Sprintf("File '%s' added to Active Context.", args.Path)
+				}
+
+			case "run_shell":
+				resultStr = "Shell command executed (simulated for brevity)"
+			}
+
+			toolMsg := openrouter.ChatMessage{
+				Role:       "tool",
+				ToolCallID: tool.ID,
+				Content:    resultStr,
+			}
+			messages = append(messages, toolMsg)
+			if updateHistory != nil {
+				updateHistory(toolMsg)
+			}
+		}
+	}
+	return "", fmt.Errorf("agent exceeded max turns")
+}
+
+```
+
+## File: internal/agent/memory.go
+```go
+package agent
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+)
+
+type FileSnapshot struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+	Tokens  int    `json:"tokens"` // Placeholder for future token counting
+}
+
+type WorkingMemory struct {
+	SrcRoot string
+	Files   map[string]FileSnapshot
+	mu      sync.RWMutex
+}
+
+func NewMemory(srcRoot string) *WorkingMemory {
+	return &WorkingMemory{
+		SrcRoot: srcRoot,
+		Files:   make(map[string]FileSnapshot),
+	}
+}
+
+func (m *WorkingMemory) Add(relPath string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	fullPath := filepath.Join(m.SrcRoot, relPath)
+	content, err := os.ReadFile(fullPath)
+	if err != nil {
+		return fmt.Errorf("failed to read file: %w", err)
+	}
+
+	m.Files[relPath] = FileSnapshot{
+		Path:    relPath,
+		Content: string(content),
+		Tokens:  len(content) / 4,
+	}
+	return nil
+}
+
+func (m *WorkingMemory) Remove(relPath string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.Files, relPath)
+}
+
+func (m *WorkingMemory) List() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	keys := make([]string, 0, len(m.Files))
+	for k := range m.Files {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func (m *WorkingMemory) FormatContext() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if len(m.Files) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("\n### ACTIVE SOURCE FILES (READ-ONLY CONTEXT):\n")
+
+	keys := m.List()
+	for _, path := range keys {
+		file := m.Files[path]
+		sb.WriteString(fmt.Sprintf("--- BEGIN FILE: %s ---\n", path))
+		sb.WriteString(file.Content)
+		sb.WriteString(fmt.Sprintf("\n--- END FILE: %s ---\n\n", path))
+	}
+
+	return sb.String()
+}
+
+```
+
+## File: internal/agent/sentinel.go
+```go
+package agent
+
+import (
+	"fmt"
+	"os/exec"
+	"strings"
+)
+
+type Sentinel struct {
+	SafeBinaries map[string]bool
+}
+
+func NewSentinel() *Sentinel {
+	return &Sentinel{
+		SafeBinaries: map[string]bool{
+			"ls":    true,
+			"cat":   true,
+			"grep":  true,
+			"find":  true,
+			"pwd":   true,
+			"echo":  true,
+			"mkdir": true,
+		},
+	}
+}
+
+func (s *Sentinel) CheckCommand(cmdStr string) (bool, string) {
+	parts := strings.Fields(cmdStr)
+	if len(parts) == 0 {
+		return false, "empty command"
+	}
+
+	binary := parts[0]
+
+	if s.SafeBinaries[binary] {
+		return false, ""
+	}
+
+	if binary == "rm" || binary == "mv" {
+		return true, fmt.Sprintf("File system modification detected: %s", binary)
+	}
+
+	if binary == "go" || binary == "npm" || binary == "git" || binary == "curl" || binary == "wget" {
+
+		return true, fmt.Sprintf("External tool execution: %s", binary)
+	}
+
+	return true, fmt.Sprintf("Unrecognized binary: %s", binary)
+}
+
+func (s *Sentinel) Execute(cmdStr string) (string, error) {
+
+	cmd := exec.Command("sh", "-c", cmdStr)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return string(output), fmt.Errorf("command failed: %w", err)
+	}
+	return string(output), nil
+}
+
+```
+
+## File: internal/agent/tools.go
+```go
+package agent
+
+import (
+	"encoding/json"
+
+	"github.com/david22573/codepicker/pkg/openrouter"
+)
+
+var Tools = []openrouter.Tool{
+	{
+		Type: "function",
+		Function: openrouter.ToolFunction{
+			Name:        "read_file",
+			Description: "Read the contents of a specific file from the project.",
+			Parameters: json.RawMessage(`{
+				"type": "object",
+				"properties": {
+					"path": { "type": "string", "description": "Relative path to the file (e.g., 'cmd/main.go')" }
+				},
+				"required": ["path"]
+			}`),
+		},
+	},
+	{
+		Type: "function",
+		Function: openrouter.ToolFunction{
+			Name:        "write_shadow_file",
+			Description: "Write code to the shadow workspace. Use this to propose changes or create new files.",
+			Parameters: json.RawMessage(`{
+				"type": "object",
+				"properties": {
+					"path": { "type": "string", "description": "Relative path to the file" },
+					"content": { "type": "string", "description": "The full content of the file" }
+				},
+				"required": ["path", "content"]
+			}`),
+		},
+	},
+	{
+		Type: "function",
+		Function: openrouter.ToolFunction{
+			Name:        "run_shell",
+			Description: "Execute a shell command. Use this for 'ls', 'grep', 'go test', etc.",
+			Parameters: json.RawMessage(`{
+				"type": "object",
+				"properties": {
+					"command": { "type": "string", "description": "The full shell command string" }
+				},
+				"required": ["command"]
+			}`),
+		},
+	},
+}
+
 ```
 
 ## File: internal/config/config.go
 ```go
 package config
+
+import "strings"
 
 type Config struct {
 	IgnoredDirs map[string]bool
@@ -1123,18 +1527,15 @@ func NewConfig() *Config {
 			"target":         true,
 		},
 		AllowedExts: map[string]bool{
-
 			".go": true, ".js": true, ".ts": true, ".tsx": true, ".jsx": true,
 			".py": true, ".java": true, ".kt": true, ".rb": true, ".php": true,
 			".c": true, ".cpp": true, ".h": true, ".hpp": true, ".rs": true,
 			".cs": true, ".swift": true, ".scala": true, ".sh": true, ".bat": true,
 			".lua": true, ".pl": true, ".ex": true, ".exs": true,
-
 			".html": true, ".css": true, ".scss": true, ".sql": true, ".graphql": true,
 			".json": true, ".yaml": true, ".yml": true, ".toml": true, ".xml": true,
 			".env": false,
-
-			".md": true, ".txt": true, ".rst": true,
+			".md":  true, ".txt": true, ".rst": true,
 		},
 	}
 }
@@ -1156,9 +1557,13 @@ func IsSpecialFile(name string) bool {
 }
 
 func (c *Config) AddAllowedExtensions(exts []string) {
+	if c.AllowedExts == nil {
+		c.AllowedExts = make(map[string]bool)
+	}
 	for _, ext := range exts {
+		ext = strings.TrimSpace(ext)
 		if ext != "" {
-			if ext[0] != '.' {
+			if !strings.HasPrefix(ext, ".") {
 				ext = "." + ext
 			}
 			c.AllowedExts[ext] = true
@@ -1167,12 +1572,17 @@ func (c *Config) AddAllowedExtensions(exts []string) {
 }
 
 func (c *Config) AddIgnoredDirs(dirs []string) {
+	if c.IgnoredDirs == nil {
+		c.IgnoredDirs = make(map[string]bool)
+	}
 	for _, dir := range dirs {
+		dir = strings.TrimSpace(dir)
 		if dir != "" {
 			c.IgnoredDirs[dir] = true
 		}
 	}
 }
+
 ```
 
 ## File: internal/config/configfile.go
@@ -1204,7 +1614,6 @@ type AIConfig struct {
 
 func LoadConfigFile(path string) (*ConfigFile, error) {
 	if path == "" {
-
 		for _, loc := range []string{".codepicker.yml", ".codepicker.yaml", "codepicker.yml"} {
 			if _, err := os.Stat(loc); err == nil {
 				path = loc
@@ -1228,6 +1637,7 @@ func LoadConfigFile(path string) (*ConfigFile, error) {
 
 	return &cfg, nil
 }
+
 ```
 
 ## File: internal/constants/constants.go
@@ -1254,6 +1664,7 @@ const (
 	ContextHeader = "# Codebase Context Dump\n"
 	GeneratedBy   = "Generated by codepicker\n\n"
 )
+
 ```
 
 ## File: internal/contextgen/generator.go
@@ -1338,128 +1749,73 @@ func Generate(ctx context.Context, opts Options, log logger.Logger) (string, err
 
 	return string(content), nil
 }
+
 ```
 
-## File: internal/errors/errors.go
+## File: internal/errors/types.go
 ```go
 package errors
 
 import (
 	"fmt"
-	"path/filepath"
-	"strings"
 )
 
-type ScannerError struct {
-	Path string
-	Err  error
+type CodePickerError struct {
+	Code      string                 `json:"code"`
+	Message   string                 `json:"message"`
+	Operation string                 `json:"operation"`
+	Metadata  map[string]interface{} `json:"metadata,omitempty"`
+	Err       error                  `json:"-"` // Internal error, do not serialize
 }
 
-func (e *ScannerError) Error() string {
-	return fmt.Sprintf("scan error at %s: %v", e.Path, e.Err)
+func (e *CodePickerError) Error() string {
+	if e.Err != nil {
+		return fmt.Sprintf("%s: %s: %v", e.Operation, e.Message, e.Err)
+	}
+	return fmt.Sprintf("%s: %s", e.Operation, e.Message)
 }
 
-func (e *ScannerError) Unwrap() error {
+func (e *CodePickerError) Unwrap() error {
 	return e.Err
 }
 
-type APIError struct {
-	Status   int
-	Body     string
-	Model    string
-	Endpoint string
-}
-
-func (e *APIError) Error() string {
-	return fmt.Sprintf("API error (status %d) on %s: %s [model: %s]",
-		e.Status, e.Endpoint, e.Body, e.Model)
-}
-
-type ValidationError struct {
-	Field   string
-	Message string
-	Value   string
-}
-
-func (e *ValidationError) Error() string {
-	if e.Value != "" {
-		return fmt.Sprintf("validation failed for %s: %s (got: %s)",
-			e.Field, e.Message, e.Value)
-	}
-	return fmt.Sprintf("validation failed for %s: %s", e.Field, e.Message)
-}
-
-type WriterError struct {
-	Action string
-	Path   string
-	Err    error
-}
-
-func (e *WriterError) Error() string {
-	return fmt.Sprintf("writer error during %s on %s: %v",
-		e.Action, e.Path, e.Err)
-}
-
-func (e *WriterError) Unwrap() error {
-	return e.Err
-}
-
-func IsRetryable(err error) bool {
-	if err == nil {
-		return false
-	}
-	switch e := err.(type) {
-	case *APIError:
-		return e.Status >= 500 || e.Status == 429
-	case *ScannerError:
-		return strings.Contains(e.Err.Error(), "temporary") ||
-			strings.Contains(e.Err.Error(), "timeout")
-	default:
-		return false
+func New(code, msg, op string, err error) *CodePickerError {
+	return &CodePickerError{
+		Code:      code,
+		Message:   msg,
+		Operation: op,
+		Err:       err,
 	}
 }
 
-type PathError struct {
-	Op   string // "stat", "read", "write", "mkdir", "abs"
-	Path string
-	Err  error
-}
-
-func (e *PathError) Error() string {
-	return fmt.Sprintf("path %s failed for %s: %v", e.Op, e.Path, e.Err)
-}
-
-func (e *PathError) Unwrap() error {
-	return e.Err
-}
-
-func NewScannerError(path string, err error) error {
-	rel, relErr := filepath.Rel(".", path)
-	if relErr == nil && !strings.HasPrefix(rel, "..") {
-		path = rel
-	}
-	return &ScannerError{Path: path, Err: err}
-}
-
-func NewAPIError(status int, body, model, endpoint string) error {
-	if len(body) > 200 {
-		body = body[:200] + "..."
-	}
-	return &APIError{
-		Status:   status,
-		Body:     body,
-		Model:    model,
-		Endpoint: endpoint,
+func NewValidationError(field, msg, value string) *CodePickerError {
+	return &CodePickerError{
+		Code:      "VALIDATION_ERROR",
+		Message:   fmt.Sprintf("%s: %s", field, msg),
+		Operation: "validation",
+		Metadata:  map[string]interface{}{"value": value},
 	}
 }
 
-func NewPathError(op, path string, err error) error {
-	return &PathError{
-		Op:   op,
-		Path: path,
-		Err:  err,
+func NewScanError(path string, err error) *CodePickerError {
+	return &CodePickerError{
+		Code:      "SCAN_FAILED",
+		Message:   "Failed to scan file or directory",
+		Operation: "scanner.Scan",
+		Metadata:  map[string]interface{}{"path": path},
+		Err:       err,
 	}
 }
+
+func NewInternalError(op string, err error) *CodePickerError {
+	return &CodePickerError{
+		Code:      "INTERNAL_ERROR",
+		Message:   "An unexpected internal error occurred",
+		Operation: op,
+		Err:       err,
+	}
+}
+
 ```
 
 ## File: internal/git/git.go
@@ -1502,6 +1858,7 @@ func GetChangedFiles(diffRef string) (map[string]bool, error) {
 
 	return files, nil
 }
+
 ```
 
 ## File: internal/logger/logger.go
@@ -1560,6 +1917,7 @@ func (l *NoOpLogger) Info(msg string)  {}
 func (l *NoOpLogger) Warn(msg string)  {}
 func (l *NoOpLogger) Debug(msg string) {}
 func (l *NoOpLogger) Error(msg string) {}
+
 ```
 
 ## File: internal/minifier/generic.go
@@ -1606,6 +1964,7 @@ func SqueezeVerticalWhitespace(content []byte) []byte {
 	str = re.ReplaceAllString(str, "\n\n")
 	return []byte(str)
 }
+
 ```
 
 ## File: internal/minifier/go_minifier.go
@@ -1657,6 +2016,7 @@ func (m *GoMinifier) Minify(content []byte) []byte {
 
 	return buf.Bytes()
 }
+
 ```
 
 ## File: internal/minifier/js_minifier.go
@@ -1721,6 +2081,7 @@ func (m *JSMinifier) Minify(content []byte) []byte {
 	}
 	return []byte(strings.Join(result, "\n"))
 }
+
 ```
 
 ## File: internal/minifier/minifier.go
@@ -1779,6 +2140,7 @@ func Minify(content []byte, ext string) []byte {
 	minified := strategy.Minify(content)
 	return SqueezeVerticalWhitespace(minified)
 }
+
 ```
 
 ## File: internal/minifier/minifier_test.go
@@ -1849,6 +2211,7 @@ func main() {
 		})
 	}
 }
+
 ```
 
 ## File: internal/minifier/python_minifier.go
@@ -1901,6 +2264,7 @@ func (m *PythonMinifier) Minify(content []byte) []byte {
 	}
 	return []byte(strings.Join(kept, "\n"))
 }
+
 ```
 
 ## File: internal/paths/validator.go
@@ -1917,65 +2281,188 @@ import (
 )
 
 func Sanitize(path string) (string, error) {
-	clean := filepath.Clean(path)
-
-	abs, err := filepath.Abs(clean)
-	if err != nil {
-		return "", fmt.Errorf("failed to get absolute path: %w", err)
+	if path == "" {
+		return "", errors.NewValidationError(
+			"path",
+			"path cannot be empty",
+			path,
+		)
 	}
 
-	wd, err := os.Getwd()
+	cwd, err := os.Getwd()
 	if err != nil {
 		return "", fmt.Errorf("failed to get working directory: %w", err)
 	}
 
-	rel, err := filepath.Rel(wd, abs)
+	absRoot, err := filepath.EvalSymlinks(cwd)
 	if err != nil {
-		return "", fmt.Errorf("failed to get relative path: %w", err)
+		return "", fmt.Errorf("failed to resolve working directory: %w", err)
 	}
 
-	if strings.HasPrefix(rel, "..") {
-		return "", &errors.ValidationError{
-			Field:   "path",
-			Message: "path escapes working directory",
-			Value:   path,
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to get absolute path: %w", err)
+	}
+
+	realPath, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			parent := filepath.Dir(absPath)
+			realParent, parentErr := filepath.EvalSymlinks(parent)
+			if parentErr != nil {
+				return "", fmt.Errorf("invalid parent path: %w", parentErr)
+			}
+			realPath = filepath.Join(realParent, filepath.Base(absPath))
+		} else {
+			return "", fmt.Errorf("failed to resolve path symlinks: %w", err)
 		}
 	}
 
-	return abs, nil
+	rel, err := filepath.Rel(absRoot, realPath)
+	if err != nil {
+		return "", fmt.Errorf("path validation error: %w", err)
+	}
+
+	if strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+		return "", errors.NewValidationError(
+			"path",
+			"path traversal detected: file is outside working directory",
+			path,
+		)
+	}
+
+	forbidden := []string{"/proc", "/sys", "/dev", "/etc", "/var/run"}
+	for _, f := range forbidden {
+		if strings.HasPrefix(filepath.ToSlash(realPath), f) {
+			return "", errors.NewValidationError(
+				"path",
+				"access to system directory denied",
+				path,
+			)
+		}
+	}
+
+	return realPath, nil
 }
 
 func ValidateOutput(out string) error {
-	forbidden := []string{"/", "/usr", "/etc", "/bin", "/sbin", "/opt", "/sys", "/proc", "/dev"}
-	for _, forbiddenDir := range forbidden {
-		if out == forbiddenDir || strings.HasPrefix(out, forbiddenDir+string(filepath.Separator)) {
-			return &errors.ValidationError{
-				Field:   "outPath",
-				Message: "forbidden system directory",
-				Value:   out,
-			}
-		}
+	cleanPath, err := Sanitize(out)
+	if err != nil {
+		return err
 	}
 
-	base := filepath.Base(out)
+	base := filepath.Base(cleanPath)
+
 	criticalFiles := map[string]bool{
 		"go.mod":            true,
 		"go.sum":            true,
 		"package.json":      true,
 		"package-lock.json": true,
 		".git":              true,
+		".env":              true,
+		".gitignore":        true,
+		"Makefile":          true,
 	}
 
 	if criticalFiles[base] {
-		return &errors.ValidationError{
-			Field:   "outPath",
-			Message: "refusing to overwrite important file",
-			Value:   out,
-		}
+		return errors.NewValidationError(
+			"outPath",
+			"refusing to overwrite critical project file",
+			base,
+		)
+	}
+
+	if strings.HasPrefix(base, ".") && !strings.HasSuffix(base, ".md") {
+		return errors.NewValidationError(
+			"outPath",
+			"refusing to overwrite dotfile",
+			base,
+		)
 	}
 
 	return nil
 }
+
+```
+
+## File: internal/paths/validator_test.go
+```go
+package paths
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestSanitize(t *testing.T) {
+
+	tmpDir := t.TempDir()
+	originalWd, _ := os.Getwd()
+	defer os.Chdir(originalWd)
+	os.Chdir(tmpDir)
+
+	os.WriteFile("safe.go", []byte("package main"), 0644)
+	os.Mkdir("subdir", 0755)
+	os.WriteFile("subdir/nested.go", []byte("package nested"), 0644)
+
+	outsideDir := t.TempDir()
+	secretFile := filepath.Join(outsideDir, "secret.txt")
+	os.WriteFile(secretFile, []byte("secret data"), 0644)
+	os.Symlink(secretFile, "bad_link.txt")
+
+	tests := []struct {
+		name      string
+		input     string
+		shouldErr bool
+	}{
+		{"Valid file", "safe.go", false},
+		{"Valid nested file", "subdir/nested.go", false},
+		{"Valid relative path", "./safe.go", false},
+		{"Path traversal attempt", "../../../etc/passwd", true},
+		{"Parent directory traversal", "../", true},
+		{"Root directory traversal", "/", true},
+		{"Symlink to outside", "bad_link.txt", true},
+		{"Forbidden system path", "/etc/hosts", true},
+		{"Forbidden dev path", "/dev/null", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Sanitize(tt.input)
+			if tt.shouldErr && err == nil {
+				t.Errorf("Expected error for input '%s', but got nil", tt.input)
+			}
+			if !tt.shouldErr && err != nil {
+				t.Errorf("Unexpected error for input '%s': %v", tt.input, err)
+			}
+		})
+	}
+}
+
+func TestValidateOutput(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		shouldErr bool
+	}{
+		{"Safe output", "context.md", false},
+		{"Critical file: go.mod", "go.mod", true},
+		{"Critical file: .git", ".git", true},
+		{"Critical file: .env", ".env", true},
+		{"Nested safe output", "out/context.md", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateOutput(tt.input)
+			if tt.shouldErr && err == nil {
+				t.Errorf("Expected error for input '%s', but got nil", tt.input)
+			}
+		})
+	}
+}
+
 ```
 
 ## File: internal/planner/planner.go
@@ -2017,11 +2504,11 @@ type Options struct {
 }
 
 func SelectRelevantFiles(ctx context.Context, opts Options, log logger.Logger) ([]string, error) {
-	log.Info("ƒºá Smart mode enabled: Planning context...")
+	log.Info("🔮 Smart mode enabled: Planning context...")
 
 	absSrc, err := paths.Sanitize(opts.SrcDir)
 	if err != nil {
-		return nil, fmt.Errorf("invalid source directory: %w", err)
+		return nil, fmt.Errorf("invalid source directory")
 	}
 
 	collector := &PathCollector{}
@@ -2035,12 +2522,18 @@ func SelectRelevantFiles(ctx context.Context, opts Options, log logger.Logger) (
 
 	s := scanner.NewScanner(absSrc, collector, cfg, log)
 	if err := s.Scan(ctx); err != nil {
-		return nil, fmt.Errorf("scan failed during planning: %w", err)
+		return nil, fmt.Errorf("scan failed during planning")
 	}
 
 	if len(collector.Paths) == 0 {
 		log.Warn("Scanner found no files for planning.")
 		return nil, nil
+	}
+
+	maxFiles := 1000
+	if len(collector.Paths) > maxFiles {
+		log.Warn(fmt.Sprintf("Too many files (%d), truncating list for planner to %d", len(collector.Paths), maxFiles))
+		collector.Paths = collector.Paths[:maxFiles]
 	}
 
 	fileList := strings.Join(collector.Paths, "\n")
@@ -2057,14 +2550,36 @@ If no specific code is needed, return { "files": [] }.`
 
 	selectedFiles := callLLM(ctx, opts.APIKey, opts.Model, sysMsg, userMsg, log)
 
-	if len(selectedFiles) > 0 {
-		log.Info(fmt.Sprintf("ƒñû AI selected %d files: %v", len(selectedFiles), selectedFiles))
-		estimateTokenUsage(ctx, opts.APIKey, opts.Model, selectedFiles, log)
+	validFiles := validatePaths(selectedFiles, absSrc, log)
+
+	if len(validFiles) > 0 {
+		log.Info(fmt.Sprintf("🤖 AI selected %d files: %v", len(validFiles), validFiles))
+		estimateTokenUsage(ctx, opts.APIKey, opts.Model, validFiles, log)
 	} else {
-		log.Info("ƒñû AI decided no files are needed (or failed to pick).")
+		log.Info("🤖 AI decided no files are needed (or failed to pick).")
 	}
 
-	return selectedFiles, nil
+	return validFiles, nil
+}
+
+func validatePaths(files []string, root string, log logger.Logger) []string {
+	var safe []string
+	for _, f := range files {
+
+		clean, err := paths.Sanitize(f)
+		if err != nil {
+			log.Debug(fmt.Sprintf("Skipping unsafe path suggested by LLM: %s", f))
+			continue
+		}
+
+		if _, err := os.Stat(clean); err != nil {
+			log.Debug(fmt.Sprintf("Skipping non-existent path suggested by LLM: %s", f))
+			continue
+		}
+
+		safe = append(safe, f)
+	}
+	return safe
 }
 
 func callLLM(ctx context.Context, apiKey, model, sysMsg, userMsg string, log logger.Logger) []string {
@@ -2080,7 +2595,7 @@ func callLLM(ctx context.Context, apiKey, model, sysMsg, userMsg string, log log
 
 	resp, err := client.CreateChatCompletion(ctx, req)
 	if err != nil {
-		log.Warn(fmt.Sprintf("Smart planning failed: %v. Falling back to normal scan.", err))
+		log.Warn("Smart planning request failed (check API key/network). Falling back to normal scan.")
 		return nil
 	}
 
@@ -2100,18 +2615,23 @@ func callLLM(ctx context.Context, apiKey, model, sysMsg, userMsg string, log log
 func parseJSONResponse(content string, log logger.Logger) []string {
 	content = strings.TrimSpace(content)
 
-	if strings.HasPrefix(content, "```json") {
-		content = strings.TrimPrefix(content, "```json")
-		content = strings.TrimSuffix(content, "```")
-	} else if strings.HasPrefix(content, "```") {
-		content = strings.TrimPrefix(content, "```")
-		content = strings.TrimSuffix(content, "```")
+	if strings.HasPrefix(content, "```") {
+		lines := strings.Split(content, "\n")
+		if len(lines) >= 2 {
+
+			lines = lines[1:]
+
+			if len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "```" {
+				lines = lines[:len(lines)-1]
+			}
+			content = strings.Join(lines, "\n")
+		}
 	}
 
 	var resultObj struct {
 		Files []string `json:"files"`
 	}
-	if err := json.Unmarshal([]byte(content), &resultObj); err == nil && len(resultObj.Files) > 0 {
+	if err := json.Unmarshal([]byte(content), &resultObj); err == nil {
 		return resultObj.Files
 	}
 
@@ -2120,19 +2640,23 @@ func parseJSONResponse(content string, log logger.Logger) []string {
 		return paths
 	}
 
-	log.Warn(fmt.Sprintf("Failed to parse AI planning JSON. Response was: %s", content))
+	log.Warn("Failed to parse AI planning JSON. Proceeding without smart selection.")
+	log.Debug(fmt.Sprintf("Raw AI response: %s", content))
 	return nil
 }
 
 func estimateTokenUsage(ctx context.Context, apiKey, model string, files []string, log logger.Logger) {
 	client := openrouter.NewClient(apiKey)
+
 	modelInfo, err := client.GetModelInfo(ctx, model)
 	if err != nil {
+		log.Debug(fmt.Sprintf("Failed to fetch model info for token estimation: %v", err))
 		return
 	}
 
 	var totalTokens int
 	for _, f := range files {
+
 		content, err := os.ReadFile(f)
 		if err == nil {
 			totalTokens += tokenizer.CountTokens(string(content))
@@ -2142,15 +2666,16 @@ func estimateTokenUsage(ctx context.Context, apiKey, model string, files []strin
 	estimatedTotal := totalTokens + 1000
 	limit := modelInfo.ContextLength
 
-	log.Info(fmt.Sprintf("ƒôè Estimated context: %d tokens (Model limit: %d)", totalTokens, limit))
+	log.Info(fmt.Sprintf("📊 Estimated context: %d tokens (Model limit: %d)", totalTokens, limit))
 
 	if limit > 0 && estimatedTotal > limit {
-		log.Warn(fmt.Sprintf("ΓÜáÅ  WARNING: Context size (%d) exceeds model limit (%d). Output may be truncated.", estimatedTotal, limit))
+		log.Warn(fmt.Sprintf("⚠️  WARNING: Context size (%d) exceeds model limit (%d). Output may be truncated.", estimatedTotal, limit))
 	} else if limit > 0 && float64(estimatedTotal) > float64(limit)*0.9 {
 		usagePercent := int(float64(estimatedTotal) / float64(limit) * 100)
-		log.Warn(fmt.Sprintf("ΓÜáÅ  WARNING: Approaching model context limit (%d%% used).", usagePercent))
+		log.Warn(fmt.Sprintf("⚠️  WARNING: Approaching model context limit (%d%% used).", usagePercent))
 	}
 }
+
 ```
 
 ## File: internal/scanner/scanner.go
@@ -2216,9 +2741,11 @@ func (s *Scanner) SetWhitelist(files map[string]bool) {
 func (s *Scanner) Scan(ctx context.Context) error {
 
 	return filepath.WalkDir(s.Root, func(path string, d os.DirEntry, err error) error {
+
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+
+			return filepath.SkipAll
 		default:
 		}
 
@@ -2226,11 +2753,15 @@ func (s *Scanner) Scan(ctx context.Context) error {
 			if path == s.Root {
 				return err
 			}
-			s.Logger.Warn(fmt.Sprintf("Skipping %s: access denied", path))
-			return nil
+
+			s.Logger.Warn(fmt.Sprintf("Skipping %s: access denied or error: %v", path, err))
+			return filepath.SkipDir
 		}
 
-		relPath, _ := filepath.Rel(s.Root, path)
+		relPath, relErr := filepath.Rel(s.Root, path)
+		if relErr != nil {
+			return nil
+		}
 		if relPath == "." {
 			return nil
 		}
@@ -2277,6 +2808,7 @@ func (s *Scanner) Scan(ctx context.Context) error {
 
 		ext := strings.ToLower(filepath.Ext(path))
 		name := strings.ToLower(d.Name())
+
 		if !s.Config.AllowedExts[ext] && !config.IsSpecialFile(name) {
 			return nil
 		}
@@ -2285,9 +2817,17 @@ func (s *Scanner) Scan(ctx context.Context) error {
 			s.Logger.Info(fmt.Sprintf("Picked: %s", relPath))
 		}
 
-		return s.Writer.Write(path, relPath)
+		writeErr := s.Writer.Write(path, relPath)
+		if writeErr != nil {
+			s.Logger.Warn(fmt.Sprintf("Failed to write %s: %v", relPath, writeErr))
+
+			return nil
+		}
+
+		return nil
 	})
 }
+
 ```
 
 ## File: internal/scanner/scanner_test.go
@@ -2380,6 +2920,475 @@ func createFile(t *testing.T, dir, name, content string) {
 		t.Fatalf("Failed to create test file %s: %v", path, err)
 	}
 }
+
+```
+
+## File: internal/server/context_handlers.go
+```go
+package server
+
+import (
+	"encoding/json"
+	"net/http"
+)
+
+func (s *AgentServer) handleGetContext(w http.ResponseWriter, r *http.Request) {
+	files := s.Engine.Memory.List()
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"files": files,
+		"count": len(files),
+	})
+}
+
+func (s *AgentServer) handleAddContext(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", 400)
+		return
+	}
+
+	if err := s.Engine.Memory.Add(req.Path); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+
+	s.Logger.Info("Manually added to context: " + req.Path)
+	json.NewEncoder(w).Encode(map[string]string{"status": "added", "path": req.Path})
+}
+
+func (s *AgentServer) handleDeleteContext(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", 400)
+		return
+	}
+
+	s.Engine.Memory.Remove(req.Path)
+	s.Logger.Info("Manually removed from context: " + req.Path)
+	json.NewEncoder(w).Encode(map[string]string{"status": "removed", "path": req.Path})
+}
+
+```
+
+## File: internal/server/handlers.go
+```go
+package server
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+
+	"github.com/david22573/codepicker/pkg/openrouter"
+)
+
+func (s *AgentServer) handleAgentTask(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	taskQuery := r.URL.Query().Get("q")
+	if taskQuery == "" {
+		fmt.Fprintf(w, "data: {\"type\": \"error\", \"msg\": \"Query empty\"}\n\n")
+		return
+	}
+
+	eventStream := make(chan string)
+	originalCallback := s.Engine.ApprovalCallback
+
+	reqID := fmt.Sprintf("%s", r.Context().Value("request_id"))
+	if reqID == "%!s(<nil>)" || reqID == "" {
+
+		reqID = "req_" + taskQuery[:3]
+	}
+
+	s.Engine.ApprovalCallback = func(cmdStr, reason string) bool {
+		ch := make(chan bool)
+		s.approvalLock.Lock()
+		s.approvalMap[reqID] = ch
+		s.approvalLock.Unlock()
+
+		jsonMsg, _ := json.Marshal(map[string]interface{}{
+			"type":    "approval_req",
+			"id":      reqID,
+			"command": cmdStr,
+			"reason":  reason,
+		})
+		eventStream <- string(jsonMsg)
+
+		return <-ch
+	}
+
+	defer func() { s.Engine.ApprovalCallback = originalCallback }()
+
+	go func() {
+		defer close(eventStream)
+
+		updateFn := func(msg openrouter.ChatMessage) {
+			jsonMsg, _ := json.Marshal(map[string]interface{}{
+				"type":    "thought",
+				"role":    msg.Role,
+				"content": msg.Content,
+			})
+			eventStream <- string(jsonMsg)
+		}
+
+		result, err := s.Engine.Run(r.Context(), taskQuery, updateFn)
+
+		if err != nil {
+			errJSON, _ := json.Marshal(map[string]string{"type": "error", "msg": err.Error()})
+			eventStream <- string(errJSON)
+		} else {
+			doneJSON, _ := json.Marshal(map[string]string{"type": "done", "result": result})
+			eventStream <- string(doneJSON)
+		}
+	}()
+
+	for event := range eventStream {
+		fmt.Fprintf(w, "data: %s\n\n", event)
+		flusher.Flush()
+	}
+}
+
+func (s *AgentServer) handleApprovalResponse(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", 405)
+		return
+	}
+
+	var req struct {
+		ID       string `json:"id"`
+		Approved bool   `json:"approved"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", 400)
+		return
+	}
+
+	s.approvalLock.Lock()
+	ch, exists := s.approvalMap[req.ID]
+	if exists {
+		delete(s.approvalMap, req.ID)
+	}
+	s.approvalLock.Unlock()
+
+	if exists {
+		ch <- req.Approved
+		json.NewEncoder(w).Encode(map[string]string{"status": "received"})
+	} else {
+		http.Error(w, "Request ID not found (timed out or invalid)", 404)
+	}
+}
+
+```
+
+## File: internal/server/helpers.go
+```go
+package server
+
+import (
+	"encoding/json"
+	"errors"
+	"net/http"
+
+	cpErrors "github.com/david22573/codepicker/internal/errors"
+)
+
+func (s *AgentServer) WriteError(w http.ResponseWriter, err error) {
+	w.Header().Set("Content-Type", "application/json")
+
+	var cpErr *cpErrors.CodePickerError
+	if errors.As(err, &cpErr) {
+		status := http.StatusInternalServerError
+
+		switch cpErr.Code {
+		case "VALIDATION_ERROR":
+			status = http.StatusBadRequest
+		case "SCAN_FAILED":
+			status = http.StatusInternalServerError
+		case "NOT_FOUND":
+			status = http.StatusNotFound
+		}
+
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(cpErr)
+		return
+	}
+
+	w.WriteHeader(http.StatusInternalServerError)
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"code":    "UNKNOWN_ERROR",
+		"message": err.Error(),
+	})
+}
+
+```
+
+## File: internal/server/middleware.go
+```go
+package server
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"time"
+
+	"github.com/david22573/codepicker/internal/logger"
+)
+
+type Middleware func(http.HandlerFunc) http.HandlerFunc
+
+func (s *AgentServer) Chain(h http.HandlerFunc, middleware ...Middleware) http.HandlerFunc {
+	for i := len(middleware) - 1; i >= 0; i-- {
+		h = middleware[i](h)
+	}
+	return h
+}
+
+func RequestID() Middleware {
+	return func(next http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+
+			reqID := fmt.Sprintf("req_%d", time.Now().UnixNano())
+
+			ctx := context.WithValue(r.Context(), "request_id", reqID)
+
+			w.Header().Set("X-Request-ID", reqID)
+
+			next(w, r.WithContext(ctx))
+		}
+	}
+}
+
+func RequestLogger(log logger.Logger) Middleware {
+	return func(next http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			start := time.Now()
+			reqID := r.Context().Value("request_id")
+
+			log.Info(fmt.Sprintf("[%s] -> %s %s", reqID, r.Method, r.URL.Path))
+
+			next(w, r)
+
+			duration := time.Since(start)
+			log.Debug(fmt.Sprintf("[%s] <- Completed in %v", reqID, duration))
+		}
+	}
+}
+
+func EnableCORS() Middleware {
+	return func(next http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, DELETE")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+			if r.Method == "OPTIONS" {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+
+			next(w, r)
+		}
+	}
+}
+
+func RecoveryMiddleware(log logger.Logger) Middleware {
+	return func(next http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			defer func() {
+				if err := recover(); err != nil {
+					log.Error(fmt.Sprintf("PANIC RECOVERED: %v", err))
+					http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+				}
+			}()
+			next(w, r)
+		}
+	}
+}
+
+```
+
+## File: internal/server/server.go
+```go
+package server
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"sync"
+	"time"
+
+	"github.com/david22573/codepicker/internal/agent"
+	"github.com/david22573/codepicker/internal/logger"
+)
+
+type AgentServer struct {
+	Port         string
+	Engine       *agent.Engine
+	Logger       logger.Logger
+	approvalMap  map[string]chan bool
+	approvalLock sync.Mutex
+}
+
+func New(port string, eng *agent.Engine, log logger.Logger) *AgentServer {
+	srv := &AgentServer{
+		Port:        port,
+		Engine:      eng,
+		Logger:      log,
+		approvalMap: make(map[string]chan bool),
+	}
+	eng.ApprovalCallback = srv.WaitForApproval
+	return srv
+}
+
+func (s *AgentServer) Start() error {
+
+	mux := http.NewServeMux()
+
+	standardStack := []Middleware{
+		RecoveryMiddleware(s.Logger),
+		RequestID(),
+		RequestLogger(s.Logger),
+		EnableCORS(),
+	}
+
+	mux.HandleFunc("/agent/task", s.Chain(s.handleAgentTask, standardStack...))
+	mux.HandleFunc("/agent/approve", s.Chain(s.handleApprovalResponse, standardStack...))
+
+	mux.HandleFunc("/agent/context", s.Chain(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			s.handleGetContext(w, r)
+		case http.MethodPost:
+			s.handleAddContext(w, r)
+		case http.MethodDelete:
+			s.handleDeleteContext(w, r)
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	}, standardStack...))
+
+	mux.HandleFunc("/health", s.Chain(s.handleHealth, EnableCORS()))
+
+	s.Logger.Info(fmt.Sprintf("🚀 Agent Daemon listening on :%s", s.Port))
+	return http.ListenAndServe(":"+s.Port, mux)
+}
+
+func (s *AgentServer) WaitForApproval(cmdStr, reason string) bool {
+	reqID := fmt.Sprintf("%d", time.Now().UnixNano())
+	responseChan := make(chan bool)
+
+	s.approvalLock.Lock()
+	s.approvalMap[reqID] = responseChan
+	s.approvalLock.Unlock()
+
+	defer func() {
+		s.approvalLock.Lock()
+		delete(s.approvalMap, reqID)
+		s.approvalLock.Unlock()
+	}()
+
+	select {
+	case approved := <-responseChan:
+		return approved
+	case <-time.After(60 * time.Second):
+		s.Logger.Warn(fmt.Sprintf("Approval timed out for %s", reqID))
+		return false
+	}
+}
+
+func (s *AgentServer) handleHealth(w http.ResponseWriter, r *http.Request) {
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+```
+
+## File: internal/shadow/fs.go
+```go
+package shadow
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/david22573/codepicker/internal/paths"
+)
+
+const ShadowDirName = ".codepicker/shadow"
+
+type Manager struct {
+	SrcRoot    string
+	ShadowRoot string
+}
+
+func NewManager(srcRoot string) (*Manager, error) {
+	absSrc, err := paths.Sanitize(srcRoot)
+	if err != nil {
+		return nil, err
+	}
+
+	shadowRoot := filepath.Join(absSrc, ShadowDirName)
+	if err := os.MkdirAll(shadowRoot, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create shadow root: %w", err)
+	}
+
+	return &Manager{
+		SrcRoot:    absSrc,
+		ShadowRoot: shadowRoot,
+	}, nil
+}
+
+func (m *Manager) WriteFile(relPath string, content []byte) (string, error) {
+
+	if strings.Contains(relPath, "..") {
+		return "", fmt.Errorf("invalid path: cannot escape project root")
+	}
+
+	shadowPath := filepath.Join(m.ShadowRoot, relPath)
+
+	if err := os.MkdirAll(filepath.Dir(shadowPath), 0755); err != nil {
+		return "", err
+	}
+
+	if err := os.WriteFile(shadowPath, content, 0644); err != nil {
+		return "", err
+	}
+
+	return shadowPath, nil
+}
+
+func (m *Manager) GetShadowPath(relPath string) string {
+	return filepath.Join(m.ShadowRoot, relPath)
+}
+
+func (m *Manager) Apply(relPath string) error {
+	shadowPath := filepath.Join(m.ShadowRoot, relPath)
+	realPath := filepath.Join(m.SrcRoot, relPath)
+
+	content, err := os.ReadFile(shadowPath)
+	if err != nil {
+		return fmt.Errorf("shadow file not found: %w", err)
+	}
+
+	return os.WriteFile(realPath, content, 0644)
+}
+
 ```
 
 ## File: internal/tokenizer/tokenizer.go
@@ -2406,6 +3415,7 @@ func EstimateCost(tokens int) float64 {
 
 	return float64(tokens) / 1_000_000 * 0.50
 }
+
 ```
 
 ## File: internal/writer/writer.go
@@ -2461,7 +3471,8 @@ func (c *ConcatStrategy) Init() error {
 	if err := os.MkdirAll(filepath.Dir(c.OutputPath), 0755); err != nil {
 		return err
 	}
-	f, err := os.Create(c.OutputPath)
+
+	f, err := os.OpenFile(c.OutputPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
 		return err
 	}
@@ -2491,8 +3502,13 @@ func (c *ConcatStrategy) Write(absPath, relPath string) error {
 		return err
 	}
 
-	buffer := make([]byte, 512)
-	n, err := f.Read(buffer)
+	if info.Size() > constants.MaxFileSize {
+		fmt.Printf("⚠️  Skipping large file (>%dMB): %s\n", constants.MaxFileSize/(1024*1024), relPath)
+		return nil
+	}
+
+	header := make([]byte, 512)
+	n, err := f.Read(header)
 	if err != nil && err != io.EOF {
 		return err
 	}
@@ -2501,7 +3517,7 @@ func (c *ConcatStrategy) Write(absPath, relPath string) error {
 		return err
 	}
 
-	contentType := http.DetectContentType(buffer[:n])
+	contentType := http.DetectContentType(header[:n])
 	isBinary := strings.HasPrefix(contentType, "application/octet-stream")
 
 	if n > 0 && isBinary {
@@ -2509,52 +3525,82 @@ func (c *ConcatStrategy) Write(absPath, relPath string) error {
 		return nil
 	}
 
-	if info.Size() > constants.MaxFileSize {
-		fmt.Printf("⚠️  Skipping large file (>%dMB): %s\n", constants.MaxFileSize/(1024*1024), relPath)
-		return nil
-	}
-
-	content, err := io.ReadAll(io.LimitReader(f, constants.MaxFileSize))
-	if err != nil {
-		return err
-	}
-
-	if !utf8.Valid(content) {
-		return nil
-	}
-
-	if c.Minify {
-		ext := strings.ToLower(filepath.Ext(relPath))
-		content = minifier.Minify(content, ext)
-	}
-
 	ext := strings.TrimPrefix(filepath.Ext(relPath), ".")
 	if ext == "" {
 		ext = "text"
 	}
 
-	var fileBuffer bytes.Buffer
-	fmt.Fprintf(&fileBuffer, "## File: %s\n", relPath)
-	fmt.Fprintf(&fileBuffer, "```%s\n", ext)
-	fileBuffer.Write(content)
-
-	if len(content) > 0 && content[len(content)-1] != '\n' {
-		fileBuffer.Write([]byte("\n"))
-	}
-	fmt.Fprintf(&fileBuffer, "```\n\n")
-
-	finalBytes := fileBuffer.Bytes()
-
-	if c.ComputeTokens {
-		c.TokenCount += tokenizer.CountTokens(string(finalBytes))
+	var metaBuf bytes.Buffer
+	fmt.Fprintf(&metaBuf, "## File: %s\n", relPath)
+	fmt.Fprintf(&metaBuf, "```%s\n", ext)
+	if _, err := c.file.Write(metaBuf.Bytes()); err != nil {
+		return err
 	}
 
-	_, err = c.file.Write(finalBytes)
-	return err
+	var bytesWritten int64
+
+	if c.Minify {
+		content, err := io.ReadAll(io.LimitReader(f, constants.MaxFileSize))
+		if err != nil {
+			return err
+		}
+
+		if !utf8.Valid(content) {
+			fmt.Printf("⚠️  Skipping invalid UTF-8 file: %s\n", relPath)
+			return nil
+		}
+
+		extStr := strings.ToLower(filepath.Ext(relPath))
+		minified := minifier.Minify(content, extStr)
+
+		if _, err := c.file.Write(minified); err != nil {
+			return err
+		}
+		bytesWritten = int64(len(minified))
+
+		if c.ComputeTokens {
+			c.TokenCount += tokenizer.CountTokens(string(minified))
+		}
+
+	} else {
+
+		if c.ComputeTokens {
+
+			content, err := io.ReadAll(io.LimitReader(f, constants.MaxFileSize))
+			if err != nil {
+				return err
+			}
+
+			if _, err := c.file.Write(content); err != nil {
+				return err
+			}
+			c.TokenCount += tokenizer.CountTokens(string(content))
+			bytesWritten = int64(len(content))
+		} else {
+
+			written, err := io.Copy(c.file, io.LimitReader(f, constants.MaxFileSize))
+			if err != nil {
+				return err
+			}
+			bytesWritten = written
+		}
+	}
+
+	if _, err := c.file.Write([]byte("\n```\n\n")); err != nil {
+		return err
+	}
+
+	if bytesWritten == 0 {
+
+	}
+
+	return nil
 }
 
 func (c *ConcatStrategy) Close() error {
 	if c.file != nil {
+
+		c.file.Sync()
 		return c.file.Close()
 	}
 	return nil
@@ -2675,6 +3721,7 @@ func (t *TreeStrategy) Close() error {
 	fmt.Println()
 	return nil
 }
+
 ```
 
 ## File: main.go
@@ -2686,6 +3733,7 @@ import "github.com/david22573/codepicker/cmd"
 func main() {
 	cmd.Execute()
 }
+
 ```
 
 ## File: pkg/openrouter/chat.go
@@ -2707,8 +3755,13 @@ import (
 	errs "github.com/david22573/codepicker/internal/errors"
 )
 
-func (c *Client) CreateChatCompletion(ctx context.Context, req ChatCompletionRequest) (*ChatCompletionResponse, error) {
+func (c *Client) CreateChatCompletion(
+	ctx context.Context,
+	req ChatCompletionRequest,
+) (*ChatCompletionResponse, error) {
+
 	req.Stream = false
+
 	httpReq, err := c.newRequest(ctx, http.MethodPost, "/chat/completions", req)
 	if err != nil {
 		return nil, err
@@ -2718,6 +3771,7 @@ func (c *Client) CreateChatCompletion(ctx context.Context, req ChatCompletionReq
 	if err := c.sendRequest(httpReq, &resp); err != nil {
 		return nil, err
 	}
+
 	return &resp, nil
 }
 
@@ -2728,33 +3782,24 @@ type ChatCompletionStream struct {
 
 func (s *ChatCompletionStream) Recv() (*ChatCompletionResponse, error) {
 	for {
-
 		line, err := s.reader.ReadBytes('\n')
 		if err != nil {
 			return nil, err
 		}
 
 		line = bytes.TrimSpace(line)
-
-		if len(line) == 0 {
-			continue
-		}
-
-		if !bytes.HasPrefix(line, []byte("data: ")) {
-
+		if len(line) == 0 || !bytes.HasPrefix(line, []byte("data: ")) {
 			continue
 		}
 
 		data := bytes.TrimPrefix(line, []byte("data: "))
-
 		if string(data) == "[DONE]" {
 			return nil, io.EOF
 		}
 
 		var response ChatCompletionResponse
 		if err := json.Unmarshal(data, &response); err != nil {
-
-			return nil, fmt.Errorf("unmarshal error on stream frame: %w | data: %s", err, string(data))
+			return nil, fmt.Errorf("stream unmarshal error: %w", err)
 		}
 		return &response, nil
 	}
@@ -2764,7 +3809,11 @@ func (s *ChatCompletionStream) Close() error {
 	return s.body.Close()
 }
 
-func (c *Client) CreateChatCompletionStream(ctx context.Context, req ChatCompletionRequest) (*ChatCompletionStream, error) {
+func (c *Client) CreateChatCompletionStream(
+	ctx context.Context,
+	req ChatCompletionRequest,
+) (*ChatCompletionStream, error) {
+
 	req.Stream = true
 
 	reqBytes, err := json.Marshal(req)
@@ -2776,17 +3825,9 @@ func (c *Client) CreateChatCompletionStream(ctx context.Context, req ChatComplet
 
 	for attempt := 0; attempt < constants.MaxRetries; attempt++ {
 		if attempt > 0 {
-			baseDelay := constants.RetryDelay * time.Duration(1<<attempt)
-			jitter := time.Duration(float64(baseDelay) * (rand.Float64() * 0.2))
-
-			t := time.NewTimer(baseDelay + jitter)
-			select {
-			case <-ctx.Done():
-				t.Stop()
-				return nil, ctx.Err()
-			case <-t.C:
-
-			}
+			delay := constants.RetryDelay * time.Duration(1<<attempt)
+			jitter := time.Duration(float64(delay) * (rand.Float64() * 0.2))
+			time.Sleep(delay + jitter)
 		}
 
 		httpReq, err := c.newRequestWithBytes(ctx, http.MethodPost, "/chat/completions", reqBytes)
@@ -2797,36 +3838,20 @@ func (c *Client) CreateChatCompletionStream(ctx context.Context, req ChatComplet
 		resp, err := c.httpClient.Do(httpReq)
 		if err != nil {
 			lastErr = err
-
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
-
-			if errs.IsRetryable(err) {
-				continue
-			}
-			return nil, fmt.Errorf("stream request failed: %w", err)
+			continue
 		}
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			defer resp.Body.Close()
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-
-			var errMsg string
-			var errResp ErrorResponse
-			if jsonErr := json.Unmarshal(body, &errResp); jsonErr == nil && errResp.Error.Message != "" {
-				errMsg = fmt.Sprintf("%s: %s", errResp.Error.Type, errResp.Error.Message)
-			} else {
-				errMsg = string(body)
-			}
-
-			apiErr := errs.NewAPIError(resp.StatusCode, errMsg, req.Model, "/chat/completions")
-			lastErr = apiErr
-
-			if errs.IsRetryable(apiErr) {
-				continue
-			}
-			return nil, lastErr
+			lastErr = errs.NewInternalError(
+				"openrouter.stream",
+				fmt.Errorf("status %d: %s", resp.StatusCode, string(body)),
+			)
+			continue
 		}
 
 		return &ChatCompletionStream{
@@ -2837,6 +3862,7 @@ func (c *Client) CreateChatCompletionStream(ctx context.Context, req ChatComplet
 
 	return nil, fmt.Errorf("max retries exceeded: %w", lastErr)
 }
+
 ```
 
 ## File: pkg/openrouter/client.go
@@ -2937,28 +3963,42 @@ func (c *Client) ListModels(ctx context.Context) (*ListModelsResponse, error) {
 	return &resp, nil
 }
 
-func (c *Client) newRequestWithBytes(ctx context.Context, method, path string, payload []byte) (*http.Request, error) {
+func (c *Client) newRequestWithBytes(
+	ctx context.Context,
+	method, path string,
+	payload []byte,
+) (*http.Request, error) {
+
 	var body io.Reader
 	if payload != nil {
 		body = bytes.NewReader(payload)
 	}
+
 	url := fmt.Sprintf("%s%s", c.baseURL, path)
 	req, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
 		return nil, err
 	}
+
 	req.Header.Set("Content-Type", contentType)
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.apiKey))
+
 	if c.httpReferer != "" {
 		req.Header.Set("HTTP-Referer", c.httpReferer)
 	}
 	if c.xTitle != "" {
 		req.Header.Set("X-Title", c.xTitle)
 	}
+
 	return req, nil
 }
 
-func (c *Client) newRequest(ctx context.Context, method, path string, payload interface{}) (*http.Request, error) {
+func (c *Client) newRequest(
+	ctx context.Context,
+	method, path string,
+	payload interface{},
+) (*http.Request, error) {
+
 	var b []byte
 	var err error
 	if payload != nil {
@@ -2976,24 +4016,37 @@ func (c *Client) sendRequest(req *http.Request, v any) error {
 		if goerrors.Is(err, context.Canceled) || goerrors.Is(err, context.DeadlineExceeded) {
 			return err
 		}
-		return errors.NewAPIError(0, err.Error(), "", req.URL.Path)
+		return errors.NewInternalError(
+			"openrouter.http",
+			err,
+		)
 	}
 	defer res.Body.Close()
 
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-
 		body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
-		return errors.NewAPIError(res.StatusCode, string(body), "", req.URL.Path)
+		return errors.NewInternalError(
+			"openrouter.http",
+			fmt.Errorf(
+				"status %d on %s: %s",
+				res.StatusCode,
+				req.URL.Path,
+				string(body),
+			),
+		)
 	}
 
 	if v == nil {
 		return nil
 	}
+
 	if err := json.NewDecoder(res.Body).Decode(v); err != nil {
 		return fmt.Errorf("failed to decode response: %w", err)
 	}
+
 	return nil
 }
+
 ```
 
 ## File: pkg/openrouter/models.go
@@ -3007,37 +4060,26 @@ type ListModelsResponse struct {
 }
 
 type Model struct {
-	ID string `json:"id"`
-
-	Name string `json:"name"`
-
-	Description string `json:"description"`
-
-	ContextLength int `json:"context_length"`
-
-	Architecture ModelArchitecture `json:"architecture"`
-
-	Pricing ModelPricing `json:"pricing"`
-
-	TopProvider ProviderInfo `json:"top_provider"`
+	ID            string            `json:"id"`
+	Name          string            `json:"name"`
+	Description   string            `json:"description"`
+	ContextLength int               `json:"context_length"`
+	Architecture  ModelArchitecture `json:"architecture"`
+	Pricing       ModelPricing      `json:"pricing"`
+	TopProvider   ProviderInfo      `json:"top_provider"`
 }
 
 type ModelArchitecture struct {
-	Tokenizer string `json:"tokenizer"`
-
+	Tokenizer    string `json:"tokenizer"`
 	InstructType string `json:"instruct_type,omitempty"`
-
-	Modality string `json:"modality"`
+	Modality     string `json:"modality"`
 }
 
 type ModelPricing struct {
-	Prompt string `json:"prompt"`
-
+	Prompt     string `json:"prompt"`
 	Completion string `json:"completion"`
-
-	Image string `json:"image"`
-
-	Request string `json:"request"`
+	Image      string `json:"image"`
+	Request    string `json:"request"`
 }
 
 type ProviderInfo struct {
@@ -3045,40 +4087,36 @@ type ProviderInfo struct {
 }
 
 type ChatCompletionRequest struct {
-	Messages          []ChatMessage   `json:"messages"`
-	Model             string          `json:"model"` // Primary model ID
-	Stream            bool            `json:"stream,omitempty"`
-	Temperature       *float32        `json:"temperature,omitempty"`
-	TopP              *float32        `json:"top_p,omitempty"`
-	TopK              *int            `json:"top_k,omitempty"`
-	FrequencyPenalty  *float32        `json:"frequency_penalty,omitempty"`
-	PresencePenalty   *float32        `json:"presence_penalty,omitempty"`
-	RepetitionPenalty *float32        `json:"repetition_penalty,omitempty"`
-	MinP              *float32        `json:"min_p,omitempty"`
-	TopA              *float32        `json:"top_a,omitempty"`
-	Seed              *int            `json:"seed,omitempty"`
-	MaxTokens         int             `json:"max_tokens,omitempty"`
-	LogitBias         map[string]int  `json:"logit_bias,omitempty"`
-	Stop              []string        `json:"stop,omitempty"`
-	Tools             []Tool          `json:"tools,omitempty"`
-	ToolChoice        interface{}     `json:"tool_choice,omitempty"` // "none", "auto", or specific tool struct
-	ResponseFormat    *ResponseFormat `json:"response_format,omitempty"`
-
-	Models []string `json:"models,omitempty"`
-
-	Route string `json:"route,omitempty"`
-
-	Provider *ProviderPreferences `json:"provider,omitempty"`
-
-	Transforms []string `json:"transforms,omitempty"`
+	Messages          []ChatMessage        `json:"messages"`
+	Model             string               `json:"model"` // Primary model ID
+	Stream            bool                 `json:"stream,omitempty"`
+	Temperature       *float32             `json:"temperature,omitempty"`
+	TopP              *float32             `json:"top_p,omitempty"`
+	TopK              *int                 `json:"top_k,omitempty"`
+	FrequencyPenalty  *float32             `json:"frequency_penalty,omitempty"`
+	PresencePenalty   *float32             `json:"presence_penalty,omitempty"`
+	RepetitionPenalty *float32             `json:"repetition_penalty,omitempty"`
+	MinP              *float32             `json:"min_p,omitempty"`
+	TopA              *float32             `json:"top_a,omitempty"`
+	Seed              *int                 `json:"seed,omitempty"`
+	MaxTokens         int                  `json:"max_tokens,omitempty"`
+	LogitBias         map[string]int       `json:"logit_bias,omitempty"`
+	Stop              []string             `json:"stop,omitempty"`
+	Tools             []Tool               `json:"tools,omitempty"`
+	ToolChoice        interface{}          `json:"tool_choice,omitempty"`
+	ResponseFormat    *ResponseFormat      `json:"response_format,omitempty"`
+	Models            []string             `json:"models,omitempty"`
+	Route             string               `json:"route,omitempty"`
+	Provider          *ProviderPreferences `json:"provider,omitempty"`
+	Transforms        []string             `json:"transforms,omitempty"`
 }
 
 type ChatMessage struct {
 	Role       string      `json:"role"`
-	Content    interface{} `json:"content"` // Can be string or []ContentPart
+	Content    interface{} `json:"content"`
 	Name       string      `json:"name,omitempty"`
 	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
-	ToolCallID string      `json:"tool_call_id,omitempty"` // For role: tool
+	ToolCallID string      `json:"tool_call_id,omitempty"`
 }
 
 type ContentPart struct {
@@ -3089,32 +4127,29 @@ type ContentPart struct {
 
 type ImageURL struct {
 	URL    string `json:"url"`
-	Detail string `json:"detail,omitempty"` // "auto", "low", "high"
+	Detail string `json:"detail,omitempty"`
 }
 
 type ProviderPreferences struct {
-	AllowFallbacks *bool `json:"allow_fallbacks,omitempty"`
-
-	Order []string `json:"order,omitempty"`
-
-	DataCollection string `json:"data_collection,omitempty"` // "deny" or "allow"
-
+	AllowFallbacks    *bool    `json:"allow_fallbacks,omitempty"`
+	Order             []string `json:"order,omitempty"`
+	DataCollection    string   `json:"data_collection,omitempty"`
 	RequireParameters []string `json:"require_parameters,omitempty"`
 }
 
 type ResponseFormat struct {
-	Type string `json:"type"` // e.g., "json_object"
+	Type string `json:"type"`
 }
 
 type Tool struct {
-	Type     string       `json:"type"` // Currently only "function"
+	Type     string       `json:"type"`
 	Function ToolFunction `json:"function"`
 }
 
 type ToolFunction struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
-	Parameters  json.RawMessage `json:"parameters"` // JSON Schema object
+	Parameters  json.RawMessage `json:"parameters"`
 }
 
 type ToolCall struct {
@@ -3125,32 +4160,32 @@ type ToolCall struct {
 
 type ToolCallFunction struct {
 	Name      string `json:"name"`
-	Arguments string `json:"arguments"` // JSON string of arguments
+	Arguments string `json:"arguments"`
 }
 
 type ChatCompletionResponse struct {
 	ID                string   `json:"id"`
 	Object            string   `json:"object"`
 	Created           int64    `json:"created"`
-	Model             string   `json:"model"` // The actual model used
+	Model             string   `json:"model"`
 	Choices           []Choice `json:"choices"`
 	Usage             *Usage   `json:"usage,omitempty"`
 	SystemFingerprint string   `json:"system_fingerprint,omitempty"`
-	Provider          string   `json:"provider,omitempty"` // OpenRouter provider used
+	Provider          string   `json:"provider,omitempty"`
 }
 
 type Choice struct {
 	Index        int          `json:"index"`
-	Message      *ChatMessage `json:"message,omitempty"` // Present in non-stream
-	Delta        *ChatMessage `json:"delta,omitempty"`   // Present in stream
-	FinishReason string       `json:"finish_reason"`     // stop, length, tool_calls, content_filter
+	Message      *ChatMessage `json:"message,omitempty"`
+	Delta        *ChatMessage `json:"delta,omitempty"`
+	FinishReason string       `json:"finish_reason"`
 }
 
 type Usage struct {
 	PromptTokens     int     `json:"prompt_tokens"`
 	CompletionTokens int     `json:"completion_tokens"`
 	TotalTokens      int     `json:"total_tokens"`
-	TotalCost        float64 `json:"total_cost,omitempty"` // OpenRouter specific: cost in USD
+	TotalCost        float64 `json:"total_cost,omitempty"`
 }
 
 type ErrorResponse struct {
@@ -3162,7 +4197,8 @@ type ErrorDetails struct {
 	Type     string                 `json:"type"`
 	Param    interface{}            `json:"param,omitempty"`
 	Code     interface{}            `json:"code,omitempty"`
-	Metadata map[string]interface{} `json:"metadata,omitempty"` // OpenRouter specific metadata
+	Metadata map[string]interface{} `json:"metadata,omitempty"`
 }
+
 ```
 

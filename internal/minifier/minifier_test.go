@@ -14,7 +14,7 @@ func TestMinify(t *testing.T) {
 		excludes []string
 	}{
 		{
-			name: "Go Minification",
+			name: "Go Minification (AST-based)",
 			content: `package main
 // This is a comment
 func main() {
@@ -22,26 +22,28 @@ func main() {
 }`,
 			ext:      ".go",
 			contains: []string{"package main", "func main", "println"},
-			excludes: []string{"// This is a comment"},
+			excludes: []string{"// This is a comment"}, // Go minifier SHOULD still strip comments
 		},
 		{
-			name: "JS Minification",
+			name: "JS Minification (Safe Mode)",
 			content: `function test() {
     // a comment
     return true;
 }`,
 			ext:      ".js",
-			contains: []string{"function test", "return true"},
-			excludes: []string{"// a comment"},
+			contains: []string{"function test", "return true", "// a comment"}, // Safe mode KEEPS comments
+			excludes: []string{"\n\n"},                                         // Should remove empty vertical space
 		},
 		{
-			name: "Python Minification",
+			name: "Python Minification (Safe Mode)",
 			content: `def foo():
     # python comment
-    print("bar")`,
+    print("bar")
+
+`,
 			ext:      ".py",
-			contains: []string{"def foo", "print"},
-			excludes: []string{"# python comment"},
+			contains: []string{"def foo", "print", "# python comment"}, // Safe mode KEEPS comments
+			excludes: []string{"\n\n"},                                 // Should remove empty vertical space
 		},
 	}
 
