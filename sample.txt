@@ -1,0 +1,15 @@
+New York,USA,8336817,468.9
+Tokyo,Japan,37400068,2194
+Delhi,India,28514000,1484
+Shanghai,China,26317104,6340
+São Paulo,Brazil,12330000,1521
+Mumbai,India,20411000,603
+Mexico City,Mexico,9209944,1485
+Beijing,China,21540000,16808
+Cairo,Egypt,9539673,606
+Tokyo,Japan,13960000,2191
+New York City,USA,8419000,783
+Los Angeles,USA,3979576,1302
+Paris,France,2165423,105
+London,UK,8982000,1572
+Moscow,Russia,12506468,2561
