@@ -98,13 +98,19 @@ RULES:
 				var args struct {
 					Path string `json:"path"`
 				}
-				json.Unmarshal([]byte(tool.Function.Arguments), &args)
+				// ERROR HANDLING FIX: Check for invalid JSON from LLM
+				if err := json.Unmarshal([]byte(tool.Function.Arguments), &args); err != nil {
+					e.Logger.Error(fmt.Sprintf("Failed to parse read_file args: %v", err))
+					resultStr = fmt.Sprintf("Invalid arguments for read_file: %v", err)
+					break
+				}
 
-				err := e.Memory.Add(args.Path)
-				if err != nil {
-					resultStr = fmt.Sprintf("Error reading file: %v", err)
+				if err := e.Memory.Add(args.Path); err != nil {
+					e.Logger.Warn(fmt.Sprintf("Failed to read file %s: %v", args.Path, err))
+					resultStr = fmt.Sprintf("Error: Could not read '%s'. %v", args.Path, err)
 				} else {
-					resultStr = fmt.Sprintf("File '%s' added to Active Context.", args.Path)
+					e.Logger.Info(fmt.Sprintf("Added to context: %s", args.Path))
+					resultStr = fmt.Sprintf("✓ File '%s' loaded into context", args.Path)
 				}
 
 			case "write_shadow_file":
@@ -112,12 +118,19 @@ RULES:
 					Path    string `json:"path"`
 					Content string `json:"content"`
 				}
-				json.Unmarshal([]byte(tool.Function.Arguments), &args)
+				// ERROR HANDLING FIX
+				if err := json.Unmarshal([]byte(tool.Function.Arguments), &args); err != nil {
+					e.Logger.Error(fmt.Sprintf("Failed to parse write_shadow_file args: %v", err))
+					resultStr = fmt.Sprintf("Invalid arguments for write_shadow_file: %v", err)
+					break
+				}
 
 				path, err := e.Shadow.WriteFile(args.Path, []byte(args.Content))
 				if err != nil {
+					e.Logger.Warn(fmt.Sprintf("Failed to write shadow file %s: %v", args.Path, err))
 					resultStr = fmt.Sprintf("Error writing shadow file: %v", err)
 				} else {
+					e.Logger.Info(fmt.Sprintf("Written to shadow: %s", args.Path))
 					resultStr = fmt.Sprintf("Changes written to shadow file: %s", path)
 				}
 
@@ -125,15 +138,15 @@ RULES:
 				var args struct {
 					Command string `json:"command"`
 				}
+				// ERROR HANDLING FIX
 				if err := json.Unmarshal([]byte(tool.Function.Arguments), &args); err != nil {
+					e.Logger.Error(fmt.Sprintf("Failed to parse run_shell args: %v", err))
 					resultStr = fmt.Sprintf("Error parsing arguments: %v", err)
 					break
 				}
 
-				// 1. Analyze the command safely
 				needsApproval, reason, binary, cmdArgs := e.Sentinel.CheckCommand(args.Command)
 
-				// 2. Seek Approval if necessary
 				if needsApproval {
 					if !e.ApprovalCallback(args.Command, reason) {
 						resultStr = "Command denied by user."
@@ -141,10 +154,10 @@ RULES:
 					}
 				}
 
-				// 3. Execute safely without shell
 				output, err := e.Sentinel.Execute(binary, cmdArgs)
 				if err != nil {
-					resultStr = fmt.Sprintf("Error: %v\nOutput: %s", err, output)
+					// We return the partial output and the error so the agent knows what happened
+					resultStr = fmt.Sprintf("Command failed: %v\nOutput so far:\n%s", err, output)
 				} else {
 					resultStr = output
 				}

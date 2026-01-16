@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/david22573/codepicker/internal/agent"
 	"github.com/david22573/codepicker/internal/config"
+	cpErrors "github.com/david22573/codepicker/internal/errors"
 	"github.com/david22573/codepicker/internal/paths"
 	"github.com/david22573/codepicker/internal/scanner"
 	"github.com/david22573/codepicker/internal/server"
@@ -123,7 +125,7 @@ func handleAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// SECURITY FIX: Sanitize and capture the clean path
+	// SECURITY FIX (Phase 0): Sanitize and capture the clean path
 	var cleanFocus string
 	if req.Focus != "" {
 		var err error
@@ -194,9 +196,16 @@ func handleAsk(w http.ResponseWriter, r *http.Request) {
 	}
 
 	contextType := "Codebase"
-	// SECURITY FIX: Use cleanFocus instead of req.Focus
+	// SECURITY FIX (Phase 0): Use cleanFocus
 	if cleanFocus != "" {
 		contextType = "Active File"
+	}
+
+	// Phase 1: Robust Context Gen Error Reporting
+	if len(contextBytes) == 0 {
+		agentErr := cpErrors.NewContextGenerationError(errors.New("empty context generated"))
+		http.Error(w, agentErr.Error(), http.StatusInternalServerError)
+		return
 	}
 
 	systemMsg := fmt.Sprintf(
