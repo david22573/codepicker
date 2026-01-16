@@ -1,0 +1,26 @@
+name: 'Codepicker Agent'
+description: 'Harvest code context or run AI agent tasks on your codebase'
+author: 'David22573'
+inputs:
+  task:
+    description: 'The agent task to perform (leave empty for context generation only)'
+    required: false
+  src:
+    description: 'Source directory to scan'
+    required: false
+    default: '.'
+  output:
+    description: 'Output file for context'
+    required: false
+    default: 'codepicker_context.md'
+  openai_key:
+    description: 'OpenRouter/OpenAI API Key'
+    required: true
+
+runs:
+  using: 'docker'
+  image: 'Dockerfile'
+  env:
+    OPENROUTER_API_KEY: ${{ inputs.openai_key }}
+  args:
+    - ${{ inputs.task }}

@@ -9,15 +9,16 @@ import (
 )
 
 type ConfigFile struct {
-	Src     string       `yaml:"src"`
-	Output  string       `yaml:"output"`
-	Include []string     `yaml:"include"`
-	Exclude []string     `yaml:"exclude"`
-	Minify  bool         `yaml:"minify"`
-	Tokens  bool         `yaml:"tokens"`
-	Verbose bool         `yaml:"verbose"`
-	AI      AIConfig     `yaml:"ai"`
-	Server  ServerConfig `yaml:"server"`
+	Src         string       `yaml:"src"`
+	Output      string       `yaml:"output"`
+	Include     []string     `yaml:"include"`
+	Exclude     []string     `yaml:"exclude"`
+	Minify      bool         `yaml:"minify"`
+	Tokens      bool         `yaml:"tokens"`
+	Verbose     bool         `yaml:"verbose"`
+	AI          AIConfig     `yaml:"ai"`
+	Server      ServerConfig `yaml:"server"`
+	CustomTools []CustomTool `yaml:"tools"` // Added Plugin Support
 }
 
 type AIConfig struct {
@@ -28,6 +29,13 @@ type AIConfig struct {
 type ServerConfig struct {
 	AllowedOrigins []string `yaml:"allowed_origins"`
 	Host           string   `yaml:"host"`
+}
+
+type CustomTool struct {
+	Name        string `yaml:"name"`
+	Description string `yaml:"description"`
+	Command     string `yaml:"command"`     // The actual shell command to run
+	Arguments   string `yaml:"args_schema"` // JSON schema for arguments
 }
 
 func LoadConfigFile(path string) (*ConfigFile, error) {

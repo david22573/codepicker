@@ -1,83 +1,123 @@
-# Codepicker
+# codepicker ⛏️
 
-A CLI tool for harvesting codebase context for AI consumption.
+**Codepicker** is an autonomous developer agent and context harvester. It bridges your local filesystem with Large Language Models (LLMs) to analyze code, answer questions, and perform complex refactoring tasks safely.
 
-## Installation
+## ✨ Features
 
+### 🧠 Agentic Capabilities
+* **Interactive Chat:** Chat with your codebase (`codepicker chat`) with persistent history.
+* **Autonomous Tasks:** Ask the agent to "Refactor the logging" or "Write a unit test" (`codepicker do`).
+* **Shadow Workspace:** The agent proposes changes in a sandboxed `.codepicker/shadow` directory. It **never** modifies your code without permission.
+* **Review & Apply:** Use `codepicker apply` to review diffs and commit agent changes.
+
+### 🛠️ Core Tools
+* **Context Generation:** Scans and minifies code into a single Markdown file optimized for LLM context windows.
+* **Smart Selection:** "Smart Mode" uses AI to pick only relevant files for a query, saving tokens.
+* **Plugin System:** Extend the agent with custom shell commands defined in `.codepicker.yml`.
+* **Git Aware:** Scan only changed files with `--diff` or `--diff staged`.
+
+### ⚙️ Production Ready
+* **Daemon Mode:** Run as a server with `codepicker serve`.
+* **Observability:** Structured JSON logs and Prometheus metrics at `/metrics`.
+* **Security:** Rate limiting, CORS configuration, and file size quotas.
+
+## 🚀 Quick Start
+
+### Installation
 ```bash
 go install [github.com/david22573/codepicker@latest](https://github.com/david22573/codepicker@latest)
 
 ```
 
-## Quick Start
+### Basic Usage
 
+1. **Initialize** configuration:
 ```bash
-# Initialize configuration
 codepicker init
 
-# Generate context for current directory
-codepicker
+```
 
-# Ask a question about your codebase
-export OPENROUTER_API_KEY=your_key
-codepicker ask "How does the authentication work?"
 
-# Start interactive chat
-codepicker chat
-
-# Use autonomous agent mode
-codepicker do "Add error handling to the API endpoint"
+2. **Generate Context** (for manual LLM pasting):
+```bash
+codepicker --out context.md
 
 ```
 
-## Configuration
 
-Create `.codepicker.yml` in your project root:
+3. **Ask a Question**:
+```bash
+export OPENROUTER_API_KEY=sk-or-...
+codepicker ask "Explain how the tokenizer works"
+
+```
+
+
+4. **Perform a Task**:
+```bash
+# 1. Agent plans and writes code to shadow dir
+codepicker do "Create a new handler for the /health endpoint"
+
+# 2. You review and apply the changes
+codepicker apply
+
+```
+
+
+
+## 🔌 Configuration & Plugins
+
+Configure behavior in `.codepicker.yml`. You can also define **Custom Tools** that the agent can execute!
 
 ```yaml
-src: .
-output: context.md
-minify: true
-tokens: false
-
-include:
-  - .go
-  - .ts
-  - .js
-
-exclude:
-  - .git
-  - node_modules
-  - vendor
-
 ai:
   model: xiaomi/mimo-v2-flash:free
-  temperature: 0.7
+
+# Define custom tools for the agent
+tools:
+  - name: run_tests
+    description: Run the project unit tests
+    command: go test ./...
+  
+  - name: deploy_staging
+    description: Deploy the current build to staging
+    command: ./scripts/deploy.sh
+    args_schema: '{ "properties": { "env": { "type": "string" } } }'
 
 ```
 
-## Commands
+## 🐳 Docker & CI/CD
 
-| Command | Description |
-| --- | --- |
-| `codepicker` | Generate context file |
-| `codepicker ask [query]` | Ask AI about your codebase |
-| `codepicker chat` | Interactive chat session |
-| `codepicker do [task]` | Autonomous agent mode |
-| `codepicker tree` | Print project structure |
-| `codepicker copy` | Copy files preserving structure |
-| `codepicker serve` | Start agent daemon |
-| `codepicker init` | Generate default config |
-| `codepicker version` | Print version information |
+### Run via Docker
 
-## Flags
+```bash
+docker run -p 22573:22573 -e OPENROUTER_API_KEY=... ghcr.io/david22573/codepicker serve
 
-* `-s, --src` - Source directory (default: `.`)
-* `-o, --out` - Output file path
-* `-m, --minify` - Enable minification (default: `true`)
-* `-i, --include` - Comma-separated extensions to include
-* `-e, --exclude` - Comma-separated directories to exclude
-* `-v, --verbose` - Enable verbose logging
+```
+
+### GitHub Action
+
+Use Codepicker in your workflow to review PRs or generate documentation:
+
+```yaml
+steps:
+  - uses: david22573/codepicker@v1
+    with:
+      openai_key: ${{ secrets.OPENROUTER_KEY }}
+      task: "Review this PR and check for security flaws"
+
+```
+
+## 🛡️ Server API
+
+When running `codepicker serve`, the following endpoints are available:
+
+| Method | Endpoint | Description |
+| --- | --- | --- |
+| `POST` | `/agent/task?q=...` | Stream agent thoughts and actions (SSE) |
+| `POST` | `/agent/approve` | Approve/Deny sensitive commands |
+| `GET` | `/metrics` | Prometheus metrics (Req count, Cost, Memory) |
+| `GET` | `/health` | Health check |
 
 ## License
 
