@@ -9,7 +9,10 @@ import (
 	"github.com/david22573/codepicker/internal/paths"
 )
 
-const ShadowDirName = ".codepicker/shadow"
+const (
+	ShadowDirName = ".codepicker/shadow"
+	MaxShadowSize = 1024 * 1024 * 1 // 1MB Limit for shadow files
+)
 
 type Manager struct {
 	SrcRoot    string
@@ -34,8 +37,14 @@ func NewManager(srcRoot string) (*Manager, error) {
 }
 
 func (m *Manager) WriteFile(relPath string, content []byte) (string, error) {
+	// Security: Prevent Directory Traversal
 	if strings.Contains(relPath, "..") {
 		return "", fmt.Errorf("invalid path: cannot escape project root")
+	}
+
+	// Security: Prevent Disk Exhaustion
+	if len(content) > MaxShadowSize {
+		return "", fmt.Errorf("content exceeds max shadow file size (%d bytes)", MaxShadowSize)
 	}
 
 	shadowPath := filepath.Join(m.ShadowRoot, relPath)
@@ -67,12 +76,10 @@ func (m *Manager) Apply(relPath string) error {
 	return os.WriteFile(realPath, content, 0644)
 }
 
-// Cleanup removes the entire shadow directory
 func (m *Manager) Cleanup() error {
 	return os.RemoveAll(m.ShadowRoot)
 }
 
-// ListShadowFiles returns a list of files currently in the shadow workspace
 func (m *Manager) ListShadowFiles() ([]string, error) {
 	var files []string
 	err := filepath.WalkDir(m.ShadowRoot, func(path string, d os.DirEntry, err error) error {
@@ -92,8 +99,6 @@ func (m *Manager) ListShadowFiles() ([]string, error) {
 	return files, err
 }
 
-// PreviewDiff generates a simple text description of the difference between
-// the shadow file and the original source file.
 func (m *Manager) PreviewDiff(relPath string) (string, error) {
 	shadowPath := filepath.Join(m.ShadowRoot, relPath)
 	realPath := filepath.Join(m.SrcRoot, relPath)
@@ -114,8 +119,6 @@ func (m *Manager) PreviewDiff(relPath string) (string, error) {
 		return fmt.Sprintf("=== %s\n(No changes detected)", relPath), nil
 	}
 
-	// For a full CLI, a library like 'github.com/sergi/go-diff' would be better,
-	// but for now we provide a summary to avoid heavy dependencies.
 	return fmt.Sprintf("M   %s\n    Original Size: %d bytes\n    New Size:      %d bytes",
 		relPath, len(realContent), len(shadowContent)), nil
 }

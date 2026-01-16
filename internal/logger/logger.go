@@ -1,11 +1,10 @@
 package logger
 
 import (
-	"log"
+	"log/slog"
 	"os"
 )
 
-// Logger defines the interface for application logging
 type Logger interface {
 	Info(msg string)
 	Warn(msg string)
@@ -13,47 +12,54 @@ type Logger interface {
 	Error(msg string)
 }
 
-// StandardLogger implements Logger using the standard log package
 type StandardLogger struct {
-	logger *log.Logger
-	level  int // 0=Error, 1=Info/Warn, 2=Debug
+	logger *slog.Logger
 }
 
-// NewStandardLogger creates a logger with the specified verbosity level
 func NewStandardLogger(level int) *StandardLogger {
+	// Map integer level to slog.Level
+	// 0=Error (default), 1=Info, 2=Debug
+	var logLevel slog.Level
+	switch level {
+	case 2:
+		logLevel = slog.LevelDebug
+	case 1:
+		logLevel = slog.LevelInfo
+	default:
+		logLevel = slog.LevelError
+	}
+
+	opts := &slog.HandlerOptions{
+		Level: logLevel,
+	}
+
+	// Create a JSON handler for structured output
+	handler := slog.NewJSONHandler(os.Stderr, opts)
+
 	return &StandardLogger{
-		logger: log.New(os.Stderr, "", 0),
-		level:  level,
+		logger: slog.New(handler),
 	}
 }
 
 func (l *StandardLogger) Info(msg string) {
-	if l.level >= 1 {
-		l.logger.Printf("ℹ️  %s", msg)
-	}
+	l.logger.Info(msg)
 }
 
 func (l *StandardLogger) Warn(msg string) {
-	if l.level >= 1 {
-		l.logger.Printf("⚠️  %s", msg)
-	}
+	l.logger.Warn(msg)
 }
 
 func (l *StandardLogger) Debug(msg string) {
-	if l.level >= 2 {
-		l.logger.Printf("🔧 %s", msg)
-	}
+	l.logger.Debug(msg)
 }
 
 func (l *StandardLogger) Error(msg string) {
-	l.logger.Printf("❌ %s", msg)
+	l.logger.Error(msg)
 }
 
-// NoOpLogger for testing or silent mode
 type NoOpLogger struct{}
 
 func (l *NoOpLogger) Info(msg string)  {}
 func (l *NoOpLogger) Warn(msg string)  {}
 func (l *NoOpLogger) Debug(msg string) {}
 func (l *NoOpLogger) Error(msg string) {}
-

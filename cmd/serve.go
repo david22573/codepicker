@@ -7,6 +7,7 @@ import (
 
 	"github.com/david22573/codepicker/internal/agent"
 	"github.com/david22573/codepicker/internal/config"
+	"github.com/david22573/codepicker/internal/constants"
 	"github.com/david22573/codepicker/internal/server"
 	"github.com/david22573/codepicker/pkg/openrouter"
 	"github.com/spf13/cobra"
@@ -39,7 +40,7 @@ var serveCmd = &cobra.Command{
 
 		engine, err := agent.NewEngine(
 			client,
-			"xiaomi/mimo-v2-flash:free",
+			constants.DefaultModel,
 			absSrc,
 			appLogger,
 			limits,

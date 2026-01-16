@@ -7,24 +7,33 @@ import (
 	"strings"
 )
 
-// GetChangedFiles returns a list of files changed between the current state and the target ref.
-// If diffRef is empty, it defaults to checking unstaged/staged changes vs HEAD.
 func GetChangedFiles(diffRef string) (map[string]bool, error) {
 	var cmd *exec.Cmd
 
-	if diffRef == "" || diffRef == "staged" {
-		// Diff staged/unstaged changes
-		cmd = exec.Command("git", "diff", "--name-only")
-	} else {
-		// Diff against a specific branch/commit (e.g., "main" or "HEAD~1")
-		cmd = exec.Command("git", "diff", "--name-only", diffRef)
+	// Logic for different git diff modes:
+	// 1. "" (empty) -> unstaged changes (git diff --name-only)
+	// 2. "staged"   -> staged changes (git diff --name-only --cached)
+	// 3. "HEAD~1"   -> changed since ref (git diff --name-only HEAD~1)
+
+	args := []string{"diff", "--name-only"}
+
+	if diffRef == "staged" {
+		args = append(args, "--cached")
+	} else if diffRef != "" {
+		args = append(args, diffRef)
 	}
+
+	cmd = exec.Command("git", args...)
 
 	var out bytes.Buffer
 	cmd.Stdout = &out
+	// Capture stderr to debug git errors
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
 	err := cmd.Run()
 	if err != nil {
-		return nil, fmt.Errorf("git execution failed (is this a git repo?): %w", err)
+		return nil, fmt.Errorf("git execution failed: %v (stderr: %s)", err, stderr.String())
 	}
 
 	files := make(map[string]bool)

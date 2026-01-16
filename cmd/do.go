@@ -7,6 +7,7 @@ import (
 
 	"github.com/david22573/codepicker/internal/agent"
 	"github.com/david22573/codepicker/internal/config"
+	"github.com/david22573/codepicker/internal/constants"
 	"github.com/david22573/codepicker/pkg/openrouter"
 	"github.com/spf13/cobra"
 )
@@ -31,13 +32,11 @@ var doCmd = &cobra.Command{
 		client := openrouter.NewClient(apiKey)
 		limits := config.DefaultLimits()
 
-		// Initialize the Agent Engine (which contains our Phase 1 Recovery logic)
-		eng, err := agent.NewEngine(client, "xiaomi/mimo-v2-flash:free", absSrc, appLogger, limits)
+		eng, err := agent.NewEngine(client, constants.DefaultModel, absSrc, appLogger, limits)
 		if err != nil {
 			return err
 		}
 
-		// Simple CLI approval mechanism
 		eng.ApprovalCallback = func(c, r string) bool {
 			fmt.Printf("\n⚠️  Agent wants to run: %s\n   Reason: %s\n   Allow? [Y/n]: ", c, r)
 			var resp string
@@ -47,7 +46,6 @@ var doCmd = &cobra.Command{
 
 		appLogger.Info("🤖 Agent starting task: " + task)
 
-		// Define a callback to print "thoughts" and partial responses to the console
 		printUpdate := func(msg openrouter.ChatMessage) {
 			if msg.Role == "assistant" && msg.Content != nil {
 				content := fmt.Sprintf("%v", msg.Content)
@@ -56,8 +54,7 @@ var doCmd = &cobra.Command{
 				}
 			}
 			if msg.Role == "tool" {
-				// We don't print full tool output here to keep it clean,
-				// relying on the Engine logger for that.
+				// Tool output handling can be added here if needed
 			}
 		}
 

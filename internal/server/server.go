@@ -1,10 +1,15 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/david22573/codepicker/internal/agent"
@@ -33,27 +38,35 @@ func New(port string, eng *agent.Engine, log logger.Logger) *AgentServer {
 }
 
 func (s *AgentServer) Start() error {
-
 	mux := http.NewServeMux()
-
-	// PHASE 3: Load limits from config
 	limits := config.DefaultLimits()
 
-	// Calculate rate limit: convert "Requests Per Minute" to "Requests Per Second"
-	rLimit := rate.Limit(limits.RateLimitPerMinute / 60.0)
+	// Load config for security settings
+	cfg, _ := config.LoadConfigFile("")
+	var allowedOrigins []string
+	if cfg != nil {
+		allowedOrigins = cfg.Server.AllowedOrigins
+	}
+	if len(allowedOrigins) == 0 {
+		allowedOrigins = []string{"*"}
+	}
 
+	rLimit := rate.Limit(limits.RateLimitPerMinute / 60.0)
 	rateLimiter := NewRateLimiter(rLimit, limits.RateLimitBurst)
 
-	standardStack := []Middleware{
+	// Middleware stack for API endpoints
+	apiStack := []Middleware{
 		RecoveryMiddleware(s.Logger),
+		BodyLimitMiddleware(limits.MaxBodySize),
 		RequestID(),
 		RequestLogger(s.Logger),
 		rateLimiter.Middleware(),
-		EnableCORS(),
+		EnableCORS(allowedOrigins),
 	}
 
-	mux.HandleFunc("/agent/task", s.Chain(s.handleAgentTask, standardStack...))
-	mux.HandleFunc("/agent/approve", s.Chain(s.handleApprovalResponse, standardStack...))
+	// Endpoints
+	mux.HandleFunc("/agent/task", s.Chain(s.handleAgentTask, apiStack...))
+	mux.HandleFunc("/agent/approve", s.Chain(s.handleApprovalResponse, apiStack...))
 
 	mux.HandleFunc("/agent/context", s.Chain(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
@@ -66,14 +79,48 @@ func (s *AgentServer) Start() error {
 		default:
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
-	}, standardStack...))
+	}, apiStack...))
 
-	mux.HandleFunc("/health", s.Chain(s.handleHealth, EnableCORS()))
+	// Observability Endpoints (No rate limit, minimal middleware)
+	mux.HandleFunc("/health", s.Chain(s.handleHealth, EnableCORS(allowedOrigins)))
+	mux.HandleFunc("/metrics", s.Chain(s.handleMetrics, EnableCORS(allowedOrigins)))
 
-	s.Logger.Info(fmt.Sprintf("🚀 Agent Daemon listening on :%s", s.Port))
-	s.Logger.Info(fmt.Sprintf("🛡️  Rate Limit: %.2f req/min (Burst: %d)", limits.RateLimitPerMinute, limits.RateLimitBurst))
+	server := &http.Server{
+		Addr:    ":" + s.Port,
+		Handler: mux,
+	}
 
-	return http.ListenAndServe(":"+s.Port, mux)
+	// Server run loop
+	go func() {
+		s.Logger.Info(fmt.Sprintf("🚀 Agent Daemon listening on :%s", s.Port))
+		s.Logger.Info(fmt.Sprintf("🛡️  Rate Limit: %.2f req/min (Burst: %d)", limits.RateLimitPerMinute, limits.RateLimitBurst))
+		s.Logger.Info("📊 Metrics available at /metrics")
+
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			s.Logger.Error(fmt.Sprintf("Server failed: %v", err))
+			os.Exit(1)
+		}
+	}()
+
+	// Graceful Shutdown Logic
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+	// Block until signal
+	sig := <-quit
+	s.Logger.Info(fmt.Sprintf("🛑 Received signal: %v. Shutting down...", sig))
+
+	// Create context with timeout for cleanup
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := server.Shutdown(ctx); err != nil {
+		s.Logger.Error(fmt.Sprintf("Server forced to shutdown: %v", err))
+		return err
+	}
+
+	s.Logger.Info("✅ Server exited gracefully")
+	return nil
 }
 
 func (s *AgentServer) WaitForApproval(cmdStr, reason string) bool {

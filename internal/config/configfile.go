@@ -9,19 +9,25 @@ import (
 )
 
 type ConfigFile struct {
-	Src     string   `yaml:"src"`
-	Output  string   `yaml:"output"`
-	Include []string `yaml:"include"`
-	Exclude []string `yaml:"exclude"`
-	Minify  bool     `yaml:"minify"`
-	Tokens  bool     `yaml:"tokens"`
-	Verbose bool     `yaml:"verbose"`
-	AI      AIConfig `yaml:"ai"`
+	Src     string       `yaml:"src"`
+	Output  string       `yaml:"output"`
+	Include []string     `yaml:"include"`
+	Exclude []string     `yaml:"exclude"`
+	Minify  bool         `yaml:"minify"`
+	Tokens  bool         `yaml:"tokens"`
+	Verbose bool         `yaml:"verbose"`
+	AI      AIConfig     `yaml:"ai"`
+	Server  ServerConfig `yaml:"server"`
 }
 
 type AIConfig struct {
 	Model       string  `yaml:"model"`
 	Temperature float32 `yaml:"temperature"`
+}
+
+type ServerConfig struct {
+	AllowedOrigins []string `yaml:"allowed_origins"`
+	Host           string   `yaml:"host"`
 }
 
 func LoadConfigFile(path string) (*ConfigFile, error) {
@@ -50,7 +56,6 @@ func LoadConfigFile(path string) (*ConfigFile, error) {
 	return &cfg, nil
 }
 
-// GetModel returns the configured model or the default if not set
 func (c *ConfigFile) GetModel() string {
 	if c.AI.Model != "" {
 		return c.AI.Model

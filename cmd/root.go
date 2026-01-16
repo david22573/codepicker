@@ -14,7 +14,7 @@ import (
 	"github.com/david22573/codepicker/internal/paths"
 	"github.com/david22573/codepicker/internal/scanner"
 	"github.com/david22573/codepicker/internal/writer"
-	"github.com/joho/godotenv" // Added for .env support
+	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
 )
 
@@ -29,6 +29,7 @@ var (
 	verbose     bool
 	diffRef     string
 	overwrite   bool
+	dryRun      bool // Added dryRun
 )
 
 var appLogger logger.Logger
@@ -108,7 +109,7 @@ var rootCmd = &cobra.Command{
 			return fmt.Errorf("cannot write context to source directory root")
 		}
 
-		if _, err := os.Stat(absOut); err == nil {
+		if _, err := os.Stat(absOut); err == nil && !dryRun {
 			if !overwrite {
 				appLogger.Warn(fmt.Sprintf("Output file already exists: %s", absOut))
 				appLogger.Info("Use -y to overwrite. Aborting.")
@@ -117,7 +118,14 @@ var rootCmd = &cobra.Command{
 			appLogger.Info("Overwriting existing output file...")
 		}
 
-		w := writer.NewConcatStrategy(absOut, minify, showTokens)
+		var w writer.OutputStrategy
+		w = writer.NewConcatStrategy(absOut, minify, showTokens)
+
+		// Handle dry run wrapper
+		if dryRun {
+			appLogger.Info("🌵 Dry-run enabled. No files will be written.")
+			w = writer.NewDryRunStrategy(w, appLogger)
+		}
 
 		defer w.Close()
 
@@ -125,9 +133,16 @@ var rootCmd = &cobra.Command{
 			return err
 		}
 
-		appLogger.Info(fmt.Sprintf("Output: %s", absOut))
-		if showTokens {
-			appLogger.Info(fmt.Sprintf("Token Count: %d", w.TokenCount))
+		if !dryRun {
+			appLogger.Info(fmt.Sprintf("Output: %s", absOut))
+			if showTokens {
+				// We need to cast back to verify tokens if we wrapped it,
+				// but DryRunStrategy tracks nothing.
+				// For now, simpler to skip token reporting in dry run or implement pass-through getter.
+				if cs, ok := w.(*writer.ConcatStrategy); ok {
+					appLogger.Info(fmt.Sprintf("Token Count: %d", cs.TokenCount))
+				}
+			}
 		}
 		return nil
 	},
@@ -142,10 +157,8 @@ func Execute() {
 }
 
 func init() {
-	// FIX: Load .env file if it exists
 	if err := godotenv.Load(); err != nil {
-		// It's okay if it fails, the user might have set ENV vars manually.
-		// We suppress the error but the logger isn't init'd yet, so we just proceed.
+		// Ignore if .env not found
 	}
 
 	rootCmd.PersistentFlags().StringVarP(&srcDir, "src", "s", ".", "Source directory to scan")
@@ -158,6 +171,7 @@ func init() {
 	rootCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose logging")
 
 	rootCmd.Flags().BoolVarP(&overwrite, "yes", "y", false, "Overwrite output file if it exists")
+	rootCmd.Flags().BoolVarP(&dryRun, "dry-run", "D", false, "Simulate scan without writing output")
 
 	rootCmd.PersistentFlags().StringVarP(&configFile, "config", "c", "", "Config file path (default: .codepicker.yml)")
 }
@@ -251,4 +265,3 @@ func runScan(ctx context.Context, w writer.OutputStrategy, absSrc string, cmd *c
 func flagChanged(flags interface{ Changed(string) bool }, name string) bool {
 	return flags.Changed(name)
 }
-
