@@ -22,10 +22,9 @@ type Engine struct {
 	SrcRoot          string
 	ApprovalCallback func(command string, reason string) bool
 	CostTracker      *tracking.CostTracker
-	Limits           *config.Limits // Phase 3
+	Limits           *config.Limits
 }
 
-// Update constructor to accept Limits
 func NewEngine(client *openrouter.Client, model, srcRoot string, log logger.Logger, limits *config.Limits) (*Engine, error) {
 	shadowMgr, err := shadow.NewManager(srcRoot)
 	if err != nil {
@@ -35,19 +34,19 @@ func NewEngine(client *openrouter.Client, model, srcRoot string, log logger.Logg
 	return &Engine{
 		Client:           client,
 		Model:            model,
-		Sentinel:         NewSentinel(limits), // Pass limits to Sentinel
+		Sentinel:         NewSentinel(limits),
 		Shadow:           shadowMgr,
 		Memory:           NewMemory(srcRoot),
 		Logger:           log,
 		SrcRoot:          srcRoot,
 		ApprovalCallback: func(c, r string) bool { return false },
-		CostTracker:      tracking.NewCostTracker(limits.DailyCostLimit), // Phase 3: Configurable Cost
+		CostTracker:      tracking.NewCostTracker(limits.DailyCostLimit),
 		Limits:           limits,
 	}, nil
 }
 
 func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openrouter.ChatMessage)) (string, error) {
-	// PHASE 3: Use configured Agent Timeout
+
 	ctx, cancel := context.WithTimeout(ctx, e.Limits.AgentTimeout)
 	defer cancel()
 
@@ -62,7 +61,6 @@ RULES:
 		{Role: "user", Content: task},
 	}
 
-	// PHASE 3: Use configured Max Turns
 	for i := 0; i < e.Limits.AgentMaxTurns; i++ {
 		select {
 		case <-ctx.Done():
@@ -83,7 +81,6 @@ RULES:
 
 		e.Logger.Info(fmt.Sprintf("Agent thinking (Turn %d/%d)...", i+1, e.Limits.AgentMaxTurns))
 
-		// PHASE 2/3: Budget Check
 		cost, _ := e.CostTracker.GetStats()
 		if cost >= e.Limits.DailyCostLimit {
 			return "", fmt.Errorf("daily cost limit exceeded ($%.2f)", e.Limits.DailyCostLimit)
@@ -172,11 +169,23 @@ RULES:
 					}
 				}
 
-				output, err := e.Sentinel.Execute(binary, cmdArgs)
-				if err != nil {
-					resultStr = fmt.Sprintf("Command failed: %v\nOutput so far:\n%s", err, output)
+				// Phase 1: Recovery Integrated Execution
+				recoveryResult := e.ExecuteWithRecovery(binary, cmdArgs, e.Limits.MaxRecoveryAttempts)
+
+				if recoveryResult.Success {
+					resultStr = recoveryResult.FinalOutput
+					if recoveryResult.Attempted {
+						resultStr = fmt.Sprintf("[Auto-recovery: %s]\n%s",
+							recoveryResult.StrategyUsed, recoveryResult.FinalOutput)
+					}
 				} else {
-					resultStr = output
+					resultStr = fmt.Sprintf("Command failed: %v\nOutput:\n%s",
+						recoveryResult.FinalError, recoveryResult.FinalOutput)
+
+					if recoveryResult.Attempted {
+						resultStr += fmt.Sprintf("\n\n(Recovery attempted via %s but failed. Actions taken: %v)",
+							recoveryResult.StrategyUsed, recoveryResult.ActionsTaken)
+					}
 				}
 			}
 

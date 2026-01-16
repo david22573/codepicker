@@ -18,32 +18,30 @@ type Limits struct {
 	DailyCostLimit     float64
 	RateLimitPerMinute float64
 	RateLimitBurst     int
+
+	// Phase 1: Error Recovery
+	MaxRecoveryAttempts int
 }
 
 func DefaultLimits() *Limits {
 	return &Limits{
-		// HTTP / Server Limits
-		MaxQueryLength: getEnvInt("MAX_QUERY_LENGTH", 25000),
-		MaxModelLength: getEnvInt("MAX_MODEL_LENGTH", 100),
-		MaxBodySize:    getEnvInt64("MAX_BODY_SIZE", 1024*1024), // 1MB
-
-		// File System Limits
-		MaxFileSize: getEnvInt64("MAX_FILE_SIZE", 100*1024*1024), // 100MB
-
-		// Agent / Sandbox Limits
-		MaxCommandOutput: getEnvInt("MAX_COMMAND_OUTPUT", 1024*100), // 100KB
-		CommandTimeout:   getEnvDuration("COMMAND_TIMEOUT", 10*time.Second),
-		AgentMaxTurns:    getEnvInt("AGENT_MAX_TURNS", 15),
-		AgentTimeout:     getEnvDuration("AGENT_TIMEOUT", 5*time.Minute),
-
-		// Cost & Rate Limits
-		DailyCostLimit:     getEnvFloat("DAILY_COST_LIMIT", 10.0), // $10.00
+		MaxQueryLength:     getEnvInt("MAX_QUERY_LENGTH", 25000),
+		MaxModelLength:     getEnvInt("MAX_MODEL_LENGTH", 100),
+		MaxBodySize:        getEnvInt64("MAX_BODY_SIZE", 1024*1024),
+		MaxFileSize:        getEnvInt64("MAX_FILE_SIZE", 100*1024*1024),
+		MaxCommandOutput:   getEnvInt("MAX_COMMAND_OUTPUT", 1024*100),
+		CommandTimeout:     getEnvDuration("COMMAND_TIMEOUT", 10*time.Second),
+		AgentMaxTurns:      getEnvInt("AGENT_MAX_TURNS", 15),
+		AgentTimeout:       getEnvDuration("AGENT_TIMEOUT", 5*time.Minute),
+		DailyCostLimit:     getEnvFloat("DAILY_COST_LIMIT", 10.0),
 		RateLimitPerMinute: getEnvFloat("RATE_LIMIT_PER_MIN", 10.0),
 		RateLimitBurst:     getEnvInt("RATE_LIMIT_BURST", 10),
+
+		// Defaults to 2 retries per command
+		MaxRecoveryAttempts: getEnvInt("MAX_RECOVERY_ATTEMPTS", 2),
 	}
 }
 
-// Helper functions to read env vars
 func getEnvInt(key string, defaultVal int) int {
 	if val := os.Getenv(key); val != "" {
 		if i, err := strconv.Atoi(val); err == nil {
