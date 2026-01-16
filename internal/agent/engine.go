@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/david22573/codepicker/internal/logger"
 	"github.com/david22573/codepicker/internal/shadow"
+	"github.com/david22573/codepicker/internal/tracking"
 	"github.com/david22573/codepicker/pkg/openrouter"
 )
 
@@ -19,6 +21,7 @@ type Engine struct {
 	Logger           logger.Logger
 	SrcRoot          string
 	ApprovalCallback func(command string, reason string) bool
+	CostTracker      *tracking.CostTracker
 }
 
 func NewEngine(client *openrouter.Client, model, srcRoot string, log logger.Logger) (*Engine, error) {
@@ -36,10 +39,14 @@ func NewEngine(client *openrouter.Client, model, srcRoot string, log logger.Logg
 		Logger:           log,
 		SrcRoot:          srcRoot,
 		ApprovalCallback: func(c, r string) bool { return false },
+		CostTracker:      tracking.NewCostTracker(10.00), // $10.00 Daily Limit
 	}, nil
 }
 
 func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openrouter.ChatMessage)) (string, error) {
+	// PHASE 2: Global timeout for agent execution
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
 
 	baseSystemPrompt := `You are an autonomous AI developer agent.
 RULES:
@@ -55,6 +62,7 @@ RULES:
 	const maxTurns = 15
 
 	for i := 0; i < maxTurns; i++ {
+		// Check for timeout or cancellation
 		select {
 		case <-ctx.Done():
 			return "", ctx.Err()
@@ -74,9 +82,27 @@ RULES:
 
 		e.Logger.Info(fmt.Sprintf("Agent thinking (Turn %d)...", i+1))
 
+		// PHASE 2: Check budget before request (simple check)
+		cost, _ := e.CostTracker.GetStats()
+		if cost >= 10.00 {
+			return "", fmt.Errorf("daily cost limit exceeded ($10.00)")
+		}
+
 		resp, err := e.Client.CreateChatCompletion(ctx, req)
 		if err != nil {
 			return "", fmt.Errorf("LLM error: %w", err)
+		}
+
+		// PHASE 2: Record Cost
+		if resp.Usage != nil {
+			if err := e.CostTracker.RecordRequest(
+				resp.Usage.PromptTokens,
+				resp.Usage.CompletionTokens,
+				e.Model,
+			); err != nil {
+				e.Logger.Warn(fmt.Sprintf("Cost tracking alert: %v", err))
+				// We don't return here so we don't lose the response, but next turn will fail
+			}
 		}
 
 		msg := resp.Choices[0].Message
@@ -98,7 +124,7 @@ RULES:
 				var args struct {
 					Path string `json:"path"`
 				}
-				// ERROR HANDLING FIX: Check for invalid JSON from LLM
+				// PHASE 1: Error Handling logic kept intact
 				if err := json.Unmarshal([]byte(tool.Function.Arguments), &args); err != nil {
 					e.Logger.Error(fmt.Sprintf("Failed to parse read_file args: %v", err))
 					resultStr = fmt.Sprintf("Invalid arguments for read_file: %v", err)
@@ -118,7 +144,6 @@ RULES:
 					Path    string `json:"path"`
 					Content string `json:"content"`
 				}
-				// ERROR HANDLING FIX
 				if err := json.Unmarshal([]byte(tool.Function.Arguments), &args); err != nil {
 					e.Logger.Error(fmt.Sprintf("Failed to parse write_shadow_file args: %v", err))
 					resultStr = fmt.Sprintf("Invalid arguments for write_shadow_file: %v", err)
@@ -138,13 +163,13 @@ RULES:
 				var args struct {
 					Command string `json:"command"`
 				}
-				// ERROR HANDLING FIX
 				if err := json.Unmarshal([]byte(tool.Function.Arguments), &args); err != nil {
 					e.Logger.Error(fmt.Sprintf("Failed to parse run_shell args: %v", err))
 					resultStr = fmt.Sprintf("Error parsing arguments: %v", err)
 					break
 				}
 
+				// PHASE 0: Security logic kept intact
 				needsApproval, reason, binary, cmdArgs := e.Sentinel.CheckCommand(args.Command)
 
 				if needsApproval {
@@ -156,7 +181,6 @@ RULES:
 
 				output, err := e.Sentinel.Execute(binary, cmdArgs)
 				if err != nil {
-					// We return the partial output and the error so the agent knows what happened
 					resultStr = fmt.Sprintf("Command failed: %v\nOutput so far:\n%s", err, output)
 				} else {
 					resultStr = output
