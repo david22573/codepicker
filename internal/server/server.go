@@ -9,6 +9,7 @@ import (
 
 	"github.com/david22573/codepicker/internal/agent"
 	"github.com/david22573/codepicker/internal/logger"
+	"golang.org/x/time/rate"
 )
 
 type AgentServer struct {
@@ -31,13 +32,17 @@ func New(port string, eng *agent.Engine, log logger.Logger) *AgentServer {
 }
 
 func (s *AgentServer) Start() error {
-	// Reusing the Phase 1 middleware architecture here for best practice
+
 	mux := http.NewServeMux()
+
+	// SECURITY FIX: Rate limiter (10 requests per minute per IP, burst of 10)
+	rateLimiter := NewRateLimiter(rate.Limit(10.0/60.0), 10)
 
 	standardStack := []Middleware{
 		RecoveryMiddleware(s.Logger),
 		RequestID(),
 		RequestLogger(s.Logger),
+		rateLimiter.Middleware(), // Add rate limiting
 		EnableCORS(),
 	}
 
@@ -71,7 +76,6 @@ func (s *AgentServer) WaitForApproval(cmdStr, reason string) bool {
 	s.approvalMap[reqID] = responseChan
 	s.approvalLock.Unlock()
 
-	// Ensure cleanup happens regardless of outcome
 	defer func() {
 		s.approvalLock.Lock()
 		delete(s.approvalMap, reqID)

@@ -27,14 +27,12 @@ type ServerState struct {
 
 var serverState ServerState
 
-// Input limits
 const (
 	MaxQueryLength = 25000       // characters
 	MaxModelLength = 100         // characters
 	MaxBodySize    = 1024 * 1024 // 1MB Max request body
 )
 
-// Regex for safe model names (alphanumeric, dashes, slashes, colons, dots)
 var safeModelName = regexp.MustCompile(`^[a-zA-Z0-9\-\_\.\:\/]+$`)
 
 type AskRequest struct {
@@ -48,7 +46,7 @@ var serveCmd = &cobra.Command{
 	Use:   "serve",
 	Short: "Start the codepicker agent daemon",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// 1. Dependency Injection
+
 		apiKey := os.Getenv("OPENROUTER_API_KEY")
 		if apiKey == "" {
 			return fmt.Errorf("OPENROUTER_API_KEY environment variable required")
@@ -61,7 +59,6 @@ var serveCmd = &cobra.Command{
 
 		client := openrouter.NewClient(apiKey)
 
-		// 2. Initialize Core Logic (Brain)
 		engine, err := agent.NewEngine(
 			client,
 			"xiaomi/mimo-v2-flash:free",
@@ -72,7 +69,6 @@ var serveCmd = &cobra.Command{
 			return fmt.Errorf("failed to initialize agent engine: %w", err)
 		}
 
-		// 3. Initialize Server (Interface)
 		srv := server.New(port, engine, appLogger)
 		return srv.Start()
 	},
@@ -80,7 +76,7 @@ var serveCmd = &cobra.Command{
 
 func enableCORS(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Strictly allow only local origins if possible, or keep * for local dev tools
+
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
@@ -100,7 +96,6 @@ func handleAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. Enforce Max Body Size
 	r.Body = http.MaxBytesReader(w, r.Body, MaxBodySize)
 
 	var req AskRequest
@@ -110,7 +105,6 @@ func handleAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. Validate Inputs
 	if req.Query == "" {
 		http.Error(w, "Query cannot be empty", http.StatusBadRequest)
 		return
@@ -120,7 +114,6 @@ func handleAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate Model Name
 	model := req.Model
 	if model == "" {
 		model = "xiaomi/mimo-v2-flash:free"
@@ -130,9 +123,11 @@ func handleAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate Focus Path (Potential Traversal Vector)
+	// SECURITY FIX: Sanitize and capture the clean path
+	var cleanFocus string
 	if req.Focus != "" {
-		_, err := paths.Sanitize(req.Focus)
+		var err error
+		cleanFocus, err = paths.Sanitize(req.Focus)
 		if err != nil {
 			appLogger.Warn(fmt.Sprintf("Blocked unsafe focus path: %s", req.Focus))
 			http.Error(w, "Invalid focus path", http.StatusBadRequest)
@@ -146,7 +141,6 @@ func handleAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 3. Output Path Sanitization
 	absOut, err := paths.Sanitize(outPath)
 	if err != nil {
 		http.Error(w, "Server configuration error: Invalid output path", http.StatusInternalServerError)
@@ -157,7 +151,6 @@ func handleAsk(w http.ResponseWriter, r *http.Request) {
 	_, statErr := os.Stat(absOut)
 	cacheExists := statErr == nil
 
-	// Logic for generating/reading context...
 	if cacheExists && !req.Overwrite {
 		appLogger.Info("⚡ Cache Hit: Using existing context file")
 		contextBytes, err = os.ReadFile(absOut)
@@ -178,7 +171,6 @@ func handleAsk(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Ensure we scan from the sanitized source directory
 		absSrc, err := paths.Sanitize(srcDir)
 		if err != nil {
 			http.Error(w, "Invalid source directory", http.StatusInternalServerError)
@@ -188,7 +180,6 @@ func handleAsk(w http.ResponseWriter, r *http.Request) {
 		cfg := config.NewConfig()
 		s := scanner.NewScanner(absSrc, wStrat, cfg, appLogger)
 
-		// Pass request context to respect client cancellation
 		if err := s.Scan(r.Context()); err != nil {
 			http.Error(w, fmt.Sprintf("Scan failed: %v", err), http.StatusInternalServerError)
 			return
@@ -203,7 +194,8 @@ func handleAsk(w http.ResponseWriter, r *http.Request) {
 	}
 
 	contextType := "Codebase"
-	if req.Focus != "" {
+	// SECURITY FIX: Use cleanFocus instead of req.Focus
+	if cleanFocus != "" {
 		contextType = "Active File"
 	}
 
