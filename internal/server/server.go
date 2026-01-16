@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/david22573/codepicker/internal/agent"
+	"github.com/david22573/codepicker/internal/config"
 	"github.com/david22573/codepicker/internal/logger"
 	"golang.org/x/time/rate"
 )
@@ -35,14 +36,19 @@ func (s *AgentServer) Start() error {
 
 	mux := http.NewServeMux()
 
-	// SECURITY FIX: Rate limiter (10 requests per minute per IP, burst of 10)
-	rateLimiter := NewRateLimiter(rate.Limit(10.0/60.0), 10)
+	// PHASE 3: Load limits from config
+	limits := config.DefaultLimits()
+
+	// Calculate rate limit: convert "Requests Per Minute" to "Requests Per Second"
+	rLimit := rate.Limit(limits.RateLimitPerMinute / 60.0)
+
+	rateLimiter := NewRateLimiter(rLimit, limits.RateLimitBurst)
 
 	standardStack := []Middleware{
 		RecoveryMiddleware(s.Logger),
 		RequestID(),
 		RequestLogger(s.Logger),
-		rateLimiter.Middleware(), // Add rate limiting
+		rateLimiter.Middleware(),
 		EnableCORS(),
 	}
 
@@ -65,6 +71,8 @@ func (s *AgentServer) Start() error {
 	mux.HandleFunc("/health", s.Chain(s.handleHealth, EnableCORS()))
 
 	s.Logger.Info(fmt.Sprintf("🚀 Agent Daemon listening on :%s", s.Port))
+	s.Logger.Info(fmt.Sprintf("🛡️  Rate Limit: %.2f req/min (Burst: %d)", limits.RateLimitPerMinute, limits.RateLimitBurst))
+
 	return http.ListenAndServe(":"+s.Port, mux)
 }
 

@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"time"
 
+	"github.com/david22573/codepicker/internal/config"
 	"github.com/david22573/codepicker/internal/logger"
 	"github.com/david22573/codepicker/internal/shadow"
 	"github.com/david22573/codepicker/internal/tracking"
@@ -22,9 +22,11 @@ type Engine struct {
 	SrcRoot          string
 	ApprovalCallback func(command string, reason string) bool
 	CostTracker      *tracking.CostTracker
+	Limits           *config.Limits // Phase 3
 }
 
-func NewEngine(client *openrouter.Client, model, srcRoot string, log logger.Logger) (*Engine, error) {
+// Update constructor to accept Limits
+func NewEngine(client *openrouter.Client, model, srcRoot string, log logger.Logger, limits *config.Limits) (*Engine, error) {
 	shadowMgr, err := shadow.NewManager(srcRoot)
 	if err != nil {
 		return nil, err
@@ -33,19 +35,20 @@ func NewEngine(client *openrouter.Client, model, srcRoot string, log logger.Logg
 	return &Engine{
 		Client:           client,
 		Model:            model,
-		Sentinel:         NewSentinel(),
+		Sentinel:         NewSentinel(limits), // Pass limits to Sentinel
 		Shadow:           shadowMgr,
 		Memory:           NewMemory(srcRoot),
 		Logger:           log,
 		SrcRoot:          srcRoot,
 		ApprovalCallback: func(c, r string) bool { return false },
-		CostTracker:      tracking.NewCostTracker(10.00), // $10.00 Daily Limit
+		CostTracker:      tracking.NewCostTracker(limits.DailyCostLimit), // Phase 3: Configurable Cost
+		Limits:           limits,
 	}, nil
 }
 
 func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openrouter.ChatMessage)) (string, error) {
-	// PHASE 2: Global timeout for agent execution
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	// PHASE 3: Use configured Agent Timeout
+	ctx, cancel := context.WithTimeout(ctx, e.Limits.AgentTimeout)
 	defer cancel()
 
 	baseSystemPrompt := `You are an autonomous AI developer agent.
@@ -59,10 +62,8 @@ RULES:
 		{Role: "user", Content: task},
 	}
 
-	const maxTurns = 15
-
-	for i := 0; i < maxTurns; i++ {
-		// Check for timeout or cancellation
+	// PHASE 3: Use configured Max Turns
+	for i := 0; i < e.Limits.AgentMaxTurns; i++ {
 		select {
 		case <-ctx.Done():
 			return "", ctx.Err()
@@ -80,12 +81,12 @@ RULES:
 			Tools:    Tools,
 		}
 
-		e.Logger.Info(fmt.Sprintf("Agent thinking (Turn %d)...", i+1))
+		e.Logger.Info(fmt.Sprintf("Agent thinking (Turn %d/%d)...", i+1, e.Limits.AgentMaxTurns))
 
-		// PHASE 2: Check budget before request (simple check)
+		// PHASE 2/3: Budget Check
 		cost, _ := e.CostTracker.GetStats()
-		if cost >= 10.00 {
-			return "", fmt.Errorf("daily cost limit exceeded ($10.00)")
+		if cost >= e.Limits.DailyCostLimit {
+			return "", fmt.Errorf("daily cost limit exceeded ($%.2f)", e.Limits.DailyCostLimit)
 		}
 
 		resp, err := e.Client.CreateChatCompletion(ctx, req)
@@ -93,7 +94,6 @@ RULES:
 			return "", fmt.Errorf("LLM error: %w", err)
 		}
 
-		// PHASE 2: Record Cost
 		if resp.Usage != nil {
 			if err := e.CostTracker.RecordRequest(
 				resp.Usage.PromptTokens,
@@ -101,12 +101,10 @@ RULES:
 				e.Model,
 			); err != nil {
 				e.Logger.Warn(fmt.Sprintf("Cost tracking alert: %v", err))
-				// We don't return here so we don't lose the response, but next turn will fail
 			}
 		}
 
 		msg := resp.Choices[0].Message
-
 		messages = append(messages, *msg)
 		if updateHistory != nil {
 			updateHistory(*msg)
@@ -124,13 +122,11 @@ RULES:
 				var args struct {
 					Path string `json:"path"`
 				}
-				// PHASE 1: Error Handling logic kept intact
 				if err := json.Unmarshal([]byte(tool.Function.Arguments), &args); err != nil {
 					e.Logger.Error(fmt.Sprintf("Failed to parse read_file args: %v", err))
 					resultStr = fmt.Sprintf("Invalid arguments for read_file: %v", err)
 					break
 				}
-
 				if err := e.Memory.Add(args.Path); err != nil {
 					e.Logger.Warn(fmt.Sprintf("Failed to read file %s: %v", args.Path, err))
 					resultStr = fmt.Sprintf("Error: Could not read '%s'. %v", args.Path, err)
@@ -149,7 +145,6 @@ RULES:
 					resultStr = fmt.Sprintf("Invalid arguments for write_shadow_file: %v", err)
 					break
 				}
-
 				path, err := e.Shadow.WriteFile(args.Path, []byte(args.Content))
 				if err != nil {
 					e.Logger.Warn(fmt.Sprintf("Failed to write shadow file %s: %v", args.Path, err))
@@ -169,9 +164,7 @@ RULES:
 					break
 				}
 
-				// PHASE 0: Security logic kept intact
 				needsApproval, reason, binary, cmdArgs := e.Sentinel.CheckCommand(args.Command)
-
 				if needsApproval {
 					if !e.ApprovalCallback(args.Command, reason) {
 						resultStr = "Command denied by user."
@@ -198,5 +191,5 @@ RULES:
 			}
 		}
 	}
-	return "", fmt.Errorf("agent exceeded max turns")
+	return "", fmt.Errorf("agent exceeded max turns (%d)", e.Limits.AgentMaxTurns)
 }

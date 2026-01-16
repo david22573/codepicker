@@ -23,17 +23,12 @@ import (
 
 var port string
 
-type ServerState struct {
-	Port string
+// PHASE 3: Global limits
+var limits *config.Limits
+
+func init() {
+	limits = config.DefaultLimits()
 }
-
-var serverState ServerState
-
-const (
-	MaxQueryLength = 25000       // characters
-	MaxModelLength = 100         // characters
-	MaxBodySize    = 1024 * 1024 // 1MB Max request body
-)
 
 var safeModelName = regexp.MustCompile(`^[a-zA-Z0-9\-\_\.\:\/]+$`)
 
@@ -61,11 +56,13 @@ var serveCmd = &cobra.Command{
 
 		client := openrouter.NewClient(apiKey)
 
+		// PHASE 3: Pass limits to engine
 		engine, err := agent.NewEngine(
 			client,
 			"xiaomi/mimo-v2-flash:free",
 			absSrc,
 			appLogger,
+			limits,
 		)
 		if err != nil {
 			return fmt.Errorf("failed to initialize agent engine: %w", err)
@@ -78,7 +75,6 @@ var serveCmd = &cobra.Command{
 
 func enableCORS(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
@@ -98,7 +94,8 @@ func handleAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, MaxBodySize)
+	// PHASE 3: Use configured Body Size
+	r.Body = http.MaxBytesReader(w, r.Body, limits.MaxBodySize)
 
 	var req AskRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -111,7 +108,8 @@ func handleAsk(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Query cannot be empty", http.StatusBadRequest)
 		return
 	}
-	if len(req.Query) > MaxQueryLength {
+	// PHASE 3: Use configured Query Length
+	if len(req.Query) > limits.MaxQueryLength {
 		http.Error(w, "Query too long", http.StatusBadRequest)
 		return
 	}
@@ -120,12 +118,12 @@ func handleAsk(w http.ResponseWriter, r *http.Request) {
 	if model == "" {
 		model = "xiaomi/mimo-v2-flash:free"
 	}
-	if len(model) > MaxModelLength || !safeModelName.MatchString(model) {
+	// PHASE 3: Use configured Model Length
+	if len(model) > limits.MaxModelLength || !safeModelName.MatchString(model) {
 		http.Error(w, "Invalid model name", http.StatusBadRequest)
 		return
 	}
 
-	// SECURITY FIX (Phase 0): Sanitize and capture the clean path
 	var cleanFocus string
 	if req.Focus != "" {
 		var err error
@@ -196,12 +194,10 @@ func handleAsk(w http.ResponseWriter, r *http.Request) {
 	}
 
 	contextType := "Codebase"
-	// SECURITY FIX (Phase 0): Use cleanFocus
 	if cleanFocus != "" {
 		contextType = "Active File"
 	}
 
-	// Phase 1: Robust Context Gen Error Reporting
 	if len(contextBytes) == 0 {
 		agentErr := cpErrors.NewContextGenerationError(errors.New("empty context generated"))
 		http.Error(w, agentErr.Error(), http.StatusInternalServerError)

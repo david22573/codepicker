@@ -6,17 +6,20 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
-	"time"
 
+	"github.com/david22573/codepicker/internal/config"
 	"github.com/google/shlex"
 )
 
 type Sentinel struct {
 	SafeBinaries map[string]bool
+	Limits       *config.Limits
 }
 
-func NewSentinel() *Sentinel {
+// Update constructor to accept limits
+func NewSentinel(limits *config.Limits) *Sentinel {
 	return &Sentinel{
+		Limits: limits,
 		SafeBinaries: map[string]bool{
 			"ls":    true,
 			"cat":   true,
@@ -39,7 +42,7 @@ func (s *Sentinel) CheckCommand(cmdStr string) (bool, string, string, []string) 
 	binary := parts[0]
 	args := parts[1:]
 
-	// SECURITY FIX: Block attempts to read sensitive system directories
+	// System path protection (Phase 0)
 	if binary == "cat" || binary == "grep" || binary == "find" {
 		for _, arg := range args {
 			if strings.HasPrefix(arg, "/etc") ||
@@ -71,10 +74,7 @@ func (s *Sentinel) CheckCommand(cmdStr string) (bool, string, string, []string) 
 	return true, fmt.Sprintf("Unrecognized binary: %s", binary), binary, args
 }
 
-// SECURITY FIX: Limit output size to prevent OOM/DoS
-const MaxCommandOutput = 1024 * 100 // 100KB max
-
-// BoundedBuffer implements io.Writer but caps the stored data size.
+// BoundedBuffer from Phase 1/2
 type BoundedBuffer struct {
 	b     bytes.Buffer
 	limit int
@@ -82,7 +82,7 @@ type BoundedBuffer struct {
 
 func (b *BoundedBuffer) Write(p []byte) (n int, err error) {
 	if b.b.Len() >= b.limit {
-		return len(p), nil // Silent drop to satisfy io.Writer contract
+		return len(p), nil
 	}
 	toWrite := p
 	if b.b.Len()+len(p) > b.limit {
@@ -92,7 +92,6 @@ func (b *BoundedBuffer) Write(p []byte) (n int, err error) {
 	if err != nil {
 		return 0, err
 	}
-	// Always return len(p) so exec.Command thinks the write succeeded
 	return len(p), nil
 }
 
@@ -101,15 +100,15 @@ func (b *BoundedBuffer) String() string {
 }
 
 func (s *Sentinel) Execute(binary string, args []string) (string, error) {
-	// SECURITY FIX: Enforce 10 second timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// PHASE 3: Use configured timeout
+	ctx, cancel := context.WithTimeout(context.Background(), s.Limits.CommandTimeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, binary, args...)
 
-	// SECURITY FIX: Use BoundedBuffer to prevent unbounded memory usage
-	stdout := &BoundedBuffer{limit: MaxCommandOutput}
-	stderr := &BoundedBuffer{limit: MaxCommandOutput}
+	// PHASE 3: Use configured output limit
+	stdout := &BoundedBuffer{limit: s.Limits.MaxCommandOutput}
+	stderr := &BoundedBuffer{limit: s.Limits.MaxCommandOutput}
 
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
@@ -117,13 +116,12 @@ func (s *Sentinel) Execute(binary string, args []string) (string, error) {
 	err := cmd.Run()
 	output := stdout.String() + stderr.String()
 
-	// Check for timeout specifically
 	if ctx.Err() == context.DeadlineExceeded {
-		return "", fmt.Errorf("command timed out after 10 seconds")
+		return "", fmt.Errorf("command timed out after %v", s.Limits.CommandTimeout)
 	}
 
-	if len(output) >= MaxCommandOutput {
-		return output + "\n...[TRUNCATED]...", fmt.Errorf("command output truncated (exceeded %d bytes)", MaxCommandOutput)
+	if len(output) >= s.Limits.MaxCommandOutput {
+		return output + "\n...[TRUNCATED]...", fmt.Errorf("command output truncated (exceeded %d bytes)", s.Limits.MaxCommandOutput)
 	}
 
 	if err != nil {
