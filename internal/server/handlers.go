@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/david22573/codepicker/pkg/openrouter"
 )
@@ -22,24 +23,31 @@ func (s *AgentServer) handleAgentTask(w http.ResponseWriter, r *http.Request) {
 	taskQuery := r.URL.Query().Get("q")
 	if taskQuery == "" {
 		fmt.Fprintf(w, "data: {\"type\": \"error\", \"msg\": \"Query empty\"}\n\n")
+		flusher.Flush()
 		return
 	}
 
 	eventStream := make(chan string)
 	originalCallback := s.Engine.ApprovalCallback
 
-	// --- FIX: Use correct context key "request_id" ---
 	reqID := fmt.Sprintf("%s", r.Context().Value("request_id"))
 	if reqID == "%!s(<nil>)" || reqID == "" {
-		// Fallback if middleware didn't set it
 		reqID = "req_" + taskQuery[:3]
 	}
 
+	// Fix: Use buffered channel and handle context cancellation to prevent deadlocks
 	s.Engine.ApprovalCallback = func(cmdStr, reason string) bool {
-		ch := make(chan bool)
+		ch := make(chan bool, 1)
+
 		s.approvalLock.Lock()
 		s.approvalMap[reqID] = ch
 		s.approvalLock.Unlock()
+
+		defer func() {
+			s.approvalLock.Lock()
+			delete(s.approvalMap, reqID)
+			s.approvalLock.Unlock()
+		}()
 
 		jsonMsg, _ := json.Marshal(map[string]interface{}{
 			"type":    "approval_req",
@@ -47,10 +55,27 @@ func (s *AgentServer) handleAgentTask(w http.ResponseWriter, r *http.Request) {
 			"command": cmdStr,
 			"reason":  reason,
 		})
-		eventStream <- string(jsonMsg)
+
+		// Send request to client with timeout/context check
+		select {
+		case eventStream <- string(jsonMsg):
+		case <-r.Context().Done():
+			return false
+		case <-time.After(5 * time.Second): // Timeout if stream is blocked
+			s.Logger.Warn("Timed out writing approval request to stream")
+			return false
+		}
 
 		// Wait for response
-		return <-ch
+		select {
+		case approved := <-ch:
+			return approved
+		case <-r.Context().Done():
+			return false
+		case <-time.After(60 * time.Second):
+			s.Logger.Warn(fmt.Sprintf("Approval timed out for %s", reqID))
+			return false
+		}
 	}
 
 	defer func() { s.Engine.ApprovalCallback = originalCallback }()
@@ -102,14 +127,16 @@ func (s *AgentServer) handleApprovalResponse(w http.ResponseWriter, r *http.Requ
 
 	s.approvalLock.Lock()
 	ch, exists := s.approvalMap[req.ID]
-	if exists {
-		delete(s.approvalMap, req.ID)
-	}
 	s.approvalLock.Unlock()
 
 	if exists {
-		ch <- req.Approved
-		json.NewEncoder(w).Encode(map[string]string{"status": "received"})
+		// Non-blocking send in case the receiver has already given up
+		select {
+		case ch <- req.Approved:
+			json.NewEncoder(w).Encode(map[string]string{"status": "received"})
+		default:
+			http.Error(w, "Approval receiver not listening", 408)
+		}
 	} else {
 		http.Error(w, "Request ID not found (timed out or invalid)", 404)
 	}

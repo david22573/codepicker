@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/david22573/codepicker/internal/constants"
 	"gopkg.in/yaml.v3"
 )
 
@@ -47,4 +48,12 @@ func LoadConfigFile(path string) (*ConfigFile, error) {
 	}
 
 	return &cfg, nil
+}
+
+// GetModel returns the configured model or the default if not set
+func (c *ConfigFile) GetModel() string {
+	if c.AI.Model != "" {
+		return c.AI.Model
+	}
+	return constants.DefaultModel
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strings"
 
 	"github.com/david22573/codepicker/internal/config"
@@ -16,7 +17,18 @@ type Sentinel struct {
 	Limits       *config.Limits
 }
 
-// Update constructor to accept limits
+// Add dangerous patterns to block immediately
+var dangerousPatterns = []string{
+	`curl.*\|.*sh`,  // Piped curl to shell
+	`wget.*\|.*sh`,  // Piped wget to shell
+	`eval`,          // Dangerous eval
+	`base64.*-d`,    // Decoding obfuscated payloads
+	`> /dev/`,       // Device writing
+	`dd if=`,        // Disk destruction
+	`mkfs`,          // Filesystem formatting
+	`:(){ :|:& };:`, // Fork bomb
+}
+
 func NewSentinel(limits *config.Limits) *Sentinel {
 	return &Sentinel{
 		Limits: limits,
@@ -33,6 +45,12 @@ func NewSentinel(limits *config.Limits) *Sentinel {
 }
 
 func (s *Sentinel) CheckCommand(cmdStr string) (bool, string, string, []string) {
+	// Check dangerous patterns first
+	for _, pattern := range dangerousPatterns {
+		if matched, _ := regexp.MatchString(pattern, cmdStr); matched {
+			return true, "Potentially dangerous command pattern detected", "", nil
+		}
+	}
 
 	parts, err := shlex.Split(cmdStr)
 	if err != nil || len(parts) == 0 {
@@ -42,7 +60,6 @@ func (s *Sentinel) CheckCommand(cmdStr string) (bool, string, string, []string) 
 	binary := parts[0]
 	args := parts[1:]
 
-	// System path protection (Phase 0)
 	if binary == "cat" || binary == "grep" || binary == "find" {
 		for _, arg := range args {
 			if strings.HasPrefix(arg, "/etc") ||
@@ -74,7 +91,6 @@ func (s *Sentinel) CheckCommand(cmdStr string) (bool, string, string, []string) 
 	return true, fmt.Sprintf("Unrecognized binary: %s", binary), binary, args
 }
 
-// BoundedBuffer from Phase 1/2
 type BoundedBuffer struct {
 	b     bytes.Buffer
 	limit int
@@ -100,13 +116,12 @@ func (b *BoundedBuffer) String() string {
 }
 
 func (s *Sentinel) Execute(binary string, args []string) (string, error) {
-	// PHASE 3: Use configured timeout
+
 	ctx, cancel := context.WithTimeout(context.Background(), s.Limits.CommandTimeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, binary, args...)
 
-	// PHASE 3: Use configured output limit
 	stdout := &BoundedBuffer{limit: s.Limits.MaxCommandOutput}
 	stderr := &BoundedBuffer{limit: s.Limits.MaxCommandOutput}
 

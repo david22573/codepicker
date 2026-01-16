@@ -33,23 +33,17 @@ func NewManager(srcRoot string) (*Manager, error) {
 	}, nil
 }
 
-// WriteFile writes content to the shadow directory, mirroring the structure of the real project.
-// It returns the absolute path of the written shadow file.
 func (m *Manager) WriteFile(relPath string, content []byte) (string, error) {
-	// 1. Sanity check: Ensure relPath doesn't escape
 	if strings.Contains(relPath, "..") {
 		return "", fmt.Errorf("invalid path: cannot escape project root")
 	}
 
-	// 2. Construct shadow path
 	shadowPath := filepath.Join(m.ShadowRoot, relPath)
 
-	// 3. Ensure parent directories exist in shadow
 	if err := os.MkdirAll(filepath.Dir(shadowPath), 0755); err != nil {
 		return "", err
 	}
 
-	// 4. Write the content
 	if err := os.WriteFile(shadowPath, content, 0644); err != nil {
 		return "", err
 	}
@@ -57,14 +51,10 @@ func (m *Manager) WriteFile(relPath string, content []byte) (string, error) {
 	return shadowPath, nil
 }
 
-// GetDiff returns the diff between the real file and the shadow file
-// This is useful for the Neovim client to display changes.
-// Returns empty string if no diff or file doesn't exist.
 func (m *Manager) GetShadowPath(relPath string) string {
 	return filepath.Join(m.ShadowRoot, relPath)
 }
 
-// Apply accepts the shadow change and overwrites the real file
 func (m *Manager) Apply(relPath string) error {
 	shadowPath := filepath.Join(m.ShadowRoot, relPath)
 	realPath := filepath.Join(m.SrcRoot, relPath)
@@ -75,4 +65,57 @@ func (m *Manager) Apply(relPath string) error {
 	}
 
 	return os.WriteFile(realPath, content, 0644)
+}
+
+// Cleanup removes the entire shadow directory
+func (m *Manager) Cleanup() error {
+	return os.RemoveAll(m.ShadowRoot)
+}
+
+// ListShadowFiles returns a list of files currently in the shadow workspace
+func (m *Manager) ListShadowFiles() ([]string, error) {
+	var files []string
+	err := filepath.WalkDir(m.ShadowRoot, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(m.ShadowRoot, path)
+		if err != nil {
+			return err
+		}
+		files = append(files, rel)
+		return nil
+	})
+	return files, err
+}
+
+// PreviewDiff generates a simple text description of the difference between
+// the shadow file and the original source file.
+func (m *Manager) PreviewDiff(relPath string) (string, error) {
+	shadowPath := filepath.Join(m.ShadowRoot, relPath)
+	realPath := filepath.Join(m.SrcRoot, relPath)
+
+	shadowContent, err := os.ReadFile(shadowPath)
+	if err != nil {
+		return "", fmt.Errorf("could not read shadow file: %w", err)
+	}
+
+	realContent, err := os.ReadFile(realPath)
+	if os.IsNotExist(err) {
+		return fmt.Sprintf("+++ NEW FILE: %s\n(File does not exist in source)\n", relPath), nil
+	} else if err != nil {
+		return "", fmt.Errorf("could not read source file: %w", err)
+	}
+
+	if string(shadowContent) == string(realContent) {
+		return fmt.Sprintf("=== %s\n(No changes detected)", relPath), nil
+	}
+
+	// For a full CLI, a library like 'github.com/sergi/go-diff' would be better,
+	// but for now we provide a summary to avoid heavy dependencies.
+	return fmt.Sprintf("M   %s\n    Original Size: %d bytes\n    New Size:      %d bytes",
+		relPath, len(realContent), len(shadowContent)), nil
 }
