@@ -1,16 +1,19 @@
 package agent
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/david22573/codepicker/internal/config"
 	"github.com/david22573/codepicker/pkg/openrouter"
+	ignore "github.com/sabhiram/go-gitignore"
 )
 
-// Base built-in tools
 var builtInTools = []openrouter.Tool{
 	{
 		Type: "function",
@@ -23,6 +26,20 @@ var builtInTools = []openrouter.Tool{
 					"path": { "type": "string", "description": "Relative path to the file (e.g., 'cmd/main.go')" }
 				},
 				"required": ["path"]
+			}`),
+		},
+	},
+	{
+		Type: "function",
+		Function: openrouter.ToolFunction{
+			Name:        "search_code",
+			Description: "Search for a keyword or string across all files in the codebase. Returns file paths and matching lines.",
+			Parameters: json.RawMessage(`{
+				"type": "object",
+				"properties": {
+					"query": { "type": "string", "description": "The string to search for" }
+				},
+				"required": ["query"]
 			}`),
 		},
 	},
@@ -45,7 +62,7 @@ var builtInTools = []openrouter.Tool{
 		Type: "function",
 		Function: openrouter.ToolFunction{
 			Name:        "run_shell",
-			Description: "Execute a shell command. Use this for 'ls', 'grep', 'go test', etc.",
+			Description: "Execute a shell command. Use this for 'ls', 'go test', etc. prefer search_code for finding code.",
 			Parameters: json.RawMessage(`{
 				"type": "object",
 				"properties": {
@@ -57,7 +74,6 @@ var builtInTools = []openrouter.Tool{
 	},
 }
 
-// GetTools merges built-in tools with custom tools defined in config
 func GetTools(cfg *config.ConfigFile) []openrouter.Tool {
 	tools := make([]openrouter.Tool, len(builtInTools))
 	copy(tools, builtInTools)
@@ -67,7 +83,6 @@ func GetTools(cfg *config.ConfigFile) []openrouter.Tool {
 	}
 
 	for _, ct := range cfg.CustomTools {
-		// Default to generic string input if no schema provided
 		params := ct.Arguments
 		if params == "" {
 			params = `{
@@ -91,7 +106,6 @@ func GetTools(cfg *config.ConfigFile) []openrouter.Tool {
 	return tools
 }
 
-// ExecuteCustomTool handles the mapping from AI function call to actual shell command
 func ExecuteCustomTool(name string, argsJSON string, cfg *config.ConfigFile) (string, error) {
 	if cfg == nil {
 		return "", fmt.Errorf("no config loaded")
@@ -99,10 +113,6 @@ func ExecuteCustomTool(name string, argsJSON string, cfg *config.ConfigFile) (st
 
 	for _, ct := range cfg.CustomTools {
 		if ct.Name == name {
-			// Parse arguments to safely inject them (simple version injects raw JSON or formatted string)
-			// For safety/simplicity in this phase, we append the raw JSON args to the command
-			// In production, you'd want robust template injection here.
-
 			parts := strings.Fields(ct.Command)
 			if len(parts) == 0 {
 				return "", fmt.Errorf("empty command")
@@ -110,7 +120,7 @@ func ExecuteCustomTool(name string, argsJSON string, cfg *config.ConfigFile) (st
 
 			head := parts[0]
 			cmdArgs := parts[1:]
-			cmdArgs = append(cmdArgs, argsJSON) // Pass JSON args to the script
+			cmdArgs = append(cmdArgs, argsJSON)
 
 			cmd := exec.Command(head, cmdArgs...)
 			out, err := cmd.CombinedOutput()
@@ -121,4 +131,89 @@ func ExecuteCustomTool(name string, argsJSON string, cfg *config.ConfigFile) (st
 		}
 	}
 	return "", fmt.Errorf("tool not found: %s", name)
+}
+
+func PerformSearch(root, query string) (string, error) {
+	var results []string
+	cfg := config.NewConfig()
+
+	var ign *ignore.GitIgnore
+	if _, err := os.Stat(filepath.Join(root, ".gitignore")); err == nil {
+		ign, _ = ignore.CompileIgnoreFile(filepath.Join(root, ".gitignore"))
+	}
+
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+
+		rel, _ := filepath.Rel(root, path)
+		if rel == "." {
+			return nil
+		}
+
+		if ign != nil && ign.MatchesPath(rel) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		if d.IsDir() {
+			if strings.HasPrefix(d.Name(), ".") || cfg.IgnoredDirs[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		ext := strings.ToLower(filepath.Ext(path))
+		if !cfg.AllowedExts[ext] && !config.IsSpecialFile(strings.ToLower(d.Name())) {
+			return nil
+		}
+
+		file, err := os.Open(path)
+		if err != nil {
+			return nil
+		}
+		defer file.Close()
+
+		scanner := bufio.NewScanner(file)
+		lineNum := 1
+		foundInFile := false
+
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.Contains(line, query) {
+				if len(line) > 200 {
+					line = line[:200] + "..."
+				}
+				results = append(results, fmt.Sprintf("%s:%d: %s", rel, lineNum, strings.TrimSpace(line)))
+				foundInFile = true
+
+				if len(results) > 50 {
+					return fmt.Errorf("too many results")
+				}
+			}
+			lineNum++
+		}
+
+		// If bufio scan error occurred
+		if err := scanner.Err(); err != nil {
+			return nil
+		}
+
+		_ = foundInFile // Placeholder if we want to do something per-file
+		return nil
+	})
+
+	if len(results) == 0 {
+		return "No matches found.", nil
+	}
+
+	finalOutput := strings.Join(results, "\n")
+	if err != nil && err.Error() == "too many results" {
+		finalOutput += "\n... (search truncated, be more specific)"
+	}
+
+	return finalOutput, nil
 }

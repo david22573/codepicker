@@ -9,14 +9,33 @@ import (
 
 	"github.com/david22573/codepicker/internal/agent"
 	"github.com/david22573/codepicker/internal/config"
+	"github.com/david22573/codepicker/internal/database"
 	"github.com/david22573/codepicker/internal/logger"
 	"github.com/david22573/codepicker/pkg/openrouter"
 )
 
 func setupTestServer(t *testing.T) *AgentServer {
 	tmpDir := t.TempDir()
+
+	// 1. Initialize temporary database for the test
+	store, err := database.New(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to init test db: %v", err)
+	}
+	// Ensure DB is closed when test finishes
+	t.Cleanup(func() { store.Close() })
+
 	client := openrouter.NewClient("fake-key")
-	engine, err := agent.NewEngine(client, "model", tmpDir, &logger.NoOpLogger{}, config.DefaultLimits())
+
+	// 2. Pass the store to NewEngine
+	engine, err := agent.NewEngine(
+		client,
+		"model",
+		tmpDir,
+		&logger.NoOpLogger{},
+		config.DefaultLimits(),
+		store,
+	)
 	if err != nil {
 		t.Fatalf("Engine init failed: %v", err)
 	}
@@ -46,11 +65,10 @@ func TestHandleHealth(t *testing.T) {
 func TestHandleGetContext(t *testing.T) {
 	srv := setupTestServer(t)
 
-	// Inject a fake file into memory
-	srv.Engine.Memory.Files["test.go"] = agent.FileSnapshot{
-		Path:    "test.go",
-		Content: "package test",
-		Tokens:  10,
+	// 3. Inject fake file using the Store (Memory.Files map no longer exists)
+	err := srv.Engine.Memory.Store.UpdateWorkingMemory("test.go", "package test")
+	if err != nil {
+		t.Fatalf("Failed to seed memory: %v", err)
 	}
 
 	req, _ := http.NewRequest("GET", "/agent/context", nil)
@@ -63,10 +81,10 @@ func TestHandleGetContext(t *testing.T) {
 		t.Errorf("returned wrong status: got %v", rr.Code)
 	}
 
-	var resp map[string]interface{}
+	var resp map[string]any
 	json.Unmarshal(rr.Body.Bytes(), &resp)
 
-	files, ok := resp["files"].([]interface{})
+	files, ok := resp["files"].([]any)
 	if !ok || len(files) != 1 {
 		t.Errorf("Expected 1 file in context, got %v", resp["files"])
 	}

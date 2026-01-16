@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/david22573/codepicker/internal/config"
+	"github.com/david22573/codepicker/internal/database"
 	"github.com/david22573/codepicker/internal/logger"
 	"github.com/david22573/codepicker/internal/shadow"
 	"github.com/david22573/codepicker/internal/tracking"
@@ -23,16 +24,15 @@ type Engine struct {
 	ApprovalCallback func(command string, reason string) bool
 	CostTracker      *tracking.CostTracker
 	Limits           *config.Limits
-	Config           *config.ConfigFile // Added Config reference
+	Config           *config.ConfigFile
 }
 
-func NewEngine(client *openrouter.Client, model, srcRoot string, log logger.Logger, limits *config.Limits) (*Engine, error) {
+func NewEngine(client *openrouter.Client, model, srcRoot string, log logger.Logger, limits *config.Limits, store *database.Store) (*Engine, error) {
 	shadowMgr, err := shadow.NewManager(srcRoot)
 	if err != nil {
 		return nil, err
 	}
 
-	// Load config for custom tools
 	cfg, _ := config.LoadConfigFile("")
 
 	return &Engine{
@@ -40,7 +40,7 @@ func NewEngine(client *openrouter.Client, model, srcRoot string, log logger.Logg
 		Model:            model,
 		Sentinel:         NewSentinel(limits),
 		Shadow:           shadowMgr,
-		Memory:           NewMemory(srcRoot),
+		Memory:           NewMemory(srcRoot, store),
 		Logger:           log,
 		SrcRoot:          srcRoot,
 		ApprovalCallback: func(c, r string) bool { return false },
@@ -57,8 +57,8 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 
 	baseSystemPrompt := `You are an autonomous AI developer agent.
 RULES:
-1. Code context is provided in "ACTIVE SOURCE FILES".
-2. If you need to see a file not listed there, use 'read_file' to add it to context.
+1. Code context is provided in "ACTIVE WORKING MEMORY".
+2. If you need to see a file not listed there, use 'search_code' to find it, then 'read_file' to add it to context.
 3. DO NOT output code for files already in context unless you are changing them.
 4. Use 'write_shadow_file' to propose changes.`
 
@@ -66,7 +66,6 @@ RULES:
 		{Role: "user", Content: task},
 	}
 
-	// Load dynamic tools
 	activeTools := GetTools(e.Config)
 
 	for i := 0; i < e.Limits.AgentMaxTurns; i++ {
@@ -123,7 +122,6 @@ RULES:
 			resultStr := ""
 			e.Logger.Info(fmt.Sprintf("🔨 Executing Tool: %s", tool.Function.Name))
 
-			// Handle Built-ins
 			switch tool.Function.Name {
 			case "read_file":
 				var args struct {
@@ -137,6 +135,23 @@ RULES:
 					resultStr = fmt.Sprintf("Error reading '%s': %v", args.Path, err)
 				} else {
 					resultStr = fmt.Sprintf("✓ File '%s' loaded into context", args.Path)
+				}
+
+			case "search_code":
+				var args struct {
+					Query string `json:"query"`
+				}
+				if err := json.Unmarshal([]byte(tool.Function.Arguments), &args); err != nil {
+					resultStr = fmt.Sprintf("Invalid arguments: %v", err)
+					break
+				}
+
+				e.Logger.Info(fmt.Sprintf("🔍 Searching for: %s", args.Query))
+				results, err := PerformSearch(e.SrcRoot, args.Query)
+				if err != nil {
+					resultStr = fmt.Sprintf("Search error: %v", err)
+				} else {
+					resultStr = results
 				}
 
 			case "write_shadow_file":
@@ -171,7 +186,7 @@ RULES:
 						break
 					}
 				}
-				// Execute with recovery logic
+
 				recoveryResult := e.ExecuteWithRecovery(binary, cmdArgs, e.Limits.MaxRecoveryAttempts)
 				if recoveryResult.Success {
 					resultStr = recoveryResult.FinalOutput
@@ -180,7 +195,6 @@ RULES:
 				}
 
 			default:
-				// Handle Custom Plugins
 				out, err := ExecuteCustomTool(tool.Function.Name, tool.Function.Arguments, e.Config)
 				if err != nil {
 					resultStr = fmt.Sprintf("Tool execution error: %v", err)

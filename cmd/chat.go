@@ -2,15 +2,14 @@ package cmd
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/david22573/codepicker/internal/constants"
 	"github.com/david22573/codepicker/internal/contextgen"
+	"github.com/david22573/codepicker/internal/database"
 	"github.com/david22573/codepicker/pkg/openrouter"
 	"github.com/spf13/cobra"
 )
@@ -18,99 +17,89 @@ import (
 var chatModel string
 var clearHistory bool
 
-const historyFile = ".codepicker/chat_history.json"
-
 var chatCmd = &cobra.Command{
 	Use:   "chat",
-	Short: "Start an interactive chat session with your codebase",
+	Short: "Start a smart interactive chat session with your codebase",
 	RunE: func(cmd *cobra.Command, args []string) error {
-
 		apiKey, err := validateAPIKey()
 		if err != nil {
 			return err
 		}
 
+		// 1. Initialize SQLite Store
+		store, err := database.New(".codepicker")
+		if err != nil {
+			return fmt.Errorf("failed to init database: %w", err)
+		}
+		defer store.Close()
+
 		if clearHistory {
-			_ = os.Remove(historyFile)
+			store.ClearHistory()
 			appLogger.Info("Chat history cleared.")
 		}
 
-		appLogger.Info("Analyzing codebase...")
-
-		focusList, err := validateFocusFiles(focusFile)
+		// 2. Generate Shallow Context (Tree)
+		appLogger.Info("Scanning project structure...")
+		treeContext, err := contextgen.GenerateTree(srcDir)
 		if err != nil {
 			return err
 		}
 
-		opts := contextgen.Options{
-			SrcDir:      srcDir,
-			FocusFiles:  focusList,
-			Minify:      minify,
-			IncludeExts: includeExts,
-			IgnoreDirs:  ignoreDirs,
-		}
+		// 3. Define System Prompt with Shallow Context
+		systemPrompt := fmt.Sprintf(
+			"You are an expert coding assistant. Date: %s.\n"+
+				"MODE: Interactive Chat.\n"+
+				"%s\n"+
+				"NOTE: You see the file tree above. If you need to read specific code to answer a question, "+
+				"ask the user or use tools (if available) to read files. Do not guess code content.",
+			time.Now().Format("2006-01-02"),
+			treeContext,
+		)
 
-		codeContext, err := contextgen.Generate(cmd.Context(), opts, appLogger)
-		if err != nil {
-			return err
-		}
-
-		appLogger.Info(fmt.Sprintf("Context loaded (%d chars). Starting chat...", len(codeContext)))
-		fmt.Println("\n💬 Interactive Chat Mode (type 'exit' to quit, '/clear' to reset)")
+		fmt.Println("\n💬 Smart Chat Mode (Type 'exit' to quit)")
 		fmt.Println(strings.Repeat("─", 60))
 
 		client := openrouter.NewClient(apiKey)
-
-		// Load history or init new
-		history := loadHistory()
-
-		// Update system prompt with fresh context (always replace the first message)
-		systemMsg := openrouter.ChatMessage{
-			Role: "system",
-			Content: fmt.Sprintf("You are an expert coding assistant. Date: %s.\nCodebase Context:\n%s",
-				time.Now().Format("2006-01-02"), codeContext),
-		}
-
-		if len(history) == 0 {
-			history = []openrouter.ChatMessage{
-				systemMsg,
-				{Role: "assistant", Content: "I've analyzed your code. What would you like to know?"},
-			}
-		} else {
-			// Update the system prompt in existing history
-			history[0] = systemMsg
-			fmt.Printf("📝 Resumed conversation with %d previous messages.\n", len(history)-1)
-		}
-
 		scanner := bufio.NewScanner(os.Stdin)
+
 		for {
 			fmt.Print("\n👉 You: ")
 			if !scanner.Scan() {
 				break
 			}
-
 			input := strings.TrimSpace(scanner.Text())
-			if input == "" {
-				continue
-			}
+
 			if input == "exit" || input == "quit" {
 				break
 			}
+			if input == "" {
+				continue
+			}
 			if input == "/clear" {
-				history = []openrouter.ChatMessage{
-					systemMsg,
-					{Role: "assistant", Content: "Context cleared. What's next?"},
-				}
-				_ = os.Remove(historyFile)
+				store.ClearHistory()
 				fmt.Println("🧹 History cleared.")
 				continue
 			}
 
-			history = append(history, openrouter.ChatMessage{Role: "user", Content: input})
+			// Save user message to DB
+			if err := store.AddMessage("user", input); err != nil {
+				appLogger.Error("Failed to save message: " + err.Error())
+			}
+
+			// 4. Smart Context Loading (Token Budgeting)
+			// Limit: 128k total - ~4k for system prompt - ~2k safety buffer = ~122k available
+			history, err := store.GetContextAwareHistory(122000)
+			if err != nil {
+				appLogger.Error("Failed to load history: " + err.Error())
+				continue
+			}
+
+			// Construct full request: System + History
+			messages := append([]openrouter.ChatMessage{{Role: "system", Content: systemPrompt}}, history...)
 
 			req := openrouter.ChatCompletionRequest{
 				Model:    chatModel,
-				Messages: history,
+				Messages: messages,
 				Stream:   true,
 			}
 
@@ -137,42 +126,15 @@ var chatCmd = &cobra.Command{
 			stream.Close()
 			fmt.Println()
 
-			history = append(history, openrouter.ChatMessage{Role: "assistant", Content: responseBuf.String()})
-			saveHistory(history)
+			// Save AI response to DB
+			store.AddMessage("assistant", responseBuf.String())
 		}
 		return nil
 	},
 }
 
-func loadHistory() []openrouter.ChatMessage {
-	data, err := os.ReadFile(historyFile)
-	if err != nil {
-		return nil
-	}
-	var history []openrouter.ChatMessage
-	if err := json.Unmarshal(data, &history); err != nil {
-		return nil
-	}
-	return history
-}
-
-func saveHistory(history []openrouter.ChatMessage) {
-	// Ensure directory exists
-	_ = os.MkdirAll(filepath.Dir(historyFile), 0755)
-
-	// Truncate history if it gets too large (simple approach: keep last 20 messages + system prompt)
-	if len(history) > 21 {
-		kept := append([]openrouter.ChatMessage{history[0]}, history[len(history)-20:]...)
-		history = kept
-	}
-
-	data, _ := json.MarshalIndent(history, "", "  ")
-	_ = os.WriteFile(historyFile, data, 0644)
-}
-
 func init() {
 	rootCmd.AddCommand(chatCmd)
 	chatCmd.Flags().StringVarP(&chatModel, "model", "m", constants.DefaultModel, "Model ID")
-	chatCmd.Flags().StringVarP(&focusFile, "focus", "f", "", "Comma-separated list of files")
-	chatCmd.Flags().BoolVarP(&clearHistory, "clear", "c", false, "Clear previous chat history on startup")
+	chatCmd.Flags().BoolVarP(&clearHistory, "clear", "c", false, "Clear previous chat history")
 }

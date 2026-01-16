@@ -17,7 +17,7 @@ import (
 const (
 	defaultBaseURL = "https://openrouter.ai/api/v1"
 	contentType    = "application/json"
-	defaultTimeout = 30 * time.Second
+	defaultTimeout = 5 * time.Minute
 )
 
 type Client struct {

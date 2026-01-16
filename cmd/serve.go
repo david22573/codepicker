@@ -8,13 +8,13 @@ import (
 	"github.com/david22573/codepicker/internal/agent"
 	"github.com/david22573/codepicker/internal/config"
 	"github.com/david22573/codepicker/internal/constants"
+	"github.com/david22573/codepicker/internal/database"
 	"github.com/david22573/codepicker/internal/server"
 	"github.com/david22573/codepicker/pkg/openrouter"
 	"github.com/spf13/cobra"
 )
 
 var port string
-
 var limits *config.Limits
 
 func init() {
@@ -25,7 +25,6 @@ var serveCmd = &cobra.Command{
 	Use:   "serve",
 	Short: "Start the codepicker agent daemon",
 	RunE: func(cmd *cobra.Command, args []string) error {
-
 		apiKey := os.Getenv("OPENROUTER_API_KEY")
 		if apiKey == "" {
 			return fmt.Errorf("OPENROUTER_API_KEY environment variable required")
@@ -36,6 +35,13 @@ var serveCmd = &cobra.Command{
 			return fmt.Errorf("failed to resolve source dir: %w", err)
 		}
 
+		// Initialize Database (shared with chat)
+		store, err := database.New(".codepicker")
+		if err != nil {
+			return fmt.Errorf("failed to init database: %w", err)
+		}
+		defer store.Close()
+
 		client := openrouter.NewClient(apiKey)
 
 		engine, err := agent.NewEngine(
@@ -44,6 +50,7 @@ var serveCmd = &cobra.Command{
 			absSrc,
 			appLogger,
 			limits,
+			store, // Pass store
 		)
 		if err != nil {
 			return fmt.Errorf("failed to initialize agent engine: %w", err)

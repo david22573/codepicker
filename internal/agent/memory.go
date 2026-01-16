@@ -4,89 +4,51 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
-	"strings"
-	"sync"
+
+	"github.com/david22573/codepicker/internal/database"
 )
 
-type FileSnapshot struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
-	Tokens  int    `json:"tokens"` // Placeholder for future token counting
-}
-
+// WorkingMemory now delegates to SQLite for persistence
 type WorkingMemory struct {
 	SrcRoot string
-	Files   map[string]FileSnapshot
-	mu      sync.RWMutex
+	Store   *database.Store
 }
 
-func NewMemory(srcRoot string) *WorkingMemory {
+// NewMemory now requires the database store
+func NewMemory(srcRoot string, store *database.Store) *WorkingMemory {
 	return &WorkingMemory{
 		SrcRoot: srcRoot,
-		Files:   make(map[string]FileSnapshot),
+		Store:   store,
 	}
 }
 
-// Add reads a file from disk and adds/updates it in memory
+// Add reads a file from disk and saves it to the SQLite working memory
 func (m *WorkingMemory) Add(relPath string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	fullPath := filepath.Join(m.SrcRoot, relPath)
 	content, err := os.ReadFile(fullPath)
 	if err != nil {
 		return fmt.Errorf("failed to read file: %w", err)
 	}
 
-	m.Files[relPath] = FileSnapshot{
-		Path:    relPath,
-		Content: string(content),
-		Tokens:  len(content) / 4, // Rough estimate
-	}
-	return nil
+	return m.Store.UpdateWorkingMemory(relPath, string(content))
 }
 
-// Remove deletes a file from memory
 func (m *WorkingMemory) Remove(relPath string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	delete(m.Files, relPath)
+	m.Store.RemoveFromMemory(relPath)
 }
 
-// List returns currently tracked files
 func (m *WorkingMemory) List() []string {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	keys := make([]string, 0, len(m.Files))
-	for k := range m.Files {
-		keys = append(keys, k)
+	files, err := m.Store.ListMemoryFiles()
+	if err != nil {
+		return []string{}
 	}
-	sort.Strings(keys)
-	return keys
+	return files
 }
 
-// FormatContext generates the string to be injected into the System Prompt
 func (m *WorkingMemory) FormatContext() string {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if len(m.Files) == 0 {
-		return ""
+	ctxStr, _, err := m.Store.GetWorkingMemory()
+	if err != nil {
+		return "Error retrieving memory: " + err.Error()
 	}
-
-	var sb strings.Builder
-	sb.WriteString("\n### ACTIVE SOURCE FILES (READ-ONLY CONTEXT):\n")
-
-	// Sort for deterministic prompt caching
-	keys := m.List()
-	for _, path := range keys {
-		file := m.Files[path]
-		sb.WriteString(fmt.Sprintf("--- BEGIN FILE: %s ---\n", path))
-		sb.WriteString(file.Content)
-		sb.WriteString(fmt.Sprintf("\n--- END FILE: %s ---\n\n", path))
-	}
-
-	return sb.String()
+	return ctxStr
 }

@@ -8,6 +8,7 @@ import (
 	"github.com/david22573/codepicker/internal/agent"
 	"github.com/david22573/codepicker/internal/config"
 	"github.com/david22573/codepicker/internal/constants"
+	"github.com/david22573/codepicker/internal/database"
 	"github.com/david22573/codepicker/pkg/openrouter"
 	"github.com/spf13/cobra"
 )
@@ -29,10 +30,17 @@ var doCmd = &cobra.Command{
 			return err
 		}
 
+		// Initialize Database
+		store, err := database.New(".codepicker")
+		if err != nil {
+			return fmt.Errorf("failed to init database: %w", err)
+		}
+		defer store.Close()
+
 		client := openrouter.NewClient(apiKey)
 		limits := config.DefaultLimits()
 
-		eng, err := agent.NewEngine(client, constants.DefaultModel, absSrc, appLogger, limits)
+		eng, err := agent.NewEngine(client, constants.DefaultModel, absSrc, appLogger, limits, store)
 		if err != nil {
 			return err
 		}
@@ -54,7 +62,7 @@ var doCmd = &cobra.Command{
 				}
 			}
 			if msg.Role == "tool" {
-				// Tool output handling can be added here if needed
+				// Optional: print tool outputs
 			}
 		}
 
