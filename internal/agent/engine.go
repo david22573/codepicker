@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time" // Added for sleep/throttling
 
 	"github.com/david22573/codepicker/internal/config"
 	"github.com/david22573/codepicker/internal/database"
@@ -19,7 +20,7 @@ import (
 type Engine struct {
 	Client           *openrouter.Client
 	Model            string
-	WorkerModel      string // NEW: Worker model ID
+	WorkerModel      string
 	Sentinel         *Sentinel
 	Shadow           *shadow.Manager
 	Memory           *WorkingMemory
@@ -29,6 +30,7 @@ type Engine struct {
 	CostTracker      *tracking.CostTracker
 	Limits           *config.Limits
 	Config           *config.ConfigFile
+	SystemPrompt     string // NEW: Dynamic system prompt for persona switching
 }
 
 func NewEngine(client *openrouter.Client, model, srcRoot string, log logger.Logger, limits *config.Limits, store *database.Store) (*Engine, error) {
@@ -39,7 +41,6 @@ func NewEngine(client *openrouter.Client, model, srcRoot string, log logger.Logg
 
 	cfg, _ := config.LoadConfigFile("")
 
-	// NEW: Determine worker model from config or default
 	workerModel := "google/gemini-1.5-flash"
 	if cfg != nil && cfg.AI.WorkerModel != "" {
 		workerModel = cfg.AI.WorkerModel
@@ -58,10 +59,10 @@ func NewEngine(client *openrouter.Client, model, srcRoot string, log logger.Logg
 		CostTracker:      tracking.NewCostTracker(limits.DailyCostLimit),
 		Limits:           limits,
 		Config:           cfg,
+		SystemPrompt:     DefaultSupervisorPrompt, // Defined in prompts.go
 	}, nil
 }
 
-// NEW: Helper to run delegated tasks using the worker model
 func (e *Engine) runWorker(ctx context.Context, instruction string, files []string) (string, error) {
 	var fileContext strings.Builder
 
@@ -88,7 +89,7 @@ func (e *Engine) runWorker(ctx context.Context, instruction string, files []stri
 	)
 
 	req := openrouter.ChatCompletionRequest{
-		Model: e.WorkerModel, // Use the cheaper/faster model
+		Model: e.WorkerModel,
 		Messages: []openrouter.ChatMessage{
 			{Role: "system", Content: workerPrompt},
 			{Role: "user", Content: "Execute the instruction."},
@@ -111,14 +112,6 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 	ctx, cancel := context.WithTimeout(ctx, e.Limits.AgentTimeout)
 	defer cancel()
 
-	baseSystemPrompt := `You are an autonomous AI developer agent acting as a SUPERVISOR.
-RULES:
-1. Code context is provided in "ACTIVE WORKING MEMORY".
-2. Use 'search_code' to locate files.
-3. Use 'delegate_task' to assign implementation work, massive file reading, or repetitive edits to your Worker Agent.
-4. Use 'write_shadow_file' to save approved changes.
-5. Do not output code yourself for large files; delegate it.`
-
 	messages := []openrouter.ChatMessage{
 		{Role: "user", Content: task},
 	}
@@ -132,8 +125,15 @@ RULES:
 		default:
 		}
 
+		// ADDED: Respectful throttle to prevent rate-limit bursts and allow safe cancellation
+		if i > 0 {
+			time.Sleep(1 * time.Second)
+		}
+
 		currentContext := e.Memory.FormatContext()
-		fullSystemMsg := baseSystemPrompt + "\n" + currentContext
+
+		// CHANGED: Use the dynamic SystemPrompt instead of hardcoded string
+		fullSystemMsg := e.SystemPrompt + "\n" + currentContext
 
 		requestMessages := append([]openrouter.ChatMessage{{Role: "system", Content: fullSystemMsg}}, messages...)
 
@@ -251,7 +251,6 @@ RULES:
 					resultStr = fmt.Sprintf("Command failed: %v\nOutput: %s", recoveryResult.FinalError, recoveryResult.FinalOutput)
 				}
 
-			// NEW: Delegate task handler
 			case "delegate_task":
 				var args struct {
 					Instruction  string `json:"instruction"`
