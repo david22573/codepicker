@@ -7,7 +7,8 @@ const (
 	AppName = "codepicker"
 
 	// API Defaults
-	DefaultModel    = "xiaomi/mimo-v2-flash:free"
+	// UPDATED: Switched to DeepSeek V3 for best price/performance ratio
+	DefaultModel    = "deepseek/deepseek-chat"
 	MinAPIKeyLength = 10
 	MaxRetries      = 3
 	RetryDelay      = 1 * time.Second

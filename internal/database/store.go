@@ -2,6 +2,7 @@ package database
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -28,6 +29,36 @@ CREATE TABLE IF NOT EXISTS memory_files (
 	token_count INTEGER NOT NULL,
 	last_accessed DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS jobs (
+    id TEXT PRIMARY KEY,
+    task TEXT NOT NULL,
+    priority INTEGER DEFAULT 0,
+    status TEXT NOT NULL,
+    plan_json TEXT,
+    result TEXT,
+    error TEXT,
+    cost_usd REAL DEFAULT 0.0,
+    tokens_used INTEGER DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    started_at DATETIME,
+    completed_at DATETIME
+);
+
+CREATE TABLE IF NOT EXISTS plans (
+    id TEXT PRIMARY KEY,
+    task TEXT NOT NULL,
+    steps_json TEXT NOT NULL,
+    estimated_cost REAL,
+    estimated_turns INTEGER,
+    actual_cost REAL,
+    actual_turns INTEGER,
+    status TEXT DEFAULT 'created',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+CREATE INDEX IF NOT EXISTS idx_jobs_priority ON jobs(priority DESC, created_at ASC);
 `
 
 type Store struct {
@@ -57,7 +88,7 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-// AddMessage saves a chat message with its calculated token count
+// History & Memory Methods (Existing)
 func (s *Store) AddMessage(role string, content string) error {
 	tokens := tokenizer.CountTokens(content)
 	_, err := s.db.Exec(
@@ -67,9 +98,7 @@ func (s *Store) AddMessage(role string, content string) error {
 	return err
 }
 
-// GetContextAwareHistory returns the most recent messages that fit within the tokenBudget
 func (s *Store) GetContextAwareHistory(tokenBudget int) ([]openrouter.ChatMessage, error) {
-	// Fetch in reverse order (newest first)
 	rows, err := s.db.Query("SELECT role, content, token_count FROM history ORDER BY id DESC")
 	if err != nil {
 		return nil, err
@@ -97,7 +126,6 @@ func (s *Store) GetContextAwareHistory(tokenBudget int) ([]openrouter.ChatMessag
 		currentTokens += tokens
 	}
 
-	// Reverse the slice to get chronological order (Oldest -> Newest)
 	messages := make([]openrouter.ChatMessage, len(reversedMessages))
 	for i, msg := range reversedMessages {
 		messages[len(reversedMessages)-1-i] = msg
@@ -106,13 +134,11 @@ func (s *Store) GetContextAwareHistory(tokenBudget int) ([]openrouter.ChatMessag
 	return messages, nil
 }
 
-// ClearHistory removes all conversation logs
 func (s *Store) ClearHistory() error {
 	_, err := s.db.Exec("DELETE FROM history")
 	return err
 }
 
-// UpdateWorkingMemory saves a file snapshot for the agent
 func (s *Store) UpdateWorkingMemory(path string, content string) error {
 	tokens := tokenizer.CountTokens(content)
 	_, err := s.db.Exec(`
@@ -126,7 +152,6 @@ func (s *Store) UpdateWorkingMemory(path string, content string) error {
 	return err
 }
 
-// GetWorkingMemory returns all active files formatted for the LLM
 func (s *Store) GetWorkingMemory() (string, int, error) {
 	rows, err := s.db.Query("SELECT path, content, token_count FROM memory_files ORDER BY path ASC")
 	if err != nil {
@@ -178,4 +203,50 @@ func (s *Store) ListMemoryFiles() ([]string, error) {
 		}
 	}
 	return files, nil
+}
+
+// Plan Methods (New for Phase 1)
+
+type PlanRecord struct {
+	ID            string
+	Task          string
+	StepsJSON     string
+	EstimatedCost float64
+	Status        string
+}
+
+func (s *Store) SavePlan(id, task string, steps interface{}, estCost float64) error {
+	stepsJSON, err := json.Marshal(steps)
+	if err != nil {
+		return err
+	}
+
+	_, err = s.db.Exec(`
+		INSERT INTO plans (id, task, steps_json, estimated_cost, status)
+		VALUES (?, ?, ?, ?, 'created')
+		ON CONFLICT(id) DO UPDATE SET
+			steps_json=excluded.steps_json,
+			estimated_cost=excluded.estimated_cost,
+			status='updated'
+	`, id, task, string(stepsJSON), estCost)
+	return err
+}
+
+func (s *Store) GetPlan(id string) (*PlanRecord, error) {
+	var p PlanRecord
+	err := s.db.QueryRow("SELECT id, task, steps_json, estimated_cost, status FROM plans WHERE id = ?", id).
+		Scan(&p.ID, &p.Task, &p.StepsJSON, &p.EstimatedCost, &p.Status)
+	if err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+func (s *Store) UpdatePlanStatus(id, status string) error {
+	_, err := s.db.Exec("UPDATE plans SET status = ? WHERE id = ?", status, id)
+	return err
+}
+
+func (s *Store) DB() *sql.DB {
+	return s.db
 }

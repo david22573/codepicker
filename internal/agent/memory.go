@@ -6,28 +6,42 @@ import (
 	"path/filepath"
 
 	"github.com/david22573/codepicker/internal/database"
+	"github.com/david22573/codepicker/internal/shadow" // Import shadow
 )
 
-// WorkingMemory now delegates to SQLite for persistence
 type WorkingMemory struct {
 	SrcRoot string
 	Store   *database.Store
+	Shadow  *shadow.Manager // Add Shadow Manager
 }
 
-// NewMemory now requires the database store
-func NewMemory(srcRoot string, store *database.Store) *WorkingMemory {
+// Update constructor to accept shadow manager
+func NewMemory(srcRoot string, store *database.Store, sm *shadow.Manager) *WorkingMemory {
 	return &WorkingMemory{
 		SrcRoot: srcRoot,
 		Store:   store,
+		Shadow:  sm,
 	}
 }
 
-// Add reads a file from disk and saves it to the SQLite working memory
 func (m *WorkingMemory) Add(relPath string) error {
-	fullPath := filepath.Join(m.SrcRoot, relPath)
-	content, err := os.ReadFile(fullPath)
+	// 1. Try reading from Shadow Directory first (Overlay FS)
+	// This allows the agent to "see" files it just created in previous steps
+	var content []byte
+	var err error
+
+	shadowPath := m.Shadow.GetShadowPath(relPath)
+	if _, statErr := os.Stat(shadowPath); statErr == nil {
+		// File exists in shadow, use this version
+		content, err = os.ReadFile(shadowPath)
+	} else {
+		// 2. Fallback to Source Directory
+		fullPath := filepath.Join(m.SrcRoot, relPath)
+		content, err = os.ReadFile(fullPath)
+	}
+
 	if err != nil {
-		return fmt.Errorf("failed to read file: %w", err)
+		return fmt.Errorf("failed to read file (checked shadow & source): %w", err)
 	}
 
 	return m.Store.UpdateWorkingMemory(relPath, string(content))

@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time" // Added for sleep/throttling
+	"time"
 
 	"github.com/david22573/codepicker/internal/config"
 	"github.com/david22573/codepicker/internal/database"
@@ -30,7 +30,7 @@ type Engine struct {
 	CostTracker      *tracking.CostTracker
 	Limits           *config.Limits
 	Config           *config.ConfigFile
-	SystemPrompt     string // NEW: Dynamic system prompt for persona switching
+	SystemPrompt     string
 }
 
 func NewEngine(client *openrouter.Client, model, srcRoot string, log logger.Logger, limits *config.Limits, store *database.Store) (*Engine, error) {
@@ -41,7 +41,7 @@ func NewEngine(client *openrouter.Client, model, srcRoot string, log logger.Logg
 
 	cfg, _ := config.LoadConfigFile("")
 
-	workerModel := "google/gemini-1.5-flash"
+	workerModel := "deepseek/deepseek-chat"
 	if cfg != nil && cfg.AI.WorkerModel != "" {
 		workerModel = cfg.AI.WorkerModel
 	}
@@ -52,14 +52,14 @@ func NewEngine(client *openrouter.Client, model, srcRoot string, log logger.Logg
 		WorkerModel:      workerModel,
 		Sentinel:         NewSentinel(limits),
 		Shadow:           shadowMgr,
-		Memory:           NewMemory(srcRoot, store),
+		Memory:           NewMemory(srcRoot, store, shadowMgr),
 		Logger:           log,
 		SrcRoot:          srcRoot,
 		ApprovalCallback: func(c, r string) bool { return false },
 		CostTracker:      tracking.NewCostTracker(limits.DailyCostLimit),
 		Limits:           limits,
 		Config:           cfg,
-		SystemPrompt:     DefaultSupervisorPrompt, // Defined in prompts.go
+		SystemPrompt:     DefaultSupervisorPrompt,
 	}, nil
 }
 
@@ -125,14 +125,12 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 		default:
 		}
 
-		// ADDED: Respectful throttle to prevent rate-limit bursts and allow safe cancellation
 		if i > 0 {
 			time.Sleep(1 * time.Second)
 		}
 
 		currentContext := e.Memory.FormatContext()
 
-		// CHANGED: Use the dynamic SystemPrompt instead of hardcoded string
 		fullSystemMsg := e.SystemPrompt + "\n" + currentContext
 
 		requestMessages := append([]openrouter.ChatMessage{{Role: "system", Content: fullSystemMsg}}, messages...)
