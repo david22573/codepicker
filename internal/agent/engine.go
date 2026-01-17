@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/david22573/codepicker/internal/config"
 	"github.com/david22573/codepicker/internal/database"
@@ -16,6 +19,7 @@ import (
 type Engine struct {
 	Client           *openrouter.Client
 	Model            string
+	WorkerModel      string // NEW: Worker model ID
 	Sentinel         *Sentinel
 	Shadow           *shadow.Manager
 	Memory           *WorkingMemory
@@ -35,9 +39,16 @@ func NewEngine(client *openrouter.Client, model, srcRoot string, log logger.Logg
 
 	cfg, _ := config.LoadConfigFile("")
 
+	// NEW: Determine worker model from config or default
+	workerModel := "google/gemini-1.5-flash"
+	if cfg != nil && cfg.AI.WorkerModel != "" {
+		workerModel = cfg.AI.WorkerModel
+	}
+
 	return &Engine{
 		Client:           client,
 		Model:            model,
+		WorkerModel:      workerModel,
 		Sentinel:         NewSentinel(limits),
 		Shadow:           shadowMgr,
 		Memory:           NewMemory(srcRoot, store),
@@ -50,17 +61,63 @@ func NewEngine(client *openrouter.Client, model, srcRoot string, log logger.Logg
 	}, nil
 }
 
+// NEW: Helper to run delegated tasks using the worker model
+func (e *Engine) runWorker(ctx context.Context, instruction string, files []string) (string, error) {
+	var fileContext strings.Builder
+
+	for _, f := range files {
+		f = strings.TrimSpace(f)
+		if f == "" {
+			continue
+		}
+		path := filepath.Join(e.SrcRoot, f)
+		content, err := os.ReadFile(path)
+		if err != nil {
+			e.Logger.Warn(fmt.Sprintf("Worker could not read file %s: %v", f, err))
+			continue
+		}
+		fileContext.WriteString(fmt.Sprintf("\n--- FILE: %s ---\n%s\n", f, string(content)))
+	}
+
+	workerPrompt := fmt.Sprintf(
+		"You are a Worker Agent. You perform concrete tasks efficiently.\n"+
+			"CONTEXT:\n%s\n"+
+			"INSTRUCTION: %s\n"+
+			"Output ONLY the result or code change. Do not chatter.",
+		fileContext.String(), instruction,
+	)
+
+	req := openrouter.ChatCompletionRequest{
+		Model: e.WorkerModel, // Use the cheaper/faster model
+		Messages: []openrouter.ChatMessage{
+			{Role: "system", Content: workerPrompt},
+			{Role: "user", Content: "Execute the instruction."},
+		},
+	}
+
+	resp, err := e.Client.CreateChatCompletion(ctx, req)
+	if err != nil {
+		return "", err
+	}
+
+	if len(resp.Choices) > 0 && resp.Choices[0].Message != nil {
+		return fmt.Sprintf("%v", resp.Choices[0].Message.Content), nil
+	}
+	return "No output from worker", nil
+}
+
 func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openrouter.ChatMessage)) (string, error) {
 
 	ctx, cancel := context.WithTimeout(ctx, e.Limits.AgentTimeout)
 	defer cancel()
 
-	baseSystemPrompt := `You are an autonomous AI developer agent.
+	baseSystemPrompt := `You are an autonomous AI developer agent acting as a SUPERVISOR.
 RULES:
 1. Code context is provided in "ACTIVE WORKING MEMORY".
-2. If you need to see a file not listed there, use 'search_code' to find it, then 'read_file' to add it to context.
-3. DO NOT output code for files already in context unless you are changing them.
-4. Use 'write_shadow_file' to propose changes.`
+2. Use 'search_code' to locate files.
+3. Use 'delegate_task' to assign implementation work, massive file reading, or repetitive edits to your Worker Agent.
+4. Use 'write_shadow_file' to save approved changes.
+5. Do not output code yourself for large files; delegate it.`
 
 	messages := []openrouter.ChatMessage{
 		{Role: "user", Content: task},
@@ -192,6 +249,27 @@ RULES:
 					resultStr = recoveryResult.FinalOutput
 				} else {
 					resultStr = fmt.Sprintf("Command failed: %v\nOutput: %s", recoveryResult.FinalError, recoveryResult.FinalOutput)
+				}
+
+			// NEW: Delegate task handler
+			case "delegate_task":
+				var args struct {
+					Instruction  string `json:"instruction"`
+					ContextFiles string `json:"context_files"`
+				}
+				if err := json.Unmarshal([]byte(tool.Function.Arguments), &args); err != nil {
+					resultStr = fmt.Sprintf("Invalid arguments: %v", err)
+					break
+				}
+
+				files := strings.Split(args.ContextFiles, ",")
+				e.Logger.Info(fmt.Sprintf("👷 Delegating to Worker (%s): %s", e.WorkerModel, args.Instruction))
+
+				workerResult, err := e.runWorker(ctx, args.Instruction, files)
+				if err != nil {
+					resultStr = fmt.Sprintf("Worker failed: %v", err)
+				} else {
+					resultStr = fmt.Sprintf("Worker Output:\n%s", workerResult)
 				}
 
 			default:

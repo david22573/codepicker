@@ -72,6 +72,21 @@ var builtInTools = []openrouter.Tool{
 			}`),
 		},
 	},
+	{
+		Type: "function",
+		Function: openrouter.ToolFunction{
+			Name:        "delegate_task",
+			Description: "Delegate a sub-task to a worker agent. Use this for implementation, reading large files, or executing repetitive tasks.",
+			Parameters: json.RawMessage(`{
+				"type": "object",
+				"properties": {
+					"instruction": { "type": "string", "description": "Specific instructions for the worker" },
+					"context_files": { "type": "string", "description": "Comma-separated list of files the worker needs to read" }
+				},
+				"required": ["instruction"]
+			}`),
+		},
+	},
 }
 
 func GetTools(cfg *config.ConfigFile) []openrouter.Tool {
@@ -197,12 +212,11 @@ func PerformSearch(root, query string) (string, error) {
 			lineNum++
 		}
 
-		// If bufio scan error occurred
 		if err := scanner.Err(); err != nil {
 			return nil
 		}
 
-		_ = foundInFile // Placeholder if we want to do something per-file
+		_ = foundInFile
 		return nil
 	})
 

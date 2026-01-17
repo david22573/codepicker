@@ -17,6 +17,7 @@ import (
 const (
 	defaultBaseURL = "https://openrouter.ai/api/v1"
 	contentType    = "application/json"
+	// FIXED: Increased timeout to handle large context processing
 	defaultTimeout = 5 * time.Minute
 )
 
@@ -68,7 +69,6 @@ func NewClient(apiKey string, opts ...Option) *Client {
 	return c
 }
 
-// GetModelInfo retrieves details for a specific model ID
 func (c *Client) GetModelInfo(ctx context.Context, modelID string) (*Model, error) {
 	list, err := c.ListModels(ctx)
 	if err != nil {
@@ -95,7 +95,6 @@ func (c *Client) ListModels(ctx context.Context) (*ListModelsResponse, error) {
 	return &resp, nil
 }
 
-// Helper to create a request with a reusable body reader
 func (c *Client) newRequestWithBytes(
 	ctx context.Context,
 	method, path string,
@@ -126,7 +125,6 @@ func (c *Client) newRequestWithBytes(
 	return req, nil
 }
 
-// Kept for backward compatibility
 func (c *Client) newRequest(
 	ctx context.Context,
 	method, path string,

@@ -23,6 +23,7 @@ type ConfigFile struct {
 
 type AIConfig struct {
 	Model       string  `yaml:"model"`
+	WorkerModel string  `yaml:"worker_model"` // NEW: For Supervisor-Worker pattern
 	Temperature float32 `yaml:"temperature"`
 }
 
