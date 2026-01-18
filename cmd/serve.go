@@ -1,67 +1,47 @@
 package cmd
 
 import (
-	"fmt"
-	"os"
-	"path/filepath"
-
-	"github.com/david22573/codepicker/internal/agent"
-	"github.com/david22573/codepicker/internal/config"
-	"github.com/david22573/codepicker/internal/constants"
-	"github.com/david22573/codepicker/internal/database"
+	"github.com/david22573/codepicker/internal/app"
+	"github.com/david22573/codepicker/internal/policy"
 	"github.com/david22573/codepicker/internal/server"
-	"github.com/david22573/codepicker/pkg/openrouter"
 	"github.com/spf13/cobra"
 )
 
 var port string
-var limits *config.Limits
-
-func init() {
-	limits = config.DefaultLimits()
-}
 
 var serveCmd = &cobra.Command{
 	Use:   "serve",
 	Short: "Start the codepicker agent daemon",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		apiKey := os.Getenv("OPENROUTER_API_KEY")
-		if apiKey == "" {
-			return fmt.Errorf("OPENROUTER_API_KEY environment variable required")
-		}
-
-		absSrc, err := filepath.Abs(srcDir)
+		// 1. Boot the Runtime
+		// Note: We use the strict 'Server' policy defined above
+		agentCtx, err := app.NewAgentContext(cmd.Context(), app.ContextOptions{
+			SrcDir:   srcDir,
+			LogLevel: 1,
+			Mode:     app.ModeServer,
+			Policy:   policy.Server,
+		})
 		if err != nil {
-			return fmt.Errorf("failed to resolve source dir: %w", err)
+			return err
 		}
+		defer agentCtx.Close()
 
-		// Initialize Database (shared with chat)
-		store, err := database.New(".codepicker")
-		if err != nil {
-			return fmt.Errorf("failed to init database: %w", err)
-		}
-		defer store.Close()
+		// 2. Initialize Server
+		// The server now accepts the entire context, giving it access to
+		// limits, db, engine, and config in one package.
+		srv := server.New(port, agentCtx)
 
-		client := openrouter.NewClient(apiKey)
-
-		engine, err := agent.NewEngine(
-			client,
-			constants.DefaultModel,
-			absSrc,
-			appLogger,
-			limits,
-			store, // Pass store
-		)
-		if err != nil {
-			return fmt.Errorf("failed to initialize agent engine: %w", err)
-		}
-
-		srv := server.New(port, engine, appLogger)
+		// 3. Run
+		// The context cancellation is handled by the server's signal trapping
 		return srv.Start()
 	},
 }
 
 func init() {
+	// We still attach the command to root, but the logic is cleaner
 	rootCmd.AddCommand(serveCmd)
 	serveCmd.Flags().StringVarP(&port, "port", "p", "22573", "Port to listen on")
+
+	// Optional: Override src directory if different from CWD
+	serveCmd.Flags().StringVarP(&srcDir, "src", "s", ".", "Source directory to allow agent access to")
 }

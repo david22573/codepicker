@@ -12,27 +12,35 @@ import (
 	"github.com/david22573/codepicker/internal/config"
 	"github.com/david22573/codepicker/internal/database"
 	"github.com/david22573/codepicker/internal/logger"
+	"github.com/david22573/codepicker/internal/policy" // Import the new policy package
 	"github.com/david22573/codepicker/internal/shadow"
 	"github.com/david22573/codepicker/internal/tracking"
 	"github.com/david22573/codepicker/pkg/openrouter"
 )
 
 type Engine struct {
-	Client           *openrouter.Client
-	Model            string
-	WorkerModel      string
-	Sentinel         *Sentinel
-	Shadow           *shadow.Manager
-	Memory           *WorkingMemory
-	Logger           logger.Logger
-	SrcRoot          string
+	Client      *openrouter.Client
+	Model       string
+	WorkerModel string
+	Sentinel    *Sentinel
+	Shadow      *shadow.Manager
+	Memory      *WorkingMemory
+	Logger      logger.Logger
+	SrcRoot     string
+
+	// New Policy Field
+	Policy policy.ExecutionPolicy
+
+	// ApprovalCallback is now derived from Policy + User Interaction
 	ApprovalCallback func(command string, reason string) bool
-	CostTracker      *tracking.CostTracker
-	Limits           *config.Limits
-	Config           *config.ConfigFile
-	SystemPrompt     string
+
+	CostTracker  *tracking.CostTracker
+	Limits       *config.Limits
+	Config       *config.ConfigFile
+	SystemPrompt string
 }
 
+// NewEngine - simplified signature
 func NewEngine(client *openrouter.Client, model, srcRoot string, log logger.Logger, limits *config.Limits, store *database.Store) (*Engine, error) {
 	shadowMgr, err := shadow.NewManager(srcRoot)
 	if err != nil {
@@ -47,20 +55,48 @@ func NewEngine(client *openrouter.Client, model, srcRoot string, log logger.Logg
 	}
 
 	return &Engine{
-		Client:           client,
-		Model:            model,
-		WorkerModel:      workerModel,
-		Sentinel:         NewSentinel(limits),
-		Shadow:           shadowMgr,
-		Memory:           NewMemory(srcRoot, store, shadowMgr),
-		Logger:           log,
-		SrcRoot:          srcRoot,
+		Client:      client,
+		Model:       model,
+		WorkerModel: workerModel,
+		Sentinel:    NewSentinel(limits),
+		Shadow:      shadowMgr,
+		Memory:      NewMemory(srcRoot, store, shadowMgr),
+		Logger:      log,
+		SrcRoot:     srcRoot,
+		// Default secure callback (always deny until policy set)
 		ApprovalCallback: func(c, r string) bool { return false },
 		CostTracker:      tracking.NewCostTracker(limits.DailyCostLimit),
 		Limits:           limits,
 		Config:           cfg,
 		SystemPrompt:     DefaultSupervisorPrompt,
+		// Default Safe Policy
+		Policy: policy.Batch,
 	}, nil
+}
+
+func (e *Engine) SetPolicy(p policy.ExecutionPolicy) {
+	e.Policy = p
+	e.Logger.Debug(fmt.Sprintf("Engine policy set to: %s (Mode: %s)", p.Name, p.Mode))
+
+	// Update approval logic based on policy
+	e.ApprovalCallback = func(command, reason string) bool {
+		// 1. Validate against policy rules first
+		if err := e.Policy.ValidateCommand(command); err != nil {
+			e.Logger.Warn(fmt.Sprintf("Policy Denied: %v", err))
+			return false
+		}
+
+		// 2. If Interactive, ask the human
+		if e.Policy.Mode == policy.LevelInteractive {
+			fmt.Printf("\n⚠️  Agent wants to run: %s\n   Reason: %s\n   Allow? [Y/n]: ", command, reason)
+			var resp string
+			fmt.Scanln(&resp)
+			return resp == "" || resp == "y" || resp == "Y"
+		}
+
+		// 3. If Auto/Batch, and validation passed, allow it
+		return true
+	}
 }
 
 func (e *Engine) runWorker(ctx context.Context, instruction string, files []string) (string, error) {

@@ -5,16 +5,14 @@ import (
 	"net/http"
 )
 
-// GET /agent/context - List active files
 func (s *AgentServer) handleGetContext(w http.ResponseWriter, r *http.Request) {
-	files := s.Engine.Memory.List()
+	files := s.App.Engine.Memory.List()
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"files": files,
 		"count": len(files),
 	})
 }
 
-// POST /agent/context - Add a file manually
 func (s *AgentServer) handleAddContext(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Path string `json:"path"`
@@ -24,16 +22,15 @@ func (s *AgentServer) handleAddContext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.Engine.Memory.Add(req.Path); err != nil {
+	if err := s.App.Engine.Memory.Add(req.Path); err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
 
-	s.Logger.Info("Manually added to context: " + req.Path)
+	s.App.Logger.Info("Manually added to context: " + req.Path)
 	json.NewEncoder(w).Encode(map[string]string{"status": "added", "path": req.Path})
 }
 
-// DELETE /agent/context - Remove a file manually
 func (s *AgentServer) handleDeleteContext(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Path string `json:"path"`
@@ -43,7 +40,7 @@ func (s *AgentServer) handleDeleteContext(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	s.Engine.Memory.Remove(req.Path)
-	s.Logger.Info("Manually removed from context: " + req.Path)
+	s.App.Engine.Memory.Remove(req.Path)
+	s.App.Logger.Info("Manually removed from context: " + req.Path)
 	json.NewEncoder(w).Encode(map[string]string{"status": "removed", "path": req.Path})
 }

@@ -28,15 +28,14 @@ func (s *AgentServer) handleAgentTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	eventStream := make(chan string)
-	originalCallback := s.Engine.ApprovalCallback
+	originalCallback := s.App.Engine.ApprovalCallback
 
 	reqID := fmt.Sprintf("%s", r.Context().Value("request_id"))
 	if reqID == "%!s(<nil>)" || reqID == "" {
 		reqID = "req_" + taskQuery[:3]
 	}
 
-	// Fix: Use buffered channel and handle context cancellation to prevent deadlocks
-	s.Engine.ApprovalCallback = func(cmdStr, reason string) bool {
+	s.App.Engine.ApprovalCallback = func(cmdStr, reason string) bool {
 		ch := make(chan bool, 1)
 
 		s.approvalLock.Lock()
@@ -56,29 +55,27 @@ func (s *AgentServer) handleAgentTask(w http.ResponseWriter, r *http.Request) {
 			"reason":  reason,
 		})
 
-		// Send request to client with timeout/context check
 		select {
 		case eventStream <- string(jsonMsg):
 		case <-r.Context().Done():
 			return false
-		case <-time.After(5 * time.Second): // Timeout if stream is blocked
-			s.Logger.Warn("Timed out writing approval request to stream")
+		case <-time.After(5 * time.Second):
+			s.App.Logger.Warn("Timed out writing approval request to stream")
 			return false
 		}
 
-		// Wait for response
 		select {
 		case approved := <-ch:
 			return approved
 		case <-r.Context().Done():
 			return false
 		case <-time.After(60 * time.Second):
-			s.Logger.Warn(fmt.Sprintf("Approval timed out for %s", reqID))
+			s.App.Logger.Warn(fmt.Sprintf("Approval timed out for %s", reqID))
 			return false
 		}
 	}
 
-	defer func() { s.Engine.ApprovalCallback = originalCallback }()
+	defer func() { s.App.Engine.ApprovalCallback = originalCallback }()
 
 	go func() {
 		defer close(eventStream)
@@ -92,7 +89,7 @@ func (s *AgentServer) handleAgentTask(w http.ResponseWriter, r *http.Request) {
 			eventStream <- string(jsonMsg)
 		}
 
-		result, err := s.Engine.Run(r.Context(), taskQuery, updateFn)
+		result, err := s.App.Engine.Run(r.Context(), taskQuery, updateFn)
 
 		if err != nil {
 			errJSON, _ := json.Marshal(map[string]string{"type": "error", "msg": err.Error()})
@@ -130,7 +127,6 @@ func (s *AgentServer) handleApprovalResponse(w http.ResponseWriter, r *http.Requ
 	s.approvalLock.Unlock()
 
 	if exists {
-		// Non-blocking send in case the receiver has already given up
 		select {
 		case ch <- req.Approved:
 			json.NewEncoder(w).Encode(map[string]string{"status": "received"})

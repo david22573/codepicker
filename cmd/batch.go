@@ -10,7 +10,6 @@ import (
 
 	"github.com/david22573/codepicker/internal/batch"
 	"github.com/david22573/codepicker/internal/database"
-	"github.com/david22573/codepicker/pkg/openrouter"
 	"github.com/olekukonko/tablewriter"
 	"github.com/spf13/cobra"
 )
@@ -24,7 +23,7 @@ var (
 var batchCmd = &cobra.Command{
 	Use:   "batch",
 	Short: "Manage and execute background job queues",
-	Long:  `The batch system allows you to queue multiple agent tasks and execute them concurrently or sequentially in the background.`,
+	Long:  `The batch system allows you to queue multiple agent tasks and execute them concurrently in the background. Jobs run with the restricted 'Batch' policy (no shell access).`,
 }
 
 var batchAddCmd = &cobra.Command{
@@ -40,7 +39,7 @@ var batchAddCmd = &cobra.Command{
 		}
 		defer store.Close()
 
-		q := batch.NewQueue(store.DB()) // Expose DB from store or add getter
+		q := batch.NewQueue(store.DB())
 
 		id, err := q.Add(task, batchPriority)
 		if err != nil {
@@ -57,9 +56,9 @@ var batchRunCmd = &cobra.Command{
 	Use:   "run",
 	Short: "Start processing the job queue",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		apiKey, err := validateAPIKey()
-		if err != nil {
-			return err
+		// We validate the key here early, though AgentContext will also check it per job.
+		if os.Getenv("OPENROUTER_API_KEY") == "" {
+			return fmt.Errorf("OPENROUTER_API_KEY is not set")
 		}
 
 		store, err := database.New(".codepicker")
@@ -69,12 +68,11 @@ var batchRunCmd = &cobra.Command{
 		defer store.Close()
 
 		q := batch.NewQueue(store.DB())
-		client := openrouter.NewClient(apiKey)
-
-		// Get absolute src dir
 		absSrc, _ := filepath.Abs(srcDir)
 
-		runner := batch.NewRunner(q, store, client, appLogger, batchConcurrency, absSrc, apiKey)
+		// Create the runner. Note we don't pass the Client anymore.
+		// The Runner creates a fresh AgentContext for each job.
+		runner := batch.NewRunner(q, store, appLogger, batchConcurrency, absSrc)
 
 		return runner.Start(cmd.Context())
 	},
@@ -91,7 +89,7 @@ var batchStatusCmd = &cobra.Command{
 		defer store.Close()
 
 		q := batch.NewQueue(store.DB())
-		jobs, err := q.List(20) // List last 20
+		jobs, err := q.List(20)
 		if err != nil {
 			return err
 		}
@@ -112,19 +110,16 @@ var batchStatusCmd = &cobra.Command{
 			}
 
 			dur := "-"
-			if j.Status == batch.StatusRunning {
+			if j.Status == batch.StatusRunning && j.StartedAt != nil {
 				dur = time.Since(*j.StartedAt).Round(time.Second).String()
 			} else if (j.Status == batch.StatusCompleted || j.Status == batch.StatusFailed) && j.StartedAt != nil && j.CompletedAt != nil {
 				dur = j.CompletedAt.Sub(*j.StartedAt).Round(time.Second).String()
 			}
 
-			// Colorize status
-			status := string(j.Status)
-
 			table.Append([]string{
 				id,
 				strconv.Itoa(j.Priority),
-				status,
+				string(j.Status),
 				task,
 				dur,
 				j.CreatedAt.Format("15:04:05"),

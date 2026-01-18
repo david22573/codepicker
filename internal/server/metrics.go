@@ -7,9 +7,9 @@ import (
 )
 
 func (s *AgentServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
-	cost, count := s.Engine.CostTracker.GetStats()
+	// Updated: s.App.Engine
+	cost, count := s.App.Engine.CostTracker.GetStats()
 
-	// Prometheus format
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 
 	fmt.Fprintf(w, "# HELP codepicker_requests_total Total number of agent requests processed\n")
