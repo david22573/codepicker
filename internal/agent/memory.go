@@ -66,3 +66,8 @@ func (m *WorkingMemory) FormatContext() string {
 	}
 	return ctxStr
 }
+
+func (m *WorkingMemory) AddNote(content string) error {
+	// We treat notes as system messages in the history
+	return m.Store.AddMessage("system", content)
+}
