@@ -7,17 +7,21 @@ import (
 	goerrors "errors"
 	"fmt"
 	"io"
+	"math"
+	"math/rand"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/david22573/codepicker/internal/constants"
 	"github.com/david22573/codepicker/internal/errors"
 )
 
 const (
 	defaultBaseURL = "https://openrouter.ai/api/v1"
 	contentType    = "application/json"
-	// FIXED: Increased timeout to handle large context processing
+	// Increased timeout to handle large context processing
 	defaultTimeout = 5 * time.Minute
 )
 
@@ -142,39 +146,86 @@ func (c *Client) newRequest(
 	return c.newRequestWithBytes(ctx, method, path, b)
 }
 
+// sendRequest handles HTTP execution with Exponential Backoff for 429s
 func (c *Client) sendRequest(req *http.Request, v any) error {
-	res, err := c.httpClient.Do(req)
-	if err != nil {
-		if goerrors.Is(err, context.Canceled) || goerrors.Is(err, context.DeadlineExceeded) {
-			return err
+	var lastErr error
+	// Use more retries than default for rate limits
+	maxAttempts := constants.MaxRetries + 2
+
+	for attempt := 0; attempt <= maxAttempts; attempt++ {
+		// 1. Handle Backoff
+		if attempt > 0 {
+			// Calculate exponential backoff: 2s, 4s, 8s, 16s...
+			delay := time.Duration(math.Pow(2, float64(attempt))) * time.Second
+			// Add jitter
+			jitter := time.Duration(rand.Int63n(int64(1000 * time.Millisecond)))
+			sleepTime := delay + jitter
+
+			// Check if context is already canceled before sleeping
+			if ctxErr := req.Context().Err(); ctxErr != nil {
+				return ctxErr
+			}
+
+			time.Sleep(sleepTime)
 		}
-		return errors.NewInternalError(
-			"openrouter.http",
-			err,
-		)
-	}
-	defer res.Body.Close()
 
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
-		return errors.NewInternalError(
-			"openrouter.http",
-			fmt.Errorf(
-				"status %d on %s: %s",
-				res.StatusCode,
-				req.URL.Path,
-				string(body),
-			),
-		)
-	}
+		// 2. Rewind Body (Critical for retries)
+		if attempt > 0 && req.GetBody != nil {
+			bodyCopy, err := req.GetBody()
+			if err != nil {
+				return fmt.Errorf("failed to rewind request body: %w", err)
+			}
+			req.Body = bodyCopy
+		}
 
-	if v == nil {
+		// 3. Execute
+		res, err := c.httpClient.Do(req)
+		if err != nil {
+			if goerrors.Is(err, context.Canceled) || goerrors.Is(err, context.DeadlineExceeded) {
+				return err
+			}
+			lastErr = errors.NewInternalError("openrouter.http", err)
+			continue // Network error, retry
+		}
+
+		// 4. Handle Rate Limits & Server Errors
+		if res.StatusCode == 429 || (res.StatusCode >= 500 && res.StatusCode != 501) {
+			res.Body.Close() // Close immediately to reuse connection
+
+			// Check for specific Retry-After header
+			if retryAfter := res.Header.Get("Retry-After"); retryAfter != "" {
+				if seconds, err := strconv.Atoi(retryAfter); err == nil {
+					// Use server's suggestion if valid
+					time.Sleep(time.Duration(seconds) * time.Second)
+					continue
+				}
+			}
+
+			lastErr = fmt.Errorf("server error %d", res.StatusCode)
+			continue // Retry with standard backoff
+		}
+
+		// 5. Handle Other Failures (Non-retryable)
+		defer res.Body.Close()
+		if res.StatusCode < 200 || res.StatusCode >= 300 {
+			body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
+			return errors.NewInternalError(
+				"openrouter.http",
+				fmt.Errorf("status %d on %s: %s", res.StatusCode, req.URL.Path, string(body)),
+			)
+		}
+
+		// 6. Success - Decode
+		if v == nil {
+			return nil
+		}
+
+		if err := json.NewDecoder(res.Body).Decode(v); err != nil {
+			return fmt.Errorf("failed to decode response: %w", err)
+		}
+
 		return nil
 	}
 
-	if err := json.NewDecoder(res.Body).Decode(v); err != nil {
-		return fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	return nil
+	return fmt.Errorf("max retries exceeded: %w", lastErr)
 }

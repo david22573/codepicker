@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/david22573/codepicker/internal/agent"
 	"github.com/david22573/codepicker/internal/config"
@@ -126,6 +127,10 @@ func (o *Orchestrator) RunTask(ctx context.Context, userTask string) error {
 			// --- PHASE 3: JUDGE (Evaluation) ---
 			// Only trigger the Judge if we are Modifying Code to save tokens.
 			if step.Agent == AgentModifier {
+
+				// Pacing: Sleep briefly to avoid 429 Rate Limits on rapid consecutive requests
+				time.Sleep(2 * time.Second)
+
 				// Gather context: The actual code changes currently in the shadow dir
 				files, _ := o.Shadow.ListShadowFiles()
 				diffContext := ""
