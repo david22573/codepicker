@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/david22573/codepicker/internal/logger"
+	"github.com/david22573/codepicker/internal/prompts"
 	"github.com/david22573/codepicker/internal/vfs"
 	"github.com/david22573/codepicker/pkg/openrouter"
 )
@@ -43,13 +44,7 @@ func (w *WorkerRunner) Run(ctx context.Context, instruction string, files []stri
 		fileContext.WriteString(fmt.Sprintf("\n--- FILE: %s ---\n%s\n", f, string(content)))
 	}
 
-	workerPrompt := fmt.Sprintf(
-		"You are a Worker Agent. You perform concrete tasks efficiently.\n"+
-			"CONTEXT:\n%s\n"+
-			"INSTRUCTION: %s\n"+
-			"Output ONLY the result or code change. Do not chatter.",
-		fileContext.String(), instruction,
-	)
+	workerPrompt := fmt.Sprintf(prompts.Worker, fileContext.String(), instruction)
 
 	req := openrouter.ChatCompletionRequest{
 		Model: w.Model,

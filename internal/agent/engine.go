@@ -8,6 +8,7 @@ import (
 	"github.com/david22573/codepicker/internal/database"
 	"github.com/david22573/codepicker/internal/logger"
 	"github.com/david22573/codepicker/internal/policy"
+	"github.com/david22573/codepicker/internal/prompts"
 	"github.com/david22573/codepicker/internal/shadow"
 	"github.com/david22573/codepicker/internal/tools"
 	"github.com/david22573/codepicker/internal/tracking"
@@ -25,6 +26,7 @@ type Engine struct {
 	Sentinel    *Sentinel
 	CostTracker *tracking.CostTracker
 
+	Config *config.ConfigFile
 	Memory *WorkingMemory
 	Limits *config.Limits
 	Logger logger.Logger
@@ -61,7 +63,7 @@ func NewEngine(
 		Worker:   workerRunner,
 	}
 
-	registry := tools.NewRegistry(srcRoot)
+	registry := tools.NewRegistry(srcRoot, cfg)
 	initialTools := registry.GetImplementation(tools.SetStandard)
 
 	enforcer := NewPolicyEnforcer(policy.Batch, log)
@@ -76,10 +78,11 @@ func NewEngine(
 	return &Engine{
 		Client:       client,
 		Model:        model,
-		SystemPrompt: DefaultSupervisorPrompt,
+		SystemPrompt: prompts.Supervisor,
 		Enforcer:     enforcer,
 		Executor:     executor,
 		Sentinel:     sentinel,
+		Config:       cfg,
 		Memory:       memory,
 		CostTracker:  costTracker,
 		Logger:       log,
@@ -100,7 +103,7 @@ func (e *Engine) SetPolicy(p policy.ExecutionPolicy) {
 	if overlay, ok := e.Executor.RuntimeContext.FS.(*vfs.OverlayFS); ok {
 		srcRoot = overlay.SrcRoot
 	}
-	registry := tools.NewRegistry(srcRoot)
+	registry := tools.NewRegistry(srcRoot, e.Config)
 
 	var toolSet tools.ToolSet
 	switch p.Name {

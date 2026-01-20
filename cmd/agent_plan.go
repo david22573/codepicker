@@ -8,6 +8,7 @@ import (
 	"github.com/david22573/codepicker/internal/app"
 	"github.com/david22573/codepicker/internal/contextgen"
 	"github.com/david22573/codepicker/internal/policy"
+	"github.com/david22573/codepicker/internal/prompts"
 	"github.com/david22573/codepicker/pkg/openrouter"
 	"github.com/olekukonko/tablewriter"
 	"github.com/spf13/cobra"
@@ -64,7 +65,7 @@ func runArchitectAudit(cmd *cobra.Command) error {
 	// Override the system prompt for the audit
 	// Note: We access the internal engine here.
 	// In the future, "Audit" could be its own Agent Type, but this works for now.
-	agentCtx.Engine.SystemPrompt = agent.ArchitectPrompt + "\n\n" + tree
+	agentCtx.Engine.SystemPrompt = prompts.Architect + "\n\n" + tree
 
 	// Output handler
 	printUpdate := func(msg openrouter.ChatMessage) {

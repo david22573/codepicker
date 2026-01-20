@@ -1,6 +1,9 @@
 package tools
 
-import "github.com/david22573/codepicker/pkg/openrouter"
+import (
+	"github.com/david22573/codepicker/internal/config"
+	"github.com/david22573/codepicker/pkg/openrouter"
+)
 
 type ToolSet string
 
@@ -11,16 +14,19 @@ const (
 	SetOrchestrator ToolSet = "orchestrator"
 )
 
-// Registry helps organize and retrieve tools for different agent types.
 type Registry struct {
-	root string
+	root   string
+	config *config.ConfigFile
 }
 
-func NewRegistry(root string) *Registry {
-	return &Registry{root: root}
+// Update constructor to take config
+func NewRegistry(root string, cfg *config.ConfigFile) *Registry {
+	return &Registry{
+		root:   root,
+		config: cfg,
+	}
 }
 
-// GetTools returns a slice of OpenRouter tool definitions for a specific profile.
 func (r *Registry) GetDefinitions(set ToolSet) []openrouter.Tool {
 	tools := r.GetImplementation(set)
 	defs := make([]openrouter.Tool, len(tools))
@@ -30,26 +36,37 @@ func (r *Registry) GetDefinitions(set ToolSet) []openrouter.Tool {
 	return defs
 }
 
-// GetImplementation returns the concrete Tool interfaces.
 func (r *Registry) GetImplementation(set ToolSet) []Tool {
 	read := &ReadFileTool{}
 	search := &SearchCodeTool{Root: r.root}
 	write := &WriteShadowFileTool{}
-	shell := &RunShellTool{} // Note: OnApproval needs to be set by the caller if interactive
+	shell := &RunShellTool{}
 	delegate := &DelegateTaskTool{}
 
+	var tools []Tool
+
+	// Base tools
 	base := []Tool{read, search}
 
 	switch set {
 	case SetReadOnly:
-		return base
+		tools = base
 	case SetStandard:
-		return append(base, write, delegate)
+		tools = append(base, write, delegate)
 	case SetAdmin:
-		return append(base, write, shell, delegate)
+		tools = append(base, write, shell, delegate)
 	case SetOrchestrator:
-		return base // Orchestrators usually just read/plan
+		tools = base
 	default:
-		return base
+		tools = base
 	}
+
+	// Add Custom Tools (only for Standard and Admin sets)
+	if (set == SetStandard || set == SetAdmin) && r.config != nil {
+		for _, ct := range r.config.CustomTools {
+			tools = append(tools, &CustomScriptTool{DefinitionModel: ct})
+		}
+	}
+
+	return tools
 }

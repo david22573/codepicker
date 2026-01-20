@@ -30,3 +30,7 @@ ai:
   
   temperature: 0.0
 
+  tools:
+  - name: "echo_test"
+    description: "A test tool"
+    command: "echo hello from custom tool"

@@ -4,37 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/david22573/codepicker/internal/logger"
+	"github.com/david22573/codepicker/internal/prompts"
 	"github.com/david22573/codepicker/pkg/openrouter"
 	"github.com/google/uuid"
 )
-
-const SystemPlannerPrompt = `You are a Senior Technical Project Manager and Architect.
-Your goal is to break down a complex coding task into smaller, sequential, executable steps for a junior developer agent.
-
-RULES:
-1. Each step must be concrete and actionable.
-2. Steps should be sequential (Step 1 must be done before Step 2).
-3. If the user asks for a simple task, provide a 1-step plan.
-4. "Instruction" is what will be fed to the coding agent. It must be explicit.
-5. Identify specific files involved in each step if possible.
-
-Output JSON ONLY using this schema:
-{
-  "reasoning": "Brief explanation of the approach",
-  "estimated_cost": 0.05,
-  "steps": [
-    {
-      "id": 1,
-      "description": "Create the interface",
-      "instruction": "Create file internal/interfaces.go with the User interface...",
-      "critical": true,
-      "files": ["internal/interfaces.go"]
-    }
-  ]
-}`
 
 type Planner struct {
 	Client *openrouter.Client
@@ -58,7 +33,7 @@ func (p *Planner) CreatePlan(ctx context.Context, task string, projectContext st
 	req := openrouter.ChatCompletionRequest{
 		Model: p.Model,
 		Messages: []openrouter.ChatMessage{
-			{Role: "system", Content: SystemPlannerPrompt},
+			{Role: "system", Content: prompts.Planner},
 			{Role: "user", Content: userMsg},
 		},
 		ResponseFormat: &openrouter.ResponseFormat{Type: "json_object"},
@@ -99,22 +74,4 @@ func (p *Planner) CreatePlan(ctx context.Context, task string, projectContext st
 	}
 
 	return plan, nil
-}
-
-func stripMarkdown(content string) string {
-	content = strings.TrimSpace(content)
-	if strings.HasPrefix(content, "```") {
-		lines := strings.Split(content, "\n")
-		if len(lines) >= 2 {
-			// Remove first line (```json) and last line (```)
-			if strings.HasPrefix(lines[0], "```") {
-				lines = lines[1:]
-			}
-			if len(lines) > 0 && strings.HasPrefix(lines[len(lines)-1], "```") {
-				lines = lines[:len(lines)-1]
-			}
-			return strings.Join(lines, "\n")
-		}
-	}
-	return content
 }

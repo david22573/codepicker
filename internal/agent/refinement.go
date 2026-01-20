@@ -1,6 +1,4 @@
-// File: internal/agents/refinement.go
-
-package agents
+package agent
 
 import (
 	"context"
@@ -9,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/david22573/codepicker/internal/logger"
+	"github.com/david22573/codepicker/internal/prompts"
 	"github.com/david22573/codepicker/pkg/openrouter"
 )
 
@@ -32,12 +31,11 @@ func NewRefinementSystem(client *openrouter.Client, model string, log logger.Log
 	}
 }
 
-// OptimizePrompt takes a vague user task and turns it into a technical spec
 func (r *RefinementSystem) OptimizePrompt(ctx context.Context, originalTask string) (string, error) {
 	r.Logger.Info("✨ Proposer is optimizing your request...")
 
 	messages := []openrouter.ChatMessage{
-		{Role: "system", Content: PromptProposer},
+		{Role: "system", Content: prompts.Proposer},
 		{Role: "user", Content: fmt.Sprintf("User Request: %s\n\nGenerate the Optimized Prompt:", originalTask)},
 	}
 
@@ -48,7 +46,7 @@ func (r *RefinementSystem) OptimizePrompt(ctx context.Context, originalTask stri
 
 	resp, err := r.Client.CreateChatCompletion(ctx, req)
 	if err != nil {
-		return originalTask, err // Fallback to original on error
+		return originalTask, err
 	}
 
 	if len(resp.Choices) == 0 || resp.Choices[0].Message == nil {
@@ -60,7 +58,6 @@ func (r *RefinementSystem) OptimizePrompt(ctx context.Context, originalTask stri
 	return optimized, nil
 }
 
-// EvaluateWork reviews the outcome of a task
 func (r *RefinementSystem) EvaluateWork(ctx context.Context, task, agentOutput, diffContext string) (*JudgeResult, error) {
 	r.Logger.Info("⚖️  Judge is evaluating the work...")
 
@@ -75,7 +72,7 @@ CODE CHANGES (Diff):
 Verdict (JSON):`, task, agentOutput, diffContext)
 
 	messages := []openrouter.ChatMessage{
-		{Role: "system", Content: PromptJudge},
+		{Role: "system", Content: prompts.Judge},
 		{Role: "user", Content: userContent},
 	}
 
@@ -92,7 +89,6 @@ Verdict (JSON):`, task, agentOutput, diffContext)
 
 	content := fmt.Sprintf("%v", resp.Choices[0].Message.Content)
 
-	// Strip markdown code blocks if present
 	content = strings.TrimSpace(content)
 	if strings.HasPrefix(content, "```") {
 		lines := strings.Split(content, "\n")

@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/david22573/codepicker/internal/agent"
-	"github.com/david22573/codepicker/internal/agents"
 	"github.com/david22573/codepicker/internal/app"
 	"github.com/david22573/codepicker/internal/policy"
 	"github.com/david22573/codepicker/internal/ui"
@@ -100,8 +99,8 @@ func runSavedPlan(ctx *app.AgentContext, id string) error {
 func runOrchestrator(ctx *app.AgentContext, task string) error {
 	ctx.Logger.Info("🤖 Initializing Multi-Agent Orchestrator...")
 
-	// FIXED: Pass the existing authenticated client from ctx.Engine
-	orch, err := agents.NewOrchestrator(
+	// UPDATED: Now calling agent.NewOrchestrator instead of agents.NewOrchestrator
+	orch, err := agent.NewOrchestrator(
 		ctx.Engine.Client,
 		srcDir,
 		ctx.Logger,
@@ -113,14 +112,11 @@ func runOrchestrator(ctx *app.AgentContext, task string) error {
 		return fmt.Errorf("failed to start orchestrator: %w", err)
 	}
 
-	// We no longer need to manually patch orch.Self.Client since we passed it in the constructor
-	// But ensuring the team shares it doesn't hurt (handled in NewOrchestrator now mostly)
-	orch.Self.Client = ctx.Engine.Client
-	for _, a := range orch.Team {
-		a.Client = ctx.Engine.Client
-	}
+	// NOTE: We don't need to manually set Clients anymore,
+	// NewOrchestrator handles initialization fully.
 
-	ctx.Engine.Executor.DryRun = dryRun
+	// Dry run flag handled by tool executor config in future updates
+	// For now, Orchestrator runs in configured mode.
 
 	fmt.Println("🚀 Starting Orchestrated Execution...")
 
