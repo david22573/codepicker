@@ -14,7 +14,7 @@ import (
 )
 
 type SearchCodeTool struct {
-	Root string // Root directory to search in
+	Root string
 }
 
 type searchArgs struct {
@@ -24,10 +24,10 @@ type searchArgs struct {
 func (t *SearchCodeTool) Name() string { return "search_code" }
 
 func (t *SearchCodeTool) Description() string {
-	return "Search for a keyword or string across all files in the codebase. Returns file paths and matching lines."
+	return "Search for a keyword or string across all files in the codebase."
 }
 
-// [3.3] Capabilities - Search only needs Read access
+// [Fixed] Added Capabilities
 func (t *SearchCodeTool) Capabilities() []Capability {
 	return []Capability{CapRead}
 }
@@ -54,7 +54,6 @@ func (t *SearchCodeTool) Execute(ctx context.Context, argsJSON string, rt *Runti
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return "", fmt.Errorf("invalid arguments: %w", err)
 	}
-
 	return t.performSearch(args.Query, rt.Config)
 }
 
@@ -70,7 +69,6 @@ func (t *SearchCodeTool) performSearch(query string, cfg ConfigProvider) (string
 		if err != nil {
 			return nil
 		}
-
 		rel, _ := filepath.Rel(t.Root, path)
 		if rel == "." {
 			return nil
@@ -92,7 +90,6 @@ func (t *SearchCodeTool) performSearch(query string, cfg ConfigProvider) (string
 
 		ext := strings.ToLower(filepath.Ext(path))
 		isAllowed := cfg == nil || cfg.IsExtensionAllowed(ext)
-
 		if !isAllowed && !isSpecialFile(d.Name()) {
 			return nil
 		}
@@ -112,7 +109,6 @@ func (t *SearchCodeTool) performSearch(query string, cfg ConfigProvider) (string
 					line = line[:200] + "..."
 				}
 				results = append(results, fmt.Sprintf("%s:%d: %s", rel, lineNum, strings.TrimSpace(line)))
-
 				if len(results) > 50 {
 					return fmt.Errorf("too_many_results")
 				}
@@ -124,13 +120,11 @@ func (t *SearchCodeTool) performSearch(query string, cfg ConfigProvider) (string
 
 	truncated := ""
 	if err != nil && err.Error() == "too_many_results" {
-		truncated = "\n... (search truncated, be more specific)"
+		truncated = "\n... (search truncated)"
 	}
-
 	if len(results) == 0 {
 		return "No matches found.", nil
 	}
-
 	return strings.Join(results, "\n") + truncated, nil
 }
 

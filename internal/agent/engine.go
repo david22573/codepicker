@@ -16,6 +16,13 @@ import (
 	"github.com/david22573/codepicker/pkg/openrouter"
 )
 
+// [Phase 5] Debug Configuration
+type DebugConfig struct {
+	Policy bool
+	Tools  bool
+	Memory bool
+}
+
 type Engine struct {
 	Client       *openrouter.Client
 	Model        string
@@ -30,6 +37,7 @@ type Engine struct {
 	Memory *WorkingMemory
 	Limits *config.Limits
 	Logger logger.Logger
+	Debug  DebugConfig
 }
 
 func NewEngine(
@@ -39,13 +47,17 @@ func NewEngine(
 	limits *config.Limits,
 	store *database.Store,
 	cfg *config.ConfigFile,
+	debug DebugConfig, // [Phase 5] Added arg
 ) (*Engine, error) {
 	shadowMgr, err := shadow.NewManager(srcRoot)
 	if err != nil {
 		return nil, err
 	}
 	fs := vfs.NewOverlayFS(srcRoot, shadowMgr)
-	memory := NewMemory(store, fs)
+
+	// [Phase 5] Pass debug flag to Memory
+	memory := NewMemory(store, fs, debug.Memory)
+
 	sentinel := NewSentinel(limits)
 	costTracker := tracking.NewCostTracker(limits.DailyCostLimit)
 
@@ -63,10 +75,11 @@ func NewEngine(
 		Worker:   workerRunner,
 	}
 
-	enforcer := NewPolicyEnforcer(policy.Batch, log, sentinel)
+	// [Phase 5] Pass debug flag to Enforcer
+	enforcer := NewPolicyEnforcer(policy.Batch, log, sentinel, debug.Policy)
 
-	// Initialize Executor with empty tools; rebuildTools will populate it
-	executor := NewToolExecutor(nil, runtimeCtx, enforcer)
+	// [Phase 5] Pass debug flag to Executor
+	executor := NewToolExecutor(nil, runtimeCtx, enforcer, debug.Tools)
 
 	e := &Engine{
 		Client:       client,
@@ -80,15 +93,14 @@ func NewEngine(
 		CostTracker:  costTracker,
 		Logger:       log,
 		Limits:       limits,
+		Debug:        debug,
 	}
 
-	// [3.1] Initial Tool Build
 	e.rebuildTools(tools.SetStandard)
 
 	return e, nil
 }
 
-// [3.1] Extract tool rebuild logic
 func (e *Engine) rebuildTools(toolSet tools.ToolSet) {
 	srcRoot := "."
 	if overlay, ok := e.Executor.RuntimeContext.FS.(*vfs.OverlayFS); ok {
@@ -98,14 +110,10 @@ func (e *Engine) rebuildTools(toolSet tools.ToolSet) {
 	registry := tools.NewRegistry(srcRoot, e.Config)
 	newTools := registry.GetImplementation(toolSet)
 
-	// Clear existing tools map
 	e.Executor.Tools = make(map[string]tools.Tool)
 
 	for _, t := range newTools {
-		// 1. Register with Executor
 		e.Executor.Tools[t.Name()] = t
-
-		// 2. Register with Enforcer (for Capability checks)
 		e.Enforcer.RegisterTool(t)
 	}
 
@@ -130,15 +138,17 @@ func (e *Engine) SetPolicy(p policy.ExecutionPolicy) {
 		toolSet = tools.SetAdmin
 	}
 
-	// [3.1] Use centralized logic
 	e.rebuildTools(toolSet)
 }
 
-// ... Run() method remains unchanged ...
 func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openrouter.ChatMessage)) (string, error) {
-	// (See previous Engine.Run implementation - no changes needed here for this phase)
 	ctx, cancel := context.WithTimeout(ctx, e.Limits.AgentTimeout)
 	defer cancel()
+
+	if len(task) > e.Limits.MaxQueryLength {
+		e.Logger.Warn(fmt.Sprintf("Task description truncated from %d to %d chars", len(task), e.Limits.MaxQueryLength))
+		task = task[:e.Limits.MaxQueryLength] + "...(truncated)"
+	}
 
 	messages := []openrouter.ChatMessage{{Role: "user", Content: task}}
 
@@ -148,18 +158,19 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 	}
 
 	for i := 0; i < e.Limits.AgentMaxTurns; i++ {
+		cost, _ := e.CostTracker.GetStats()
+		if cost >= e.Limits.DailyCostLimit {
+			return "", fmt.Errorf("daily cost limit exceeded ($%.2f). Stopping execution to prevent billing overrun", e.Limits.DailyCostLimit)
+		}
+
 		currentContext := e.Memory.FormatContext()
 		fullSystemMsg := e.SystemPrompt + "\n" + currentContext
 
 		req := openrouter.ChatCompletionRequest{
-			Model:    e.Model,
-			Messages: append([]openrouter.ChatMessage{{Role: "system", Content: fullSystemMsg}}, messages...),
-			Tools:    activeTools,
-		}
-
-		cost, _ := e.CostTracker.GetStats()
-		if cost >= e.Limits.DailyCostLimit {
-			return "", fmt.Errorf("daily cost limit exceeded ($%.2f)", e.Limits.DailyCostLimit)
+			Model:     e.Model,
+			Messages:  append([]openrouter.ChatMessage{{Role: "system", Content: fullSystemMsg}}, messages...),
+			Tools:     activeTools,
+			MaxTokens: e.Limits.MaxStepTokens,
 		}
 
 		resp, err := e.Client.CreateChatCompletion(ctx, req)
@@ -169,6 +180,11 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 
 		if resp.Usage != nil {
 			e.CostTracker.RecordRequest(resp.Usage.PromptTokens, resp.Usage.CompletionTokens, e.Model)
+		}
+
+		newCost, _ := e.CostTracker.GetStats()
+		if newCost >= e.Limits.DailyCostLimit {
+			return "Cost limit exceeded during generation.", fmt.Errorf("daily cost limit exceeded ($%.2f)", e.Limits.DailyCostLimit)
 		}
 
 		msg := resp.Choices[0].Message
@@ -184,6 +200,11 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 		for _, tool := range msg.ToolCalls {
 			e.Logger.Debug(fmt.Sprintf("🔨 Executing Tool: %s", tool.Function.Name))
 			resultStr := e.Executor.Execute(ctx, tool)
+
+			if len(resultStr) > e.Limits.MaxToolOutput {
+				e.Logger.Warn(fmt.Sprintf("Tool output truncated: %s (%d bytes)", tool.Function.Name, len(resultStr)))
+				resultStr = resultStr[:e.Limits.MaxToolOutput] + "\n...(output truncated by security limit)"
+			}
 
 			toolMsg := openrouter.ChatMessage{
 				Role:       "tool",

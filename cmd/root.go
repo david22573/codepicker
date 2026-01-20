@@ -10,14 +10,18 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// Global flags (Shared across multiple commands)
 var (
 	srcDir      string
 	includeExts string
 	ignoreDirs  string
 	configFile  string
 	verbose     bool
-	minify      bool // Kept global because 'interact ask' also uses it
+	minify      bool
+
+	// [Phase 5] Debug Flags
+	debugPolicy bool
+	traceTools  bool
+	traceMemory bool
 )
 
 var appLogger logger.Logger
@@ -34,7 +38,7 @@ var rootCmd = &cobra.Command{
 		}
 		appLogger = logger.NewStandardLogger(level)
 	},
-	// Default behavior: if no subcommand is given, run 'context gen'
+
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return generateCmd.RunE(cmd, args)
 	},
@@ -52,15 +56,17 @@ func Execute() {
 func init() {
 	_ = godotenv.Load()
 
-	// Persistent flags available to all subcommands
 	rootCmd.PersistentFlags().StringVarP(&srcDir, "src", "s", ".", "Source directory")
 	rootCmd.PersistentFlags().StringVarP(&configFile, "config", "c", "", "Config file path")
 
-	// Filtering flags are persistent because 'ask', 'agent', and 'context' all need them
 	rootCmd.PersistentFlags().StringVarP(&includeExts, "include", "i", "", "Extensions to include (comma-separated)")
 	rootCmd.PersistentFlags().StringVarP(&ignoreDirs, "exclude", "e", "", "Directories to exclude (comma-separated)")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose logging")
 
-	// Minify is used by 'ask' and 'context', so keep it global
 	rootCmd.PersistentFlags().BoolVarP(&minify, "minify", "m", true, "Minify output (global default)")
+
+	// [Phase 5] Debug Mode Flags
+	rootCmd.PersistentFlags().BoolVar(&debugPolicy, "debug-policy", false, "Log detailed policy decisions")
+	rootCmd.PersistentFlags().BoolVar(&traceTools, "trace-tools", false, "Log full tool arguments and outputs")
+	rootCmd.PersistentFlags().BoolVar(&traceMemory, "trace-memory", false, "Log memory snapshot/restore operations")
 }

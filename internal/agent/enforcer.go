@@ -22,17 +22,18 @@ type PolicyEnforcer struct {
 	Logger     logger.Logger
 	Sentinel   *Sentinel
 	OnApproval InteractionFunc
-	// Cache tool capabilities for lookups
-	ToolCaps map[string][]tools.Capability
+	ToolCaps   map[string][]tools.Capability
+	Debug      bool
 }
 
-func NewPolicyEnforcer(p policy.ExecutionPolicy, log logger.Logger, sentinel *Sentinel) *PolicyEnforcer {
+func NewPolicyEnforcer(p policy.ExecutionPolicy, log logger.Logger, sentinel *Sentinel, debug bool) *PolicyEnforcer {
 	return &PolicyEnforcer{
 		Policy:     p,
 		Logger:     log,
 		Sentinel:   sentinel,
 		OnApproval: DefaultCLIInteraction,
 		ToolCaps:   make(map[string][]tools.Capability),
+		Debug:      debug,
 	}
 }
 
@@ -41,43 +42,49 @@ func (pe *PolicyEnforcer) RegisterTool(t tools.Tool) {
 }
 
 func (pe *PolicyEnforcer) AllowTool(req ApprovalRequest) bool {
+	if pe.Debug {
+		pe.Logger.Info(fmt.Sprintf("[Policy] Checking tool: %s", req.Tool))
+	}
+
 	caps, exists := pe.ToolCaps[req.Tool]
 	if !exists {
-		// If tool not registered (e.g. system internal), default to strict check
 		pe.Logger.Warn(fmt.Sprintf("Security: Unknown tool '%s' attempted execution.", req.Tool))
 		return false
 	}
 
-	// 1. Check Capabilities against Policy
 	for _, cap := range caps {
+		if pe.Debug {
+			pe.Logger.Info(fmt.Sprintf("[Policy] Required Capability: %s", cap))
+		}
 		switch cap {
 		case tools.CapExecute:
 			if !pe.Policy.AllowShell {
-				pe.Logger.Warn(fmt.Sprintf("Policy Violation: Tool '%s' requires Shell access.", req.Tool))
+				pe.Logger.Warn("Policy Violation: Shell access required.")
 				return false
 			}
 		case tools.CapWrite:
 			if !pe.Policy.AllowFileWrite {
-				pe.Logger.Warn(fmt.Sprintf("Policy Violation: Tool '%s' requires Write access.", req.Tool))
+				pe.Logger.Warn("Policy Violation: Write access required.")
 				return false
 			}
-			// Read is usually allowed, but we could restrict it in strict modes
 		}
 	}
 
-	// 2. Specific Shell Checks (Deep inspection via Sentinel)
+	// [Fixed] Rename contains -> hasCapability
 	if hasCapability(caps, tools.CapExecute) {
 		var shellArgs struct {
 			Command string `json:"command"`
 		}
 		if err := json.Unmarshal([]byte(req.Args), &shellArgs); err == nil {
 			classification := pe.Sentinel.ClassifyCommand(shellArgs.Command)
-
-			if classification == ClassDangerous && pe.Policy.Mode != policy.LevelInteractive {
-				pe.Logger.Warn(fmt.Sprintf("Security: Blocked dangerous command '%s' in %s mode", shellArgs.Command, pe.Policy.Mode))
-				return false
+			if pe.Debug {
+				pe.Logger.Info(fmt.Sprintf("[Policy] Classification: %s", classification))
 			}
 
+			if classification == ClassDangerous && pe.Policy.Mode != policy.LevelInteractive {
+				pe.Logger.Warn(fmt.Sprintf("Security: Blocked dangerous command '%s'", shellArgs.Command))
+				return false
+			}
 			if err := pe.Policy.ValidateCommand(shellArgs.Command); err != nil {
 				pe.Logger.Warn(fmt.Sprintf("Policy Violation: %v", err))
 				return false
@@ -85,42 +92,25 @@ func (pe *PolicyEnforcer) AllowTool(req ApprovalRequest) bool {
 		}
 	}
 
-	// 3. Interactive Approval
 	if pe.Policy.Mode == policy.LevelInteractive {
 		if pe.OnApproval == nil {
 			return false
 		}
 		return pe.OnApproval(req)
 	}
-
 	return true
 }
 
-func (pe *PolicyEnforcer) SetInteractionHandler(fn InteractionFunc) {
-	pe.OnApproval = fn
-}
+func (pe *PolicyEnforcer) SetInteractionHandler(fn InteractionFunc) { pe.OnApproval = fn }
 
 func DefaultCLIInteraction(req ApprovalRequest) bool {
-	fmt.Printf("\n⚠️  Agent Request Approval\n")
-	fmt.Printf("   Tool:   \033[1m%s\033[0m\n", req.Tool)
-
-	if len(req.Args) < 200 {
-		fmt.Printf("   Args:   %s\n", req.Args)
-	} else {
-		fmt.Printf("   Args:   [Large JSON payload, %d bytes]\n", len(req.Args))
-	}
-
-	if req.Reason != "" {
-		fmt.Printf("   Reason: %s\n", req.Reason)
-	}
-
-	fmt.Printf("   Allow? [Y/n]: ")
+	fmt.Printf("\n⚠️  Agent Request Approval\n   Tool: %s\n   Args: %s\n   Allow? [Y/n]: ", req.Tool, req.Args)
 	var resp string
 	fmt.Scanln(&resp)
 	return resp == "" || resp == "y" || resp == "Y"
 }
 
-// Renamed to avoid collision with integration_test.go
+// [Fixed] Renamed function
 func hasCapability(caps []tools.Capability, target tools.Capability) bool {
 	for _, c := range caps {
 		if c == target {

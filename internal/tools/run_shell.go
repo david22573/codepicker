@@ -15,12 +15,10 @@ type shellArgs struct {
 }
 
 func (t *RunShellTool) Name() string { return "run_shell" }
-
 func (t *RunShellTool) Description() string {
-	return "Execute a shell command. Use this for 'ls', 'go test', etc. Prefer search_code for finding code."
+	return "Execute a shell command. Use this for 'ls', 'go test', etc."
 }
 
-// Capabilities declares what this tool can do
 func (t *RunShellTool) Capabilities() []Capability {
 	return []Capability{CapExecute, CapRead}
 }
@@ -34,7 +32,7 @@ func (t *RunShellTool) Definition() openrouter.Tool {
 			Parameters: json.RawMessage(`{
 				"type": "object",
 				"properties": {
-					"command": { "type": "string", "description": "The full shell command string" }
+					"command": { "type": "string" }
 				},
 				"required": ["command"]
 			}`),
@@ -44,7 +42,7 @@ func (t *RunShellTool) Definition() openrouter.Tool {
 
 func (t *RunShellTool) Execute(ctx context.Context, argsJSON string, rt *RuntimeContext) (string, error) {
 	if rt.Sentinel == nil {
-		return "", fmt.Errorf("shell execution disabled (no sentinel provided)")
+		return "", fmt.Errorf("shell execution disabled")
 	}
 
 	var args shellArgs
@@ -52,13 +50,10 @@ func (t *RunShellTool) Execute(ctx context.Context, argsJSON string, rt *Runtime
 		return "", fmt.Errorf("invalid arguments: %w", err)
 	}
 
-	// Sentinel provides runtime safety (timeouts, output capture)
 	_, _, binary, cmdArgs := rt.Sentinel.CheckCommand(args.Command)
-
 	out, err := rt.Sentinel.Execute(binary, cmdArgs)
 	if err != nil {
 		return fmt.Sprintf("Command failed: %v\nOutput: %s", err, out), nil
 	}
-
 	return out, nil
 }

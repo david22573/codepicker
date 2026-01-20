@@ -15,11 +15,10 @@ type CustomScriptTool struct {
 	DefinitionModel config.CustomTool
 }
 
-func (t *CustomScriptTool) Name() string { return t.DefinitionModel.Name }
-
+func (t *CustomScriptTool) Name() string        { return t.DefinitionModel.Name }
 func (t *CustomScriptTool) Description() string { return t.DefinitionModel.Description }
 
-// Custom tools are dangerous by default unless configured otherwise
+// [Fixed] Added Capabilities
 func (t *CustomScriptTool) Capabilities() []Capability {
 	return []Capability{CapExecute, CapRead, CapWrite}
 }
@@ -27,14 +26,8 @@ func (t *CustomScriptTool) Capabilities() []Capability {
 func (t *CustomScriptTool) Definition() openrouter.Tool {
 	schema := t.DefinitionModel.Arguments
 	if schema == "" {
-		schema = `{
-			"type": "object",
-			"properties": {
-				"args": { "type": "string", "description": "Arguments for the command" }
-			}
-		}`
+		schema = `{"type": "object", "properties": {"args": {"type": "string"}}}`
 	}
-
 	return openrouter.Tool{
 		Type: "function",
 		Function: openrouter.ToolFunction{
@@ -46,30 +39,25 @@ func (t *CustomScriptTool) Definition() openrouter.Tool {
 }
 
 func (t *CustomScriptTool) Execute(ctx context.Context, argsJSON string, rt *RuntimeContext) (string, error) {
-
 	parts := strings.Fields(t.DefinitionModel.Command)
 	if len(parts) == 0 {
-		return "", fmt.Errorf("empty command in configuration for tool %s", t.Name())
+		return "", fmt.Errorf("empty command")
 	}
 
 	head := parts[0]
-	cmdArgs := parts[1:]
+	cmdArgs := append(parts[1:], argsJSON)
 
-	cmdArgs = append(cmdArgs, argsJSON)
-
-	// Check with Sentinel if available
+	// Sentinel check if available
 	if rt.Sentinel != nil {
-		needsApproval, _, _, _ := rt.Sentinel.CheckCommand(head)
-		if needsApproval {
-			// In strict modes, Enforcer would have already caught this via Capabilities
+		if dangerous, _, _, _ := rt.Sentinel.CheckCommand(head); dangerous {
+			// Enforcer would have caught this in strict mode via capabilities
 		}
 	}
 
 	cmd := exec.CommandContext(ctx, head, cmdArgs...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return string(out), fmt.Errorf("script execution failed: %w", err)
+		return string(out), fmt.Errorf("execution failed: %w", err)
 	}
-
 	return string(out), nil
 }

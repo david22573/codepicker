@@ -14,7 +14,6 @@ import (
 	"github.com/david22573/codepicker/pkg/openrouter"
 )
 
-// AgentType defines the specialized roles in the team
 type AgentType string
 
 const (
@@ -48,19 +47,16 @@ func NewOrchestrator(
 	cfg *config.ConfigFile,
 ) (*Orchestrator, error) {
 
-	// Helper to spawn a standardized engine for a specific role
 	spawn := func(role AgentType, rolePolicy policy.ExecutionPolicy, prompt string) (*Engine, error) {
 		model := cfg.GetModel()
-
-		// Note: We use NewEngine from the same package
-		eng, err := NewEngine(client, model, srcRoot, log, config.DefaultLimits(), store, cfg)
+		// [Fixed] Pass empty DebugConfig
+		eng, err := NewEngine(client, model, srcRoot, log, config.DefaultLimits(), store, cfg, DebugConfig{})
 		if err != nil {
 			return nil, err
 		}
 
 		eng.SetPolicy(rolePolicy)
 		eng.SystemPrompt = prompt
-
 		return eng, nil
 	}
 
@@ -70,19 +66,15 @@ func NewOrchestrator(
 	}
 
 	team := make(map[AgentType]*Engine)
-
 	if ctxAgent, err := spawn(AgentContext, policy.Architect, prompts.ContextSpecialist); err == nil {
 		team[AgentContext] = ctxAgent
 	}
-
 	if modAgent, err := spawn(AgentModifier, policy.Batch, prompts.CodeModifier); err == nil {
 		team[AgentModifier] = modAgent
 	}
-
 	if sysAgent, err := spawn(AgentSystem, policy.Interactive, prompts.SystemAgent); err == nil {
 		team[AgentSystem] = sysAgent
 	}
-
 	if qualAgent, err := spawn(AgentQuality, policy.Interactive, prompts.QualityAgent); err == nil {
 		team[AgentQuality] = qualAgent
 	}
@@ -97,10 +89,9 @@ func NewOrchestrator(
 func (o *Orchestrator) RunTask(ctx context.Context, userTask string) error {
 	optimizedTask, err := o.Refinement.OptimizePrompt(ctx, userTask)
 	if err != nil {
-		o.Self.Logger.Warn("Proposer failed (using original task): " + err.Error())
+		o.Self.Logger.Warn("Proposer failed (using original): " + err.Error())
 		optimizedTask = userTask
 	}
-
 	o.Self.Logger.Info("🎼 Orchestrator planning task: " + optimizedTask)
 
 	plan, err := o.createPlan(ctx, optimizedTask)
@@ -113,34 +104,23 @@ func (o *Orchestrator) RunTask(ctx context.Context, userTask string) error {
 	for i, step := range plan.Steps {
 		worker := o.Team[step.Agent]
 		if worker == nil {
-			o.Self.Logger.Warn(fmt.Sprintf("⚠️ Unknown agent type '%s', defaulting to CodeModifier", step.Agent))
 			worker = o.Team[AgentModifier]
 		}
-
 		o.Self.Logger.Info(fmt.Sprintf("\n▶️  Step %d [%s]: %s", i+1, step.Agent, step.Task))
-
 		result, err := worker.Run(ctx, step.Task, nil)
 		if err != nil {
 			return fmt.Errorf("step execution failed: %w", err)
 		}
-
-		o.Self.Logger.Info(fmt.Sprintf("✅ [%s] Result: %s", step.Agent, truncate(result, 100)))
+		o.Self.Logger.Info(fmt.Sprintf("✅ Result: %s", truncate(result, 100)))
 		o.Self.Memory.AddNote(fmt.Sprintf("Observation from %s: %s", step.Agent, result))
 	}
-
 	return nil
 }
 
 func (o *Orchestrator) createPlan(ctx context.Context, task string) (*ExecutionPlan, error) {
 	prompt := fmt.Sprintf(`TASK: %s
-Available Agents:
-- Context: Read/Search code.
-- CodeModifier: Write code to shadow files.
-- System: Run shell commands/tests.
-- Quality: Linting/Security checks.
-
-Return a valid JSON object with a list of steps.
-Example: {"steps": [{"agent": "Context", "task": "Search for auth logic"}, {"agent": "CodeModifier", "task": "Add JWT middleware"}]}`, task)
+Available Agents: Context, CodeModifier, System, Quality.
+Return JSON: {"steps": [{"agent": "Context", "task": "Search..."}]}`, task)
 
 	resp, err := o.Self.Run(ctx, prompt, nil)
 	if err != nil {
@@ -152,7 +132,6 @@ Example: {"steps": [{"agent": "Context", "task": "Search for auth logic"}, {"age
 	if err := json.Unmarshal([]byte(cleaned), &plan); err != nil {
 		return nil, fmt.Errorf("invalid plan format: %w", err)
 	}
-
 	return &plan, nil
 }
 

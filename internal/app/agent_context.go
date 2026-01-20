@@ -41,7 +41,12 @@ type ContextOptions struct {
 	LogLevel int
 	Mode     RunMode
 	Policy   policy.ExecutionPolicy
-	Task     string // Optional, for context awareness
+	Task     string
+
+	// [Phase 5] Debug Options
+	DebugPolicy bool
+	TraceTools  bool
+	TraceMemory bool
 }
 
 func NewAgentContext(ctx context.Context, opts ContextOptions) (*AgentContext, error) {
@@ -52,7 +57,6 @@ func NewAgentContext(ctx context.Context, opts ContextOptions) (*AgentContext, e
 		return nil, fmt.Errorf("OPENROUTER_API_KEY environment variable is not set")
 	}
 
-	// This is the SINGLE point where config is loaded
 	cfgFile, err := config.GetOrLoadConfig("")
 	if err != nil {
 		log.Warn(fmt.Sprintf("Failed to load config: %v", err))
@@ -76,6 +80,13 @@ func NewAgentContext(ctx context.Context, opts ContextOptions) (*AgentContext, e
 		model = cfgFile.AI.Model
 	}
 
+	// [Phase 5] Create Debug Config
+	debugCfg := agent.DebugConfig{
+		Policy: opts.DebugPolicy,
+		Tools:  opts.TraceTools,
+		Memory: opts.TraceMemory,
+	}
+
 	eng, err := agent.NewEngine(
 		client,
 		model,
@@ -83,7 +94,8 @@ func NewAgentContext(ctx context.Context, opts ContextOptions) (*AgentContext, e
 		log,
 		limits,
 		store,
-		cfgFile, // Pass explicit config
+		cfgFile,
+		debugCfg, // Inject debug config
 	)
 	if err != nil {
 		store.Close()

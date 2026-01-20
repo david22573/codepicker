@@ -52,7 +52,6 @@ func NewSentinel(limits *config.Limits) *Sentinel {
 	}
 }
 
-// ClassifyCommand determines the risk profile of a command
 func (s *Sentinel) ClassifyCommand(cmdStr string) string {
 	parts, err := shlex.Split(cmdStr)
 	if err != nil || len(parts) == 0 {
@@ -61,31 +60,25 @@ func (s *Sentinel) ClassifyCommand(cmdStr string) string {
 
 	binary := parts[0]
 
-	// 1. Check Explicit Dangerous Patterns
 	for _, pattern := range dangerousPatterns {
 		if matched, _ := regexp.MatchString(pattern, cmdStr); matched {
 			return ClassDangerous
 		}
 	}
 
-	// 2. Network Tools
 	if binary == "curl" || binary == "wget" || binary == "git" || binary == "ssh" || binary == "scp" {
 		return ClassNetwork
 	}
 
-	// 3. Write/Modifying Tools
 	if binary == "mv" || binary == "cp" || binary == "rm" || binary == "chmod" || binary == "mkdir" || binary == "touch" {
 		return ClassWrite
 	}
 
-	// 4. Build Tools (Could be anything, but usually write/net)
 	if binary == "go" || binary == "npm" || binary == "make" || binary == "docker" {
-		return ClassWrite // conservatively classify as write/complex
+		return ClassWrite
 	}
 
-	// 5. Read-Only / Safe
 	if s.SafeBinaries[binary] {
-		// Check for output redirection which turns a safe command into a write
 		if strings.Contains(cmdStr, ">") {
 			return ClassWrite
 		}
@@ -95,7 +88,6 @@ func (s *Sentinel) ClassifyCommand(cmdStr string) string {
 	return ClassUnknown
 }
 
-// CheckCommand performs a deep security scan of the command args
 func (s *Sentinel) CheckCommand(cmdStr string) (bool, string, string, []string) {
 	classification := s.ClassifyCommand(cmdStr)
 
@@ -107,7 +99,6 @@ func (s *Sentinel) CheckCommand(cmdStr string) (bool, string, string, []string) 
 		return true, "Potentially dangerous command pattern detected", binary, args
 	}
 
-	// Refined flag checks
 	if binary == "find" {
 		for _, arg := range args {
 			if strings.HasPrefix(arg, "-exec") || strings.HasPrefix(arg, "-delete") || strings.HasPrefix(arg, "-ok") {
@@ -116,7 +107,6 @@ func (s *Sentinel) CheckCommand(cmdStr string) (bool, string, string, []string) 
 		}
 	}
 
-	// System directory protection
 	for _, arg := range args {
 		if strings.HasPrefix(arg, "/etc") ||
 			strings.HasPrefix(arg, "/sys") ||
@@ -128,7 +118,6 @@ func (s *Sentinel) CheckCommand(cmdStr string) (bool, string, string, []string) 
 	return false, "", binary, args
 }
 
-// BoundedBuffer limits output capture
 type BoundedBuffer struct {
 	b     bytes.Buffer
 	limit int
@@ -158,8 +147,15 @@ func (s *Sentinel) Execute(binary string, args []string) (string, error) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, binary, args...)
-	stdout := &BoundedBuffer{limit: s.Limits.MaxCommandOutput}
-	stderr := &BoundedBuffer{limit: s.Limits.MaxCommandOutput}
+
+	// [4.2] Use specific Command limit, separate from general tool limit
+	limit := s.Limits.MaxCommandOutput
+	if limit == 0 {
+		limit = 1024 * 50 // Safe default if config missing
+	}
+
+	stdout := &BoundedBuffer{limit: limit}
+	stderr := &BoundedBuffer{limit: limit}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
@@ -170,7 +166,7 @@ func (s *Sentinel) Execute(binary string, args []string) (string, error) {
 		return "", fmt.Errorf("command timed out after %v", s.Limits.CommandTimeout)
 	}
 
-	if len(output) >= s.Limits.MaxCommandOutput {
+	if len(output) >= limit {
 		return output + "\n...[TRUNCATED]...", fmt.Errorf("command output truncated")
 	}
 

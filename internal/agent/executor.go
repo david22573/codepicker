@@ -11,14 +11,15 @@ import (
 type ToolExecutor struct {
 	Tools          map[string]tools.Tool
 	RuntimeContext *tools.RuntimeContext
-	Enforcer       *PolicyEnforcer // [1.2] Added Enforcer dependency
-	DryRun         bool
+	Enforcer       *PolicyEnforcer
+	Trace          bool // [Phase 5]
 }
 
 func NewToolExecutor(
 	availableTools []tools.Tool,
 	rt *tools.RuntimeContext,
-	enforcer *PolicyEnforcer, // [1.2] Inject Enforcer
+	enforcer *PolicyEnforcer,
+	trace bool,
 ) *ToolExecutor {
 	toolMap := make(map[string]tools.Tool)
 	for _, t := range availableTools {
@@ -29,13 +30,11 @@ func NewToolExecutor(
 		Tools:          toolMap,
 		RuntimeContext: rt,
 		Enforcer:       enforcer,
-		DryRun:         false,
+		Trace:          trace,
 	}
 }
 
 func (e *ToolExecutor) Execute(ctx context.Context, call openrouter.ToolCall) string {
-	// [1.2] Enforce policy at executor level
-	// This captures ALL tool usage, regardless of which tool it is.
 	req := ApprovalRequest{
 		Tool: call.Function.Name,
 		Args: call.Function.Arguments,
@@ -50,11 +49,24 @@ func (e *ToolExecutor) Execute(ctx context.Context, call openrouter.ToolCall) st
 		return fmt.Sprintf("Error: Tool '%s' is not available in this context.", call.Function.Name)
 	}
 
-	if e.DryRun {
-		return fmt.Sprintf("[DRY RUN] Would execute tool '%s' with args: %s", call.Function.Name, call.Function.Arguments)
+	if e.Trace {
+		fmt.Printf("\n[TRACE] >>> EXECUTE %s\nARGS: %s\n", call.Function.Name, call.Function.Arguments)
 	}
 
 	result, err := tool.Execute(ctx, call.Function.Arguments, e.RuntimeContext)
+
+	if e.Trace {
+		if err != nil {
+			fmt.Printf("[TRACE] <<< ERROR: %v\n", err)
+		} else {
+			out := result
+			if len(out) > 500 {
+				out = out[:500] + "..."
+			}
+			fmt.Printf("[TRACE] <<< RESULT: %s\n", out)
+		}
+	}
+
 	if err != nil {
 		return fmt.Sprintf("Tool execution failed: %v", err)
 	}
