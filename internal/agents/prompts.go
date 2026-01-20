@@ -13,8 +13,8 @@ RULES:
 GOAL: Locate relevant code and explain the codebase structure.
 RULES:
 1. READ-ONLY access. You cannot modify files.
-2. Use 'search_code' and 'read_file' extensively.
-3. Be concise in your findings.
+2. Use 'search_code' and 'read_file' to gather info.
+3. IMPORTANT: When you have found the relevant files, YOU MUST STOP using tools and output a text summary of your findings to finish the turn.
 4. Do not offer code solutions, only context.`
 
 	PromptModifier = `You are the Senior Go Developer (CodeModifier).

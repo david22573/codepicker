@@ -6,16 +6,22 @@ import (
 	"github.com/david22573/codepicker/pkg/openrouter"
 )
 
-// getToolsFor assigns specific permissions (tools) to specific agents
 func getToolsFor(aType AgentType) []openrouter.Tool {
 
-	// Define tools locally to avoid dependency on legacy package internals
 	toolReadFile := openrouter.Tool{
 		Type: "function",
 		Function: openrouter.ToolFunction{
 			Name:        "read_file",
-			Description: "Read the contents of a specific file from the project.",
-			Parameters:  json.RawMessage(`{ "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"] }`),
+			Description: "Read the contents of a specific file. Optional: specify line range to save tokens.",
+			Parameters: json.RawMessage(`{ 
+				"type": "object", 
+				"properties": { 
+					"path": { "type": "string" },
+					"start_line": { "type": "integer", "description": "Start line number (1-based, optional)" },
+					"end_line": { "type": "integer", "description": "End line number (optional)" }
+				}, 
+				"required": ["path"] 
+			}`),
 		},
 	}
 
@@ -46,7 +52,6 @@ func getToolsFor(aType AgentType) []openrouter.Tool {
 		},
 	}
 
-	// Toolset assignments
 	readTools := []openrouter.Tool{toolReadFile, toolSearchCode}
 	writeTools := []openrouter.Tool{toolWriteShadow}
 	shellTools := []openrouter.Tool{toolRunShell}
@@ -61,7 +66,7 @@ func getToolsFor(aType AgentType) []openrouter.Tool {
 	case AgentQuality:
 		return append(readTools, shellTools...)
 	case AgentOrchestrator:
-		// Orchestrator tools will be added in Phase 2
+
 		return readTools
 	default:
 		return readTools

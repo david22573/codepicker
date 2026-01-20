@@ -5,12 +5,11 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/david22573/codepicker/internal/agent" // Import core agent package
+	"github.com/david22573/codepicker/internal/agent"
 	"github.com/david22573/codepicker/internal/agents"
 	"github.com/david22573/codepicker/internal/app"
 	"github.com/david22573/codepicker/internal/policy"
-	"github.com/david22573/codepicker/internal/ui" // Use UI package
-	"github.com/david22573/codepicker/pkg/openrouter"
+	"github.com/david22573/codepicker/internal/ui"
 	"github.com/spf13/cobra"
 )
 
@@ -32,12 +31,11 @@ var runCmd = &cobra.Command{
 	Example: `  codepicker agent run "Refactor the logging interface"
   codepicker agent run --plan 123e4567-e89b-12d3-a456-426614174000`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// Initialize UI
+
 		if ui.Standard == nil {
 			ui.Standard = ui.NewConsoleUI()
 		}
 
-		// Validation: Need either a task string OR a plan ID
 		if len(args) == 0 && planID == "" {
 			return fmt.Errorf("requires either a task description or a --plan ID")
 		}
@@ -47,7 +45,6 @@ var runCmd = &cobra.Command{
 			task = fmt.Sprintf("Execute Plan %s", planID)
 		}
 
-		// Initialize Context
 		agentCtx, err := app.NewAgentContext(cmd.Context(), app.ContextOptions{
 			SrcDir:   srcDir,
 			LogLevel: 1,
@@ -60,17 +57,14 @@ var runCmd = &cobra.Command{
 		}
 		defer agentCtx.Close()
 
-		// --- PATH A: Execute Saved Plan ---
 		if planID != "" {
 			return runSavedPlan(agentCtx, planID)
 		}
 
-		// --- PATH B: Dynamic Orchestration (Default) ---
 		return runOrchestrator(agentCtx, task)
 	},
 }
 
-// runSavedPlan loads a plan from DB and executes it
 func runSavedPlan(ctx *app.AgentContext, id string) error {
 	ui.Standard.Info("📂 Loading plan %s from database...", id)
 
@@ -84,7 +78,6 @@ func runSavedPlan(ctx *app.AgentContext, id string) error {
 		return fmt.Errorf("corrupt plan data: %w", err)
 	}
 
-	// Reconstruct the Plan object
 	plan := &agent.Plan{
 		ID:            record.ID,
 		OriginalTask:  record.Task,
@@ -94,10 +87,8 @@ func runSavedPlan(ctx *app.AgentContext, id string) error {
 
 	ui.Standard.Info("🚀 Resuming execution of plan: %s", plan.OriginalTask)
 
-	// Create Executor
 	executor := agent.NewPlanExecutor(ctx.Engine, plan)
 
-	// Execute (this automatically skips 'completed' steps)
 	if err := executor.Execute(ctx.Ctx); err != nil {
 		return err
 	}
@@ -106,12 +97,12 @@ func runSavedPlan(ctx *app.AgentContext, id string) error {
 	return nil
 }
 
-// runOrchestrator spins up the multi-agent team
 func runOrchestrator(ctx *app.AgentContext, task string) error {
 	ctx.Logger.Info("🤖 Initializing Multi-Agent Orchestrator...")
 
+	// FIXED: Pass the existing authenticated client from ctx.Engine
 	orch, err := agents.NewOrchestrator(
-		openrouter.NewClient(fmt.Sprintf("%s", ctx.Config.GetModel())),
+		ctx.Engine.Client,
 		srcDir,
 		ctx.Logger,
 		ctx.Store,
@@ -122,7 +113,8 @@ func runOrchestrator(ctx *app.AgentContext, task string) error {
 		return fmt.Errorf("failed to start orchestrator: %w", err)
 	}
 
-	// Share the engine's HTTP client to reuse connections/config
+	// We no longer need to manually patch orch.Self.Client since we passed it in the constructor
+	// But ensuring the team shares it doesn't hurt (handled in NewOrchestrator now mostly)
 	orch.Self.Client = ctx.Engine.Client
 	for _, a := range orch.Team {
 		a.Client = ctx.Engine.Client

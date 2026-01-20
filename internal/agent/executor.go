@@ -3,6 +3,7 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/david22573/codepicker/internal/config"
 	"github.com/david22573/codepicker/internal/vfs"
@@ -33,20 +34,57 @@ func NewToolExecutor(mem *WorkingMemory, fs vfs.VirtualFileSystem, s *Sentinel, 
 func (e *ToolExecutor) Execute(tool openrouter.ToolCall) string {
 	switch tool.Function.Name {
 	case "read_file":
-		// Read operations are safe, execute normally even in dry run
 		var args struct {
-			Path string `json:"path"`
+			Path      string `json:"path"`
+			StartLine int    `json:"start_line,omitempty"`
+			EndLine   int    `json:"end_line,omitempty"`
 		}
 		if err := json.Unmarshal([]byte(tool.Function.Arguments), &args); err != nil {
 			return fmt.Sprintf("Invalid arguments: %v", err)
 		}
+
+		// 1. Read full file content from VFS
+		contentBytes, err := e.FS.ReadFile(args.Path)
+		if err != nil {
+			return fmt.Sprintf("Error reading '%s': %v", args.Path, err)
+		}
+
+		// 2. Handle partial read if lines are specified
+		if args.StartLine > 0 || args.EndLine > 0 {
+			lines := strings.Split(string(contentBytes), "\n")
+
+			// Convert 1-based start line to 0-based index
+			start := args.StartLine - 1
+			if start < 0 {
+				start = 0
+			}
+
+			// Handle end line (inclusive)
+			end := args.EndLine
+			if end == 0 || end > len(lines) {
+				end = len(lines)
+			}
+
+			// Validation
+			if start >= len(lines) {
+				return fmt.Sprintf("Start line %d is beyond file length (%d lines)", args.StartLine, len(lines))
+			}
+			if start > end {
+				return fmt.Sprintf("Invalid range: start %d > end %d", args.StartLine, args.EndLine)
+			}
+
+			// Slice and return strictly the requested content
+			subset := strings.Join(lines[start:end], "\n")
+			return fmt.Sprintf("--- FILE: %s (Lines %d-%d) ---\n%s", args.Path, args.StartLine, args.EndLine, subset)
+		}
+
+		// 3. Default: Load full file into context memory
 		if err := e.Memory.Add(args.Path); err != nil {
 			return fmt.Sprintf("Error reading '%s': %v", args.Path, err)
 		}
 		return fmt.Sprintf("✓ File '%s' loaded into context", args.Path)
 
 	case "search_code":
-		// Search is safe
 		var args struct {
 			Query string `json:"query"`
 		}
@@ -55,8 +93,6 @@ func (e *ToolExecutor) Execute(tool openrouter.ToolCall) string {
 		}
 
 		if overlay, ok := e.FS.(*vfs.OverlayFS); ok {
-			// Access SrcRoot from OverlayFS since search requires file walking logic
-			// found in agent.PerformSearch
 			results, err := PerformSearch(overlay.SrcRoot, args.Query)
 			if err != nil {
 				return fmt.Sprintf("Search error: %v", err)
@@ -74,7 +110,6 @@ func (e *ToolExecutor) Execute(tool openrouter.ToolCall) string {
 			return fmt.Sprintf("Invalid arguments: %v", err)
 		}
 
-		// 3.3: DRY RUN INTERCEPTION
 		if e.DryRun {
 			return fmt.Sprintf("[DRY RUN] Would write %d bytes to shadow file: %s", len(args.Content), args.Path)
 		}
@@ -84,13 +119,11 @@ func (e *ToolExecutor) Execute(tool openrouter.ToolCall) string {
 			return fmt.Sprintf("Error writing shadow file: %v", err)
 		}
 
-		// 3.4: RECORD ATTRIBUTION
 		if overlay, ok := e.FS.(*vfs.OverlayFS); ok {
 			taskName := e.CurrentTask
 			if taskName == "" {
 				taskName = "Unknown Task"
 			}
-			// We use "AI Agent" as the generic actor name
 			overlay.Shadow.RecordAttribution(args.Path, "AI Agent", taskName)
 		}
 
@@ -104,7 +137,6 @@ func (e *ToolExecutor) Execute(tool openrouter.ToolCall) string {
 			return fmt.Sprintf("Invalid arguments: %v", err)
 		}
 
-		// 3.3: DRY RUN INTERCEPTION
 		if e.DryRun {
 			return fmt.Sprintf("[DRY RUN] Would execute command: %s", args.Command)
 		}
