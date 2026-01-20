@@ -19,10 +19,14 @@ func (t *CustomScriptTool) Name() string { return t.DefinitionModel.Name }
 
 func (t *CustomScriptTool) Description() string { return t.DefinitionModel.Description }
 
+// Custom tools are dangerous by default unless configured otherwise
+func (t *CustomScriptTool) Capabilities() []Capability {
+	return []Capability{CapExecute, CapRead, CapWrite}
+}
+
 func (t *CustomScriptTool) Definition() openrouter.Tool {
 	schema := t.DefinitionModel.Arguments
 	if schema == "" {
-		// Default schema if none provided: just a generic "args" string
 		schema = `{
 			"type": "object",
 			"properties": {
@@ -42,7 +46,7 @@ func (t *CustomScriptTool) Definition() openrouter.Tool {
 }
 
 func (t *CustomScriptTool) Execute(ctx context.Context, argsJSON string, rt *RuntimeContext) (string, error) {
-	// Parse the command from the config
+
 	parts := strings.Fields(t.DefinitionModel.Command)
 	if len(parts) == 0 {
 		return "", fmt.Errorf("empty command in configuration for tool %s", t.Name())
@@ -51,19 +55,14 @@ func (t *CustomScriptTool) Execute(ctx context.Context, argsJSON string, rt *Run
 	head := parts[0]
 	cmdArgs := parts[1:]
 
-	// Append the JSON arguments so the script can parse them
 	cmdArgs = append(cmdArgs, argsJSON)
 
-	// Security Check: We treat custom tools like shell commands
+	// Check with Sentinel if available
 	if rt.Sentinel != nil {
-		// We only check the binary itself to ensure it's allowed by policy
-		needsApproval, reason, _, _ := rt.Sentinel.CheckCommand(head)
+		needsApproval, _, _, _ := rt.Sentinel.CheckCommand(head)
 		if needsApproval {
-			// If sentinel flags it, we check if we have a user approval callback (via Shell Tool)
-			// NOTE: Ideally, custom tools should be pre-approved or run in Admin mode.
-			// For now, we assume if they are in config, they are trusted, UNLESS policy is Strict.
+			// In strict modes, Enforcer would have already caught this via Capabilities
 		}
-		_ = reason
 	}
 
 	cmd := exec.CommandContext(ctx, head, cmdArgs...)

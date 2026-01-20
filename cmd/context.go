@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -14,7 +15,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// Global flags shared by context commands
 var (
 	ctxCopy      bool
 	ctxOut       string
@@ -31,7 +31,6 @@ var contextCmd = &cobra.Command{
 	Long:  `Commands for scanning, filtering, and exporting your codebase structure and content.`,
 }
 
-// generateCmd (formerly the default root behavior)
 var generateCmd = &cobra.Command{
 	Use:   "gen",
 	Short: "Generate a consolidated markdown file (Default)",
@@ -41,7 +40,6 @@ var generateCmd = &cobra.Command{
 	},
 }
 
-// treeCmd (formerly cmd/tree.go)
 var treeCmd = &cobra.Command{
 	Use:   "tree",
 	Short: "Print a visual tree of the project",
@@ -50,7 +48,6 @@ var treeCmd = &cobra.Command{
 	},
 }
 
-// copyCmd (formerly cmd/copy.go)
 var copyCmd = &cobra.Command{
 	Use:   "copy",
 	Short: "Copy files to a directory preserving structure",
@@ -62,12 +59,10 @@ var copyCmd = &cobra.Command{
 func init() {
 	rootCmd.AddCommand(contextCmd)
 
-	// Register subcommands
 	contextCmd.AddCommand(generateCmd)
 	contextCmd.AddCommand(treeCmd)
 	contextCmd.AddCommand(copyCmd)
 
-	// Flags for 'gen'
 	generateCmd.Flags().StringVarP(&ctxOut, "out", "o", "", "Output file path")
 	generateCmd.Flags().BoolVarP(&ctxTokens, "tokens", "t", false, "Show token count")
 	generateCmd.Flags().BoolVarP(&ctxMinify, "minify", "m", true, "Minify code")
@@ -75,25 +70,20 @@ func init() {
 	generateCmd.Flags().StringVarP(&ctxDiffRef, "diff", "d", "", "Scan only changed files (git diff)")
 	generateCmd.Flags().BoolVarP(&ctxDryRun, "dry-run", "D", false, "Simulate scan")
 
-	// Flags for 'tree'
 	treeCmd.Flags().BoolVarP(&ctxCopy, "copy", "C", false, "Copy output to clipboard")
 	treeCmd.Flags().StringVarP(&ctxOut, "out", "o", "", "Save tree to file")
 
-	// Flags for 'copy'
 	copyCmd.Flags().StringVarP(&ctxOut, "out", "o", "codepicker_out", "Output directory")
 }
 
-// Shared execution logic for all context commands
 func runContextScan(cmd *cobra.Command, strategyName string) error {
 	start := time.Now()
 
-	// 1. Validate Source
-	absSrc, err := paths.Sanitize(srcDir) // srcDir from root.go
+	absSrc, err := paths.Sanitize(srcDir)
 	if err != nil {
 		return fmt.Errorf("invalid source directory: %w", err)
 	}
 
-	// 2. Configure Strategy
 	var w writer.OutputStrategy
 	var outPath string
 
@@ -119,16 +109,15 @@ func runContextScan(cmd *cobra.Command, strategyName string) error {
 		w = writer.NewCopyStrategy(absOut)
 
 	case "Concat":
-		// Default name logic
 		if ctxOut == "" {
 			dirName := filepath.Base(absSrc)
 			ctxOut = fmt.Sprintf("%s_context.md", dirName)
 		}
 		outPath = ctxOut
 
-		// Check overwrite
-		if _, err := filepath.Abs(outPath); err == nil && !ctxDryRun && !ctxOverwrite {
-			// (Simplified overwrite check for brevity)
+		// [0.1] Fix overwrite protection
+		if _, err := os.Stat(outPath); err == nil && !ctxDryRun && !ctxOverwrite {
+			return fmt.Errorf("file '%s' already exists; use --yes to overwrite", outPath)
 		}
 
 		w = writer.NewConcatStrategy(outPath, ctxMinify, ctxTokens)
@@ -138,9 +127,13 @@ func runContextScan(cmd *cobra.Command, strategyName string) error {
 		}
 	}
 
-	defer w.Close()
+	// [0.2] Nil-safe lifecycle handling
+	if w != nil {
+		defer w.Close()
+	} else {
+		return fmt.Errorf("failed to initialize output strategy")
+	}
 
-	// 3. Configure Scanner
 	cfg := config.NewConfig()
 	if includeExts != "" {
 		cfg.AddAllowedExtensions(strings.Split(includeExts, ","))
@@ -151,7 +144,6 @@ func runContextScan(cmd *cobra.Command, strategyName string) error {
 
 	s := scanner.NewScanner(absSrc, w, cfg, appLogger)
 
-	// 4. Handle Diff Mode
 	if ctxDiffRef != "" || (cmd.Flags().Changed("diff")) {
 		files, err := git.GetChangedFiles(ctxDiffRef)
 		if err != nil {
@@ -165,7 +157,6 @@ func runContextScan(cmd *cobra.Command, strategyName string) error {
 		appLogger.Info(fmt.Sprintf("🔍 Diff mode: scanning %d changed files", len(files)))
 	}
 
-	// 5. Execute
 	if err := s.Scan(cmd.Context()); err != nil {
 		return err
 	}

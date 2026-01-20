@@ -22,6 +22,11 @@ func (t *DelegateTaskTool) Description() string {
 	return "Delegate a sub-task to a worker agent. Use this for implementation, reading large files, or executing repetitive tasks."
 }
 
+// [3.3] Capabilities - Delegation essentially acts as a read/write proxy
+func (t *DelegateTaskTool) Capabilities() []Capability {
+	return []Capability{CapRead, CapWrite}
+}
+
 func (t *DelegateTaskTool) Definition() openrouter.Tool {
 	return openrouter.Tool{
 		Type: "function",
@@ -51,7 +56,7 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, argsJSON string, rt *Run
 	}
 
 	files := strings.Split(args.ContextFiles, ",")
-	// Clean up whitespace
+
 	for i := range files {
 		files[i] = strings.TrimSpace(files[i])
 	}

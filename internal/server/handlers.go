@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/david22573/codepicker/internal/agent"
 	"github.com/david22573/codepicker/pkg/openrouter"
 )
 
@@ -29,7 +30,6 @@ func (s *AgentServer) handleAgentTask(w http.ResponseWriter, r *http.Request) {
 
 	eventStream := make(chan string)
 
-	// FIX: Save the original callback from Enforcer
 	originalCallback := s.App.Engine.Enforcer.OnApproval
 
 	reqID := fmt.Sprintf("%s", r.Context().Value("request_id"))
@@ -37,8 +37,8 @@ func (s *AgentServer) handleAgentTask(w http.ResponseWriter, r *http.Request) {
 		reqID = "req_" + taskQuery[:3]
 	}
 
-	// FIX: Set the new callback on Enforcer
-	s.App.Engine.Enforcer.OnApproval = func(cmdStr, reason string) bool {
+	// Update closure to use agent.ApprovalRequest
+	s.App.Engine.Enforcer.OnApproval = func(req agent.ApprovalRequest) bool {
 
 		select {
 		case <-r.Context().Done():
@@ -61,10 +61,11 @@ func (s *AgentServer) handleAgentTask(w http.ResponseWriter, r *http.Request) {
 		}()
 
 		jsonMsg, _ := json.Marshal(map[string]interface{}{
-			"type":    "approval_req",
-			"id":      reqID,
-			"command": cmdStr,
-			"reason":  reason,
+			"type":   "approval_req",
+			"id":     reqID,
+			"tool":   req.Tool,
+			"args":   req.Args,
+			"reason": req.Reason,
 		})
 
 		select {
@@ -89,7 +90,6 @@ func (s *AgentServer) handleAgentTask(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// FIX: Restore original callback on Enforcer
 	defer func() { s.App.Engine.Enforcer.OnApproval = originalCallback }()
 
 	go func() {

@@ -6,14 +6,11 @@ import (
 	"log"
 )
 
-// Migration represents a single database change
 type Migration struct {
 	Version int
 	Up      string
 }
 
-// migrations defines the schema evolution of the application.
-// DO NOT reorder or modify existing entries; only append new versions.
 var migrations = []Migration{
 	{
 		Version: 1,
@@ -70,18 +67,22 @@ var migrations = []Migration{
 		);
 		`,
 	},
+	{
+		Version: 4,
+		Up: `
+		ALTER TABLE memory_files ADD COLUMN content_hash TEXT DEFAULT '';
+		`,
+	},
 }
 
-// Migrate brings the database schema up to date.
 func Migrate(db *sql.DB) error {
-	// 1. Check current version
+
 	var currentVersion int
 	row := db.QueryRow("PRAGMA user_version")
 	if err := row.Scan(&currentVersion); err != nil {
 		return fmt.Errorf("failed to fetch user_version: %w", err)
 	}
 
-	// 2. Apply pending migrations
 	for _, m := range migrations {
 		if m.Version > currentVersion {
 			log.Printf("Applying database migration v%d...", m.Version)
@@ -96,7 +97,6 @@ func Migrate(db *sql.DB) error {
 				return fmt.Errorf("migration v%d failed: %w", m.Version, err)
 			}
 
-			// Update version
 			if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", m.Version)); err != nil {
 				tx.Rollback()
 				return fmt.Errorf("failed to update user_version: %w", err)

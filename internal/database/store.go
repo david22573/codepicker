@@ -1,7 +1,9 @@
 package database
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -18,13 +20,23 @@ type Store struct {
 	db *sql.DB
 }
 
-// PlanRecord represents a saved plan in the database
 type PlanRecord struct {
 	ID            string
 	Task          string
 	StepsJSON     string
 	EstimatedCost float64
 	Status        string
+}
+
+// MemorySnapshot holds the state of working memory at a point in time
+type MemorySnapshot struct {
+	Files []MemoryFile
+}
+
+type MemoryFile struct {
+	Path       string
+	Content    string
+	TokenCount int
 }
 
 func New(storageDir string) (*Store, error) {
@@ -38,7 +50,6 @@ func New(storageDir string) (*Store, error) {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
-	// CHANGED: Use the migration system instead of raw SQL execution
 	if err := Migrate(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("database migration failed: %w", err)
@@ -55,7 +66,12 @@ func (s *Store) DB() *sql.DB {
 	return s.db
 }
 
-// --- History Methods ---
+// [2.3] Deduplication Helper
+func calculateHash(content string) string {
+	hasher := sha256.New()
+	hasher.Write([]byte(content))
+	return hex.EncodeToString(hasher.Sum(nil))
+}
 
 func (s *Store) AddMessage(role string, content string) error {
 	tokens := tokenizer.CountTokens(content)
@@ -94,7 +110,6 @@ func (s *Store) GetContextAwareHistory(tokenBudget int) ([]openrouter.ChatMessag
 		currentTokens += tokens
 	}
 
-	// Reverse back to chronological order
 	messages := make([]openrouter.ChatMessage, len(reversedMessages))
 	for i, msg := range reversedMessages {
 		messages[len(reversedMessages)-1-i] = msg
@@ -108,18 +123,31 @@ func (s *Store) ClearHistory() error {
 	return err
 }
 
-// --- Working Memory Methods ---
-
+// [2.3] UpdateWorkingMemory with Deduplication
 func (s *Store) UpdateWorkingMemory(path string, content string) error {
+	newHash := calculateHash(content)
+
+	// Check if file exists and hash matches
+	var currentHash string
+	err := s.db.QueryRow("SELECT content_hash FROM memory_files WHERE path = ?", path).Scan(&currentHash)
+
+	if err == nil && currentHash == newHash {
+		// Content hasn't changed, just update timestamp
+		_, err := s.db.Exec("UPDATE memory_files SET last_accessed = ? WHERE path = ?", time.Now(), path)
+		return err
+	}
+
+	// Content changed or new file
 	tokens := tokenizer.CountTokens(content)
-	_, err := s.db.Exec(`
-		INSERT INTO memory_files (path, content, token_count, last_accessed) 
-		VALUES (?, ?, ?, ?)
+	_, err = s.db.Exec(`
+		INSERT INTO memory_files (path, content, token_count, content_hash, last_accessed) 
+		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(path) DO UPDATE SET 
 			content=excluded.content, 
 			token_count=excluded.token_count,
+			content_hash=excluded.content_hash,
 			last_accessed=excluded.last_accessed
-	`, path, content, tokens, time.Now())
+	`, path, content, tokens, newHash, time.Now())
 	return err
 }
 
@@ -176,7 +204,59 @@ func (s *Store) ListMemoryFiles() ([]string, error) {
 	return files, nil
 }
 
-// --- Planning Methods ---
+// [2.1] Snapshot Implementation
+func (s *Store) CreateSnapshot() (*MemorySnapshot, error) {
+	rows, err := s.db.Query("SELECT path, content, token_count FROM memory_files")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	snapshot := &MemorySnapshot{}
+	for rows.Next() {
+		var f MemoryFile
+		if err := rows.Scan(&f.Path, &f.Content, &f.TokenCount); err != nil {
+			return nil, err
+		}
+		snapshot.Files = append(snapshot.Files, f)
+	}
+	return snapshot, nil
+}
+
+// [2.1] Restore Implementation
+func (s *Store) RestoreSnapshot(snap *MemorySnapshot) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+
+	// Wipe current memory
+	if _, err := tx.Exec("DELETE FROM memory_files"); err != nil {
+		tx.Rollback()
+		return err
+	}
+
+	// Restore from snapshot
+	stmt, err := tx.Prepare(`
+		INSERT INTO memory_files (path, content, token_count, content_hash, last_accessed)
+		VALUES (?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	defer stmt.Close()
+
+	for _, f := range snap.Files {
+		hash := calculateHash(f.Content)
+		if _, err := stmt.Exec(f.Path, f.Content, f.TokenCount, hash, time.Now()); err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
 
 func (s *Store) SavePlan(id, task string, steps interface{}, estCost float64) error {
 	stepsJSON, err := json.Marshal(steps)

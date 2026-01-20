@@ -9,7 +9,6 @@ import (
 	"github.com/david22573/codepicker/pkg/openrouter"
 )
 
-// ReadFileTool allows the agent to read file content, optionally with line ranges.
 type ReadFileTool struct{}
 
 type readFileArgs struct {
@@ -19,10 +18,12 @@ type readFileArgs struct {
 }
 
 func (t *ReadFileTool) Name() string { return "read_file" }
-
 func (t *ReadFileTool) Description() string {
-	return "Read the contents of a specific file from the project. Use optional start_line/end_line to read specific sections."
+	return "Read the contents of a specific file from the project."
 }
+
+// [3.3] Read Capability
+func (t *ReadFileTool) Capabilities() []Capability { return []Capability{CapRead} }
 
 func (t *ReadFileTool) Definition() openrouter.Tool {
 	return openrouter.Tool{
@@ -33,9 +34,9 @@ func (t *ReadFileTool) Definition() openrouter.Tool {
 			Parameters: json.RawMessage(`{
 				"type": "object",
 				"properties": {
-					"path": { "type": "string", "description": "Relative path to the file (e.g., 'cmd/main.go')" },
-					"start_line": { "type": "integer", "description": "Start line number (1-based, optional)" },
-					"end_line": { "type": "integer", "description": "End line number (optional)" }
+					"path": { "type": "string", "description": "Relative path to the file" },
+					"start_line": { "type": "integer" },
+					"end_line": { "type": "integer" }
 				},
 				"required": ["path"]
 			}`),
@@ -54,31 +55,24 @@ func (t *ReadFileTool) Execute(ctx context.Context, argsJSON string, rt *Runtime
 		return "", fmt.Errorf("error reading '%s': %w", args.Path, err)
 	}
 
-	// Handle line range logic
 	if args.StartLine > 0 || args.EndLine > 0 {
 		lines := strings.Split(string(contentBytes), "\n")
 		start := args.StartLine - 1
 		if start < 0 {
 			start = 0
 		}
-
 		end := args.EndLine
 		if end == 0 || end > len(lines) {
 			end = len(lines)
 		}
 
 		if start >= len(lines) {
-			return "", fmt.Errorf("start line %d is beyond file length (%d lines)", args.StartLine, len(lines))
+			return "", fmt.Errorf("start line %d is beyond file length", args.StartLine)
 		}
-		if start > end {
-			return "", fmt.Errorf("invalid range: start %d > end %d", args.StartLine, args.EndLine)
-		}
-
 		subset := strings.Join(lines[start:end], "\n")
 		return fmt.Sprintf("--- FILE: %s (Lines %d-%d) ---\n%s", args.Path, args.StartLine, args.EndLine, subset), nil
 	}
 
-	// If no range, load into memory context
 	if err := rt.Memory.Add(args.Path); err != nil {
 		return "", fmt.Errorf("failed to add to memory: %w", err)
 	}
@@ -86,7 +80,6 @@ func (t *ReadFileTool) Execute(ctx context.Context, argsJSON string, rt *Runtime
 	return fmt.Sprintf("✓ File '%s' loaded into active context", args.Path), nil
 }
 
-// WriteShadowFileTool allows the agent to propose changes by writing to the shadow FS.
 type WriteShadowFileTool struct{}
 
 type writeArgs struct {
@@ -95,10 +88,12 @@ type writeArgs struct {
 }
 
 func (t *WriteShadowFileTool) Name() string { return "write_shadow_file" }
-
 func (t *WriteShadowFileTool) Description() string {
-	return "Write code to the shadow workspace. Use this to propose changes or create new files."
+	return "Write code to the shadow workspace."
 }
+
+// [3.3] Write Capability
+func (t *WriteShadowFileTool) Capabilities() []Capability { return []Capability{CapWrite} }
 
 func (t *WriteShadowFileTool) Definition() openrouter.Tool {
 	return openrouter.Tool{
@@ -109,8 +104,8 @@ func (t *WriteShadowFileTool) Definition() openrouter.Tool {
 			Parameters: json.RawMessage(`{
 				"type": "object",
 				"properties": {
-					"path": { "type": "string", "description": "Relative path to the file" },
-					"content": { "type": "string", "description": "The full content of the file" }
+					"path": { "type": "string" },
+					"content": { "type": "string" }
 				},
 				"required": ["path", "content"]
 			}`),

@@ -51,3 +51,17 @@ func (m *WorkingMemory) FormatContext() string {
 func (m *WorkingMemory) AddNote(content string) error {
 	return m.Store.AddMessage("system", content)
 }
+
+// Snapshot Wrapper
+func (m *WorkingMemory) Snapshot() (interface{}, error) {
+	return m.Store.CreateSnapshot()
+}
+
+// Restore Wrapper - Fixed signature to match interface{}
+func (m *WorkingMemory) Restore(snap interface{}) error {
+	typedSnap, ok := snap.(*database.MemorySnapshot)
+	if !ok {
+		return fmt.Errorf("invalid snapshot type")
+	}
+	return m.Store.RestoreSnapshot(typedSnap)
+}

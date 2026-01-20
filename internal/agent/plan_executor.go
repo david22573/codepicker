@@ -26,7 +26,6 @@ func (pe *PlanExecutor) Execute(ctx context.Context) error {
 
 	pe.Engine.Memory.Store.UpdatePlanStatus(pe.Plan.ID, "running")
 
-	// Load retry limit from config, default to 2 if 0
 	maxRetries := pe.Engine.Limits.MaxRecoveryAttempts
 	if maxRetries <= 0 {
 		maxRetries = 2
@@ -43,6 +42,13 @@ func (pe *PlanExecutor) Execute(ctx context.Context) error {
 		pe.Engine.Logger.Info(fmt.Sprintf("\n⚡ Executing Step %d/%d: %s", step.ID, len(pe.Plan.Steps), step.Description))
 		step.Status = "running"
 		pe.savePlanState()
+
+		// [2.1] Take snapshot before starting step
+		// This ensures we can rollback context if the step fails
+		snapshot, snapErr := pe.Engine.Memory.Snapshot()
+		if snapErr != nil {
+			pe.Engine.Logger.Warn("Failed to snapshot memory, recovery will be limited.")
+		}
 
 		if len(step.Files) > 0 {
 			for _, f := range step.Files {
@@ -64,28 +70,44 @@ func (pe *PlanExecutor) Execute(ctx context.Context) error {
 		var result string
 		var err error
 
-		// --- RETRY LOOP ---
 		for attempt := 0; attempt <= maxRetries; attempt++ {
 			if attempt > 0 {
 				pe.Engine.Logger.Warn(fmt.Sprintf("🔄 Retry attempt %d/%d for Step %d...", attempt, maxRetries, step.ID))
-				// Simple backoff
+
+				// [2.1] Restore Snapshot on failure
+				// If the agent hallucinated 20 files into memory during the failed attempt,
+				// we wipe them out here so the next attempt is clean.
+				if snapshot != nil {
+					if rErr := pe.Engine.Memory.Restore(snapshot); rErr != nil {
+						pe.Engine.Logger.Error("Failed to restore memory snapshot: " + rErr.Error())
+					} else {
+						pe.Engine.Logger.Debug("♻️  Memory context restored to pre-step state.")
+					}
+
+					// Re-add step files after restore, as they are "part of the plan"
+					if len(step.Files) > 0 {
+						for _, f := range step.Files {
+							pe.Engine.Memory.Add(f)
+						}
+					}
+				}
+
 				time.Sleep(time.Duration(attempt) * 2 * time.Second)
 			}
 
-			// Add "Retry Context" to instruction if this is a retry
 			instruction := step.Instruction
 			if attempt > 0 && err != nil {
+				// We append the error to the prompt, but the *files* in context are clean
 				instruction = fmt.Sprintf("%s\n\n(NOTE: Previous attempt failed with error: %v. Please fix and retry.)", instruction, err)
 			}
 
 			result, err = pe.Engine.Run(ctx, instruction, printUpdate)
 			if err == nil {
-				break // Success!
+				break
 			}
 
 			pe.Engine.Logger.Warn(fmt.Sprintf("Step %d execution error: %v", step.ID, err))
 		}
-		// ------------------
 
 		if err != nil {
 			step.Status = "failed"
@@ -97,7 +119,7 @@ func (pe *PlanExecutor) Execute(ctx context.Context) error {
 				pe.Engine.Memory.Store.UpdatePlanStatus(pe.Plan.ID, "failed")
 				return fmt.Errorf("critical step %d failed, aborting plan", step.ID)
 			}
-			// Allow non-critical steps to fail without stopping the whole plan
+
 			pe.Engine.Logger.Warn("⚠️  Non-critical step failed. Continuing plan...")
 			continue
 		}

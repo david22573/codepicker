@@ -27,6 +27,11 @@ func (t *SearchCodeTool) Description() string {
 	return "Search for a keyword or string across all files in the codebase. Returns file paths and matching lines."
 }
 
+// [3.3] Capabilities - Search only needs Read access
+func (t *SearchCodeTool) Capabilities() []Capability {
+	return []Capability{CapRead}
+}
+
 func (t *SearchCodeTool) Definition() openrouter.Tool {
 	return openrouter.Tool{
 		Type: "function",
@@ -57,7 +62,6 @@ func (t *SearchCodeTool) performSearch(query string, cfg ConfigProvider) (string
 	var results []string
 	var ign *ignore.GitIgnore
 
-	// Attempt to load .gitignore
 	if _, err := os.Stat(filepath.Join(t.Root, ".gitignore")); err == nil {
 		ign, _ = ignore.CompileIgnoreFile(filepath.Join(t.Root, ".gitignore"))
 	}
@@ -72,7 +76,6 @@ func (t *SearchCodeTool) performSearch(query string, cfg ConfigProvider) (string
 			return nil
 		}
 
-		// Check .gitignore
 		if ign != nil && ign.MatchesPath(rel) {
 			if d.IsDir() {
 				return filepath.SkipDir
@@ -80,7 +83,6 @@ func (t *SearchCodeTool) performSearch(query string, cfg ConfigProvider) (string
 			return nil
 		}
 
-		// Check internal config ignores
 		if d.IsDir() {
 			if strings.HasPrefix(d.Name(), ".") || (cfg != nil && cfg.IsDirIgnored(d.Name())) {
 				return filepath.SkipDir
@@ -88,15 +90,13 @@ func (t *SearchCodeTool) performSearch(query string, cfg ConfigProvider) (string
 			return nil
 		}
 
-		// Check extensions
 		ext := strings.ToLower(filepath.Ext(path))
 		isAllowed := cfg == nil || cfg.IsExtensionAllowed(ext)
-		// We always allow special files like Dockerfile/Makefile even if extension check fails
+
 		if !isAllowed && !isSpecialFile(d.Name()) {
 			return nil
 		}
 
-		// Read and Search
 		file, err := os.Open(path)
 		if err != nil {
 			return nil

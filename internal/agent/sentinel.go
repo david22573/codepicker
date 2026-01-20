@@ -12,6 +12,15 @@ import (
 	"github.com/google/shlex"
 )
 
+// Command Categories
+const (
+	ClassReadOnly  = "read-only"
+	ClassWrite     = "filesystem-write"
+	ClassNetwork   = "network"
+	ClassDangerous = "dangerous"
+	ClassUnknown   = "unknown"
+)
+
 type Sentinel struct {
 	SafeBinaries map[string]bool
 	Limits       *config.Limits
@@ -43,7 +52,83 @@ func NewSentinel(limits *config.Limits) *Sentinel {
 	}
 }
 
-// BoundedBuffer limits the amount of data capturing from stdout/stderr
+// ClassifyCommand determines the risk profile of a command
+func (s *Sentinel) ClassifyCommand(cmdStr string) string {
+	parts, err := shlex.Split(cmdStr)
+	if err != nil || len(parts) == 0 {
+		return ClassUnknown
+	}
+
+	binary := parts[0]
+
+	// 1. Check Explicit Dangerous Patterns
+	for _, pattern := range dangerousPatterns {
+		if matched, _ := regexp.MatchString(pattern, cmdStr); matched {
+			return ClassDangerous
+		}
+	}
+
+	// 2. Network Tools
+	if binary == "curl" || binary == "wget" || binary == "git" || binary == "ssh" || binary == "scp" {
+		return ClassNetwork
+	}
+
+	// 3. Write/Modifying Tools
+	if binary == "mv" || binary == "cp" || binary == "rm" || binary == "chmod" || binary == "mkdir" || binary == "touch" {
+		return ClassWrite
+	}
+
+	// 4. Build Tools (Could be anything, but usually write/net)
+	if binary == "go" || binary == "npm" || binary == "make" || binary == "docker" {
+		return ClassWrite // conservatively classify as write/complex
+	}
+
+	// 5. Read-Only / Safe
+	if s.SafeBinaries[binary] {
+		// Check for output redirection which turns a safe command into a write
+		if strings.Contains(cmdStr, ">") {
+			return ClassWrite
+		}
+		return ClassReadOnly
+	}
+
+	return ClassUnknown
+}
+
+// CheckCommand performs a deep security scan of the command args
+func (s *Sentinel) CheckCommand(cmdStr string) (bool, string, string, []string) {
+	classification := s.ClassifyCommand(cmdStr)
+
+	parts, _ := shlex.Split(cmdStr)
+	binary := parts[0]
+	args := parts[1:]
+
+	if classification == ClassDangerous {
+		return true, "Potentially dangerous command pattern detected", binary, args
+	}
+
+	// Refined flag checks
+	if binary == "find" {
+		for _, arg := range args {
+			if strings.HasPrefix(arg, "-exec") || strings.HasPrefix(arg, "-delete") || strings.HasPrefix(arg, "-ok") {
+				return true, fmt.Sprintf("Forbidden flag '%s' used with find", arg), binary, args
+			}
+		}
+	}
+
+	// System directory protection
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "/etc") ||
+			strings.HasPrefix(arg, "/sys") ||
+			strings.HasPrefix(arg, "/proc") {
+			return true, "Attempt to access system directory", binary, args
+		}
+	}
+
+	return false, "", binary, args
+}
+
+// BoundedBuffer limits output capture
 type BoundedBuffer struct {
 	b     bytes.Buffer
 	limit int
@@ -66,60 +151,6 @@ func (b *BoundedBuffer) Write(p []byte) (n int, err error) {
 
 func (b *BoundedBuffer) String() string {
 	return b.b.String()
-}
-
-func (s *Sentinel) CheckCommand(cmdStr string) (bool, string, string, []string) {
-	for _, pattern := range dangerousPatterns {
-		if matched, _ := regexp.MatchString(pattern, cmdStr); matched {
-			return true, "Potentially dangerous command pattern detected", "", nil
-		}
-	}
-
-	parts, err := shlex.Split(cmdStr)
-	if err != nil || len(parts) == 0 {
-		return false, "empty or malformed command", "", nil
-	}
-
-	binary := parts[0]
-	args := parts[1:]
-
-	if binary == "find" {
-		for _, arg := range args {
-			if strings.HasPrefix(arg, "-exec") || strings.HasPrefix(arg, "-delete") || strings.HasPrefix(arg, "-ok") {
-				return true, fmt.Sprintf("Forbidden flag '%s' used with find", arg), binary, args
-			}
-		}
-	}
-
-	if binary == "cat" || binary == "grep" || binary == "find" {
-		for _, arg := range args {
-			if strings.HasPrefix(arg, "/etc") ||
-				strings.HasPrefix(arg, "/sys") ||
-				strings.HasPrefix(arg, "/proc") ||
-				strings.HasPrefix(arg, "/var") {
-				return true, "Attempt to read system directory", binary, args
-			}
-		}
-	}
-
-	if s.SafeBinaries[binary] {
-		for _, arg := range args {
-			if strings.ContainsAny(arg, "&|;`$") {
-				return true, "Suspicious shell characters detected in arguments", binary, args
-			}
-		}
-		return false, "", binary, args
-	}
-
-	if binary == "rm" || binary == "mv" || binary == "cp" || binary == "chmod" {
-		return true, fmt.Sprintf("File system modification detected: %s", binary), binary, args
-	}
-
-	if binary == "go" || binary == "npm" || binary == "git" || binary == "curl" || binary == "wget" {
-		return true, fmt.Sprintf("External tool execution: %s", binary), binary, args
-	}
-
-	return true, fmt.Sprintf("Unrecognized binary: %s", binary), binary, args
 }
 
 func (s *Sentinel) Execute(binary string, args []string) (string, error) {

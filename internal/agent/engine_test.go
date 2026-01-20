@@ -36,7 +36,6 @@ func TestNewEngine(t *testing.T) {
 		t.Fatal("Engine executor not initialized")
 	}
 
-	// FIX: Access fields via RuntimeContext
 	rt := engine.Executor.RuntimeContext
 	if rt == nil {
 		t.Fatal("Runtime context not initialized")
@@ -53,6 +52,10 @@ func TestNewEngine(t *testing.T) {
 	if engine.Sentinel == nil {
 		t.Error("Engine sentinel not initialized")
 	}
+
+	if engine.Enforcer == nil {
+		t.Error("Engine enforcer not initialized")
+	}
 }
 
 func TestEngineCallback(t *testing.T) {
@@ -64,18 +67,33 @@ func TestEngineCallback(t *testing.T) {
 
 	eng, _ := NewEngine(client, "model", tmpDir, &logger.NoOpLogger{}, config.DefaultLimits(), store, nil)
 
-	if eng.Enforcer.Check("rm -rf /", "dangerous") {
-		t.Error("Default policy should deny permission for rm -rf")
+	// Test 1: Default Policy (Batch) should block shell by default
+	// Batch policy sets AllowShell=false
+	req := ApprovalRequest{
+		Tool: "run_shell",
+		Args: `{"command": "rm -rf /"}`,
 	}
 
+	if eng.Enforcer.AllowTool(req) {
+		t.Error("Default policy (Batch) should deny permission for shell access")
+	}
+
+	// Test 2: Interactive Policy requiring handler
 	eng.Enforcer.Policy = policy.Interactive
 
-	if eng.Enforcer.Check("ls", "listing") {
-		t.Error("Default interaction handler should deny permission when in interactive mode")
+	// No handler set yet -> should fail safely
+	eng.Enforcer.OnApproval = nil
+	reqInteractive := ApprovalRequest{
+		Tool: "run_shell",
+		Args: `{"command": "ls"}`,
+	}
+	if eng.Enforcer.AllowTool(reqInteractive) {
+		t.Error("Should deny permission when interactive handler is missing")
 	}
 
-	eng.Enforcer.OnApproval = func(c, r string) bool { return true }
-	if !eng.Enforcer.Check("ls", "listing") {
+	// Test 3: Handler set -> should use return value
+	eng.Enforcer.OnApproval = func(r ApprovalRequest) bool { return true }
+	if !eng.Enforcer.AllowTool(reqInteractive) {
 		t.Error("Overridden callback should allow permission")
 	}
 }

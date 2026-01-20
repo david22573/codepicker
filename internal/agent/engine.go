@@ -63,19 +63,12 @@ func NewEngine(
 		Worker:   workerRunner,
 	}
 
-	registry := tools.NewRegistry(srcRoot, cfg)
-	initialTools := registry.GetImplementation(tools.SetStandard)
+	enforcer := NewPolicyEnforcer(policy.Batch, log, sentinel)
 
-	enforcer := NewPolicyEnforcer(policy.Batch, log)
-	for _, t := range initialTools {
-		if shellTool, ok := t.(*tools.RunShellTool); ok {
-			shellTool.OnApproval = enforcer.Check
-		}
-	}
+	// Initialize Executor with empty tools; rebuildTools will populate it
+	executor := NewToolExecutor(nil, runtimeCtx, enforcer)
 
-	executor := NewToolExecutor(initialTools, runtimeCtx)
-
-	return &Engine{
+	e := &Engine{
 		Client:       client,
 		Model:        model,
 		SystemPrompt: prompts.Supervisor,
@@ -87,10 +80,38 @@ func NewEngine(
 		CostTracker:  costTracker,
 		Logger:       log,
 		Limits:       limits,
-	}, nil
+	}
+
+	// [3.1] Initial Tool Build
+	e.rebuildTools(tools.SetStandard)
+
+	return e, nil
 }
 
-// SetPolicy updates the enforcement policy and refreshes the toolset
+// [3.1] Extract tool rebuild logic
+func (e *Engine) rebuildTools(toolSet tools.ToolSet) {
+	srcRoot := "."
+	if overlay, ok := e.Executor.RuntimeContext.FS.(*vfs.OverlayFS); ok {
+		srcRoot = overlay.SrcRoot
+	}
+
+	registry := tools.NewRegistry(srcRoot, e.Config)
+	newTools := registry.GetImplementation(toolSet)
+
+	// Clear existing tools map
+	e.Executor.Tools = make(map[string]tools.Tool)
+
+	for _, t := range newTools {
+		// 1. Register with Executor
+		e.Executor.Tools[t.Name()] = t
+
+		// 2. Register with Enforcer (for Capability checks)
+		e.Enforcer.RegisterTool(t)
+	}
+
+	e.Logger.Debug(fmt.Sprintf("Tools rebuilt. Set: %s. Count: %d", toolSet, len(newTools)))
+}
+
 func (e *Engine) SetPolicy(p policy.ExecutionPolicy) {
 	e.Logger.Debug(fmt.Sprintf("Engine policy set to: %s (Mode: %s)", p.Name, p.Mode))
 
@@ -98,12 +119,6 @@ func (e *Engine) SetPolicy(p policy.ExecutionPolicy) {
 	if p.Mode == policy.LevelInteractive {
 		e.Enforcer.SetInteractionHandler(DefaultCLIInteraction)
 	}
-
-	srcRoot := "."
-	if overlay, ok := e.Executor.RuntimeContext.FS.(*vfs.OverlayFS); ok {
-		srcRoot = overlay.SrcRoot
-	}
-	registry := tools.NewRegistry(srcRoot, e.Config)
 
 	var toolSet tools.ToolSet
 	switch p.Name {
@@ -115,21 +130,13 @@ func (e *Engine) SetPolicy(p policy.ExecutionPolicy) {
 		toolSet = tools.SetAdmin
 	}
 
-	newTools := registry.GetImplementation(toolSet)
-
-	for _, t := range newTools {
-		if shellTool, ok := t.(*tools.RunShellTool); ok {
-			shellTool.OnApproval = e.Enforcer.Check
-		}
-	}
-
-	e.Executor.Tools = make(map[string]tools.Tool)
-	for _, t := range newTools {
-		e.Executor.Tools[t.Name()] = t
-	}
+	// [3.1] Use centralized logic
+	e.rebuildTools(toolSet)
 }
 
+// ... Run() method remains unchanged ...
 func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openrouter.ChatMessage)) (string, error) {
+	// (See previous Engine.Run implementation - no changes needed here for this phase)
 	ctx, cancel := context.WithTimeout(ctx, e.Limits.AgentTimeout)
 	defer cancel()
 

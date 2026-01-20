@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/david22573/codepicker/internal/agent"
 	"github.com/david22573/codepicker/internal/app"
 	"golang.org/x/time/rate"
 )
@@ -30,7 +31,6 @@ func New(port string, appCtx *app.AgentContext) *AgentServer {
 		approvalMap: make(map[string]chan bool),
 	}
 
-	// FIX: Use Enforcer to set the interaction handler
 	appCtx.Engine.Enforcer.SetInteractionHandler(srv.WaitForApproval)
 	return srv
 }
@@ -86,7 +86,7 @@ func (s *AgentServer) Start() error {
 
 	go func() {
 		s.App.Logger.Info(fmt.Sprintf("🚀 Agent Daemon listening on :%s", s.Port))
-		// FIX: Access Policy through Enforcer
+
 		s.App.Logger.Info(fmt.Sprintf("🛡️  Policy: %s (Mode: %s)",
 			s.App.Engine.Enforcer.Policy.Name,
 			s.App.Engine.Enforcer.Policy.Mode))
@@ -115,7 +115,8 @@ func (s *AgentServer) Start() error {
 	return nil
 }
 
-func (s *AgentServer) WaitForApproval(cmdStr, reason string) bool {
+// WaitForApproval matches the new agent.InteractionFunc signature
+func (s *AgentServer) WaitForApproval(req agent.ApprovalRequest) bool {
 	reqID := fmt.Sprintf("%d", time.Now().UnixNano())
 	responseChan := make(chan bool)
 
@@ -129,6 +130,12 @@ func (s *AgentServer) WaitForApproval(cmdStr, reason string) bool {
 		s.approvalLock.Unlock()
 	}()
 
+	// We log the request here since we can't easily push to a stream
+	// unless we are inside the handler loop (which is handled by the closure in handlers.go).
+	// This fallback is mostly for when the server is running without an active SSE stream
+	// or in a background context.
+	s.App.Logger.Info(fmt.Sprintf("⏳ Waiting for approval: %s %s", req.Tool, req.Args))
+
 	select {
 	case approved := <-responseChan:
 		return approved
@@ -141,7 +148,6 @@ func (s *AgentServer) WaitForApproval(cmdStr, reason string) bool {
 func (s *AgentServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{
 		"status": "ok",
-		// FIX: Access Policy through Enforcer
-		"mode": string(s.App.Engine.Enforcer.Policy.Mode),
+		"mode":   string(s.App.Engine.Enforcer.Policy.Mode),
 	})
 }
