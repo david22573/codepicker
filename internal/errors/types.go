@@ -4,7 +4,7 @@ import (
 	"fmt"
 )
 
-// CodePickerError is a structured error designed for JSON responses
+// CodePickerError is the standard error type for the application
 type CodePickerError struct {
 	Code      string                 `json:"code"`
 	Message   string                 `json:"message"`
@@ -15,16 +15,16 @@ type CodePickerError struct {
 
 func (e *CodePickerError) Error() string {
 	if e.Err != nil {
-		return fmt.Sprintf("%s: %s: %v", e.Operation, e.Message, e.Err)
+		return fmt.Sprintf("[%s] %s: %s: %v", e.Code, e.Operation, e.Message, e.Err)
 	}
-	return fmt.Sprintf("%s: %s", e.Operation, e.Message)
+	return fmt.Sprintf("[%s] %s: %s", e.Code, e.Operation, e.Message)
 }
 
 func (e *CodePickerError) Unwrap() error {
 	return e.Err
 }
 
-// Helper Constructors
+// Generic Constructors
 
 func New(code, msg, op string, err error) *CodePickerError {
 	return &CodePickerError{
@@ -35,12 +35,41 @@ func New(code, msg, op string, err error) *CodePickerError {
 	}
 }
 
+func NewInternalError(op string, err error) *CodePickerError {
+	return &CodePickerError{
+		Code:      "INTERNAL_ERROR",
+		Message:   "An unexpected internal error occurred",
+		Operation: op,
+		Err:       err,
+	}
+}
+
+// Domain Specific Constructors
+
 func NewValidationError(field, msg, value string) *CodePickerError {
 	return &CodePickerError{
 		Code:      "VALIDATION_ERROR",
-		Message:   fmt.Sprintf("%s: %s", field, msg),
+		Message:   fmt.Sprintf("Invalid %s: %s", field, msg),
 		Operation: "validation",
 		Metadata:  map[string]interface{}{"value": value},
+	}
+}
+
+func NewConfigError(msg string, err error) *CodePickerError {
+	return &CodePickerError{
+		Code:      "CONFIG_ERROR",
+		Message:   msg,
+		Operation: "config.Load",
+		Err:       err,
+	}
+}
+
+func NewLLMError(op string, err error) *CodePickerError {
+	return &CodePickerError{
+		Code:      "LLM_ERROR",
+		Message:   "AI Provider request failed",
+		Operation: op,
+		Err:       err,
 	}
 }
 
@@ -50,15 +79,6 @@ func NewScanError(path string, err error) *CodePickerError {
 		Message:   "Failed to scan file or directory",
 		Operation: "scanner.Scan",
 		Metadata:  map[string]interface{}{"path": path},
-		Err:       err,
-	}
-}
-
-func NewInternalError(op string, err error) *CodePickerError {
-	return &CodePickerError{
-		Code:      "INTERNAL_ERROR",
-		Message:   "An unexpected internal error occurred",
-		Operation: op,
 		Err:       err,
 	}
 }

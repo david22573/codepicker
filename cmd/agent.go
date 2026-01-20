@@ -11,14 +11,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// agentCmd represents the base command for autonomous features
 var agentCmd = &cobra.Command{
 	Use:   "agent",
 	Short: "Autonomous agent commands",
 	Long:  `Group of commands where the AI agent acts autonomously to plan, execute, or improve code.`,
 }
 
-// runCmd replaces the old 'do' command
 var runCmd = &cobra.Command{
 	Use:   "run [task]",
 	Short: "Execute an autonomous task (Interactive Mode)",
@@ -29,7 +27,6 @@ var runCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		task := strings.Join(args, " ")
 
-		// Reuse app.NewAgentContext for basic config/db/client setup
 		agentCtx, err := app.NewAgentContext(cmd.Context(), app.ContextOptions{
 			SrcDir:   srcDir,
 			LogLevel: 1,
@@ -44,30 +41,20 @@ var runCmd = &cobra.Command{
 
 		agentCtx.Logger.Info("🤖 Initializing Multi-Agent Orchestrator...")
 
-		// Initialize the new Orchestrator
-		// We extract the client and store from the initialized agentCtx
 		orch, err := agents.NewOrchestrator(
-			openrouter.NewClient(fmt.Sprintf("%s", agentCtx.Config.AI.Model)), // Re-init client to be safe or expose it
+			openrouter.NewClient(fmt.Sprintf("%s", agentCtx.Config.GetModel())),
 			srcDir,
 			agentCtx.Logger,
 			agentCtx.Store,
+			agentCtx.Config, // Pass Explicit Config
 		)
-		// Correction: The app.NewAgentContext doesn't expose Client publicly in struct usually,
-		// so we might need to rely on the environment variable inside NewOrchestrator
-		// or update AgentContext to expose it.
-		// For now, let's assume we can grab the API key from env inside NewOrchestrator
-		// (which we passed in previous step).
-
-		// ACTUALLY: Let's pass the client from agentCtx.Engine.Client if available
-		// or create a fresh one to avoid breaking changes.
 
 		if err != nil {
 			return fmt.Errorf("failed to start orchestrator: %w", err)
 		}
 
-		// Inject the client from the context if accessible, otherwise NewOrchestrator creates it
 		orch.Self.Client = agentCtx.Engine.Client
-		// Propagate to team
+
 		for _, agent := range orch.Team {
 			agent.Client = agentCtx.Engine.Client
 		}
@@ -91,6 +78,4 @@ func init() {
 	rootCmd.AddCommand(agentCmd)
 	agentCmd.AddCommand(runCmd)
 
-	// Future: agentCmd.AddCommand(planCmd)
-	// Future: agentCmd.AddCommand(improveCmd)
 }

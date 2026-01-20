@@ -25,7 +25,6 @@ type OutputStrategy interface {
 	Name() string
 }
 
-// ConcatStrategy combines all files into one document.
 type ConcatStrategy struct {
 	OutputPath    string
 	absOutputPath string
@@ -71,9 +70,8 @@ func (c *ConcatStrategy) ShouldSkip(path string) bool {
 	return absCandidate == c.absOutputPath
 }
 
-// Write processes a single file. It is now thread-safe.
 func (c *ConcatStrategy) Write(absPath, relPath string) error {
-	// 1. Heavy lifting (IO + CPU) happens BEFORE the lock
+
 	f, err := os.Open(absPath)
 	if err != nil {
 		return err
@@ -108,7 +106,6 @@ func (c *ConcatStrategy) Write(absPath, relPath string) error {
 		return nil
 	}
 
-	// Prepare content in memory buffer first
 	var contentBuffer bytes.Buffer
 
 	ext := strings.TrimPrefix(filepath.Ext(relPath), ".")
@@ -119,7 +116,6 @@ func (c *ConcatStrategy) Write(absPath, relPath string) error {
 	fmt.Fprintf(&contentBuffer, "## File: %s\n", relPath)
 	fmt.Fprintf(&contentBuffer, "```%s\n", ext)
 
-	// Read and Minify (CPU intensive work)
 	rawContent, err := io.ReadAll(io.LimitReader(f, constants.MaxFileSize))
 	if err != nil {
 		return err
@@ -147,7 +143,6 @@ func (c *ConcatStrategy) Write(absPath, relPath string) error {
 	contentBuffer.Write(bytesToWrite)
 	contentBuffer.Write([]byte("\n```\n\n"))
 
-	// 2. Critical Section: Write to shared file handle
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -170,10 +165,9 @@ func (c *ConcatStrategy) Close() error {
 	return nil
 }
 
-// CopyStrategy writes to separate files, so it is inherently thread-safe
-// as long as filenames are unique (which the scanner guarantees).
 type CopyStrategy struct {
 	OutputDir string
+	mu        sync.Mutex // Added Mutex
 }
 
 func NewCopyStrategy(dir string) *CopyStrategy {
@@ -195,6 +189,9 @@ func (c *CopyStrategy) ShouldSkip(path string) bool {
 }
 
 func (c *CopyStrategy) Write(absPath, relPath string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	targetPath := filepath.Join(c.OutputDir, relPath)
 
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
@@ -270,9 +267,8 @@ func (t *TreeStrategy) Write(absPath, relPath string) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	// Print to stdout immediately (might interleave slightly but acceptable for progress)
 	fmt.Print(line)
-	// Buffer writes must be atomic
+
 	t.buffer.WriteString(line)
 	return nil
 }

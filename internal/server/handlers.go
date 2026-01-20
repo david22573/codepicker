@@ -28,14 +28,25 @@ func (s *AgentServer) handleAgentTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	eventStream := make(chan string)
-	originalCallback := s.App.Engine.ApprovalCallback
+
+	// FIX: Save the original callback from Enforcer
+	originalCallback := s.App.Engine.Enforcer.OnApproval
 
 	reqID := fmt.Sprintf("%s", r.Context().Value("request_id"))
 	if reqID == "%!s(<nil>)" || reqID == "" {
 		reqID = "req_" + taskQuery[:3]
 	}
 
-	s.App.Engine.ApprovalCallback = func(cmdStr, reason string) bool {
+	// FIX: Set the new callback on Enforcer
+	s.App.Engine.Enforcer.OnApproval = func(cmdStr, reason string) bool {
+
+		select {
+		case <-r.Context().Done():
+			s.App.Logger.Warn("Client disconnected before approval request")
+			return false
+		default:
+		}
+
 		ch := make(chan bool, 1)
 
 		s.approvalLock.Lock()
@@ -46,6 +57,7 @@ func (s *AgentServer) handleAgentTask(w http.ResponseWriter, r *http.Request) {
 			s.approvalLock.Lock()
 			delete(s.approvalMap, reqID)
 			s.approvalLock.Unlock()
+			close(ch)
 		}()
 
 		jsonMsg, _ := json.Marshal(map[string]interface{}{
@@ -58,6 +70,7 @@ func (s *AgentServer) handleAgentTask(w http.ResponseWriter, r *http.Request) {
 		select {
 		case eventStream <- string(jsonMsg):
 		case <-r.Context().Done():
+			s.App.Logger.Warn("Client disconnected during approval dispatch")
 			return false
 		case <-time.After(5 * time.Second):
 			s.App.Logger.Warn("Timed out writing approval request to stream")
@@ -68,6 +81,7 @@ func (s *AgentServer) handleAgentTask(w http.ResponseWriter, r *http.Request) {
 		case approved := <-ch:
 			return approved
 		case <-r.Context().Done():
+			s.App.Logger.Warn(fmt.Sprintf("Client disconnected while waiting for approval on %s", reqID))
 			return false
 		case <-time.After(60 * time.Second):
 			s.App.Logger.Warn(fmt.Sprintf("Approval timed out for %s", reqID))
@@ -75,23 +89,32 @@ func (s *AgentServer) handleAgentTask(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	defer func() { s.App.Engine.ApprovalCallback = originalCallback }()
+	// FIX: Restore original callback on Enforcer
+	defer func() { s.App.Engine.Enforcer.OnApproval = originalCallback }()
 
 	go func() {
 		defer close(eventStream)
 
 		updateFn := func(msg openrouter.ChatMessage) {
-			jsonMsg, _ := json.Marshal(map[string]interface{}{
-				"type":    "thought",
-				"role":    msg.Role,
-				"content": msg.Content,
-			})
-			eventStream <- string(jsonMsg)
+			select {
+			case <-r.Context().Done():
+				return
+			default:
+				jsonMsg, _ := json.Marshal(map[string]interface{}{
+					"type":    "thought",
+					"role":    msg.Role,
+					"content": msg.Content,
+				})
+				eventStream <- string(jsonMsg)
+			}
 		}
 
 		result, err := s.App.Engine.Run(r.Context(), taskQuery, updateFn)
 
 		if err != nil {
+			if r.Context().Err() != nil {
+				return
+			}
 			errJSON, _ := json.Marshal(map[string]string{"type": "error", "msg": err.Error()})
 			eventStream <- string(errJSON)
 		} else {
@@ -100,9 +123,19 @@ func (s *AgentServer) handleAgentTask(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	for event := range eventStream {
-		fmt.Fprintf(w, "data: %s\n\n", event)
-		flusher.Flush()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case event, ok := <-eventStream:
+			if !ok {
+				return
+			}
+			if _, err := fmt.Fprintf(w, "data: %s\n\n", event); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
 	}
 }
 

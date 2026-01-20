@@ -2,46 +2,27 @@ package agent
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 
 	"github.com/david22573/codepicker/internal/database"
-	"github.com/david22573/codepicker/internal/shadow" // Import shadow
+	"github.com/david22573/codepicker/internal/vfs"
 )
 
 type WorkingMemory struct {
-	SrcRoot string
-	Store   *database.Store
-	Shadow  *shadow.Manager // Add Shadow Manager
+	Store *database.Store
+	FS    vfs.VirtualFileSystem
 }
 
-// Update constructor to accept shadow manager
-func NewMemory(srcRoot string, store *database.Store, sm *shadow.Manager) *WorkingMemory {
+func NewMemory(store *database.Store, fs vfs.VirtualFileSystem) *WorkingMemory {
 	return &WorkingMemory{
-		SrcRoot: srcRoot,
-		Store:   store,
-		Shadow:  sm,
+		Store: store,
+		FS:    fs,
 	}
 }
 
 func (m *WorkingMemory) Add(relPath string) error {
-	// 1. Try reading from Shadow Directory first (Overlay FS)
-	// This allows the agent to "see" files it just created in previous steps
-	var content []byte
-	var err error
-
-	shadowPath := m.Shadow.GetShadowPath(relPath)
-	if _, statErr := os.Stat(shadowPath); statErr == nil {
-		// File exists in shadow, use this version
-		content, err = os.ReadFile(shadowPath)
-	} else {
-		// 2. Fallback to Source Directory
-		fullPath := filepath.Join(m.SrcRoot, relPath)
-		content, err = os.ReadFile(fullPath)
-	}
-
+	content, err := m.FS.ReadFile(relPath)
 	if err != nil {
-		return fmt.Errorf("failed to read file (checked shadow & source): %w", err)
+		return fmt.Errorf("failed to read file: %w", err)
 	}
 
 	return m.Store.UpdateWorkingMemory(relPath, string(content))
@@ -68,6 +49,5 @@ func (m *WorkingMemory) FormatContext() string {
 }
 
 func (m *WorkingMemory) AddNote(content string) error {
-	// We treat notes as system messages in the history
 	return m.Store.AddMessage("system", content)
 }

@@ -7,15 +7,23 @@ const (
 	AppName = "codepicker"
 
 	// API Defaults
-	// UPDATED: Switched to DeepSeek V3 for best price/performance ratio
-	DefaultModel    = "deepseek/deepseek-chat"
-	MinAPIKeyLength = 10
-	MaxRetries      = 3
-	RetryDelay      = 1 * time.Second
+	// UPDATED: Centralized model definitions to prevent drift
+	DefaultModel       = "deepseek/deepseek-chat"
+	DefaultWorkerModel = "deepseek/deepseek-chat" // Cheaper model for bulk tasks
+	MinAPIKeyLength    = 10
+	MaxRetries         = 3
+	RetryDelay         = 1 * time.Second
 
 	// File System limits
+	// UPDATED: Centralized file limits
+	MaxShadowSize  = 1024 * 1024 * 1   // 1MB
 	MaxFileSize    = 100 * 1024 * 1024 // 100MB
 	DefaultOutPath = "codepicker_context.md"
+
+	// Timeouts
+	// UPDATED: Added configurable timeouts
+	DefaultApprovalTimeout = 60 * time.Second
+	DefaultAgentTimeout    = 5 * time.Minute
 
 	// Output Formatting
 	ContextHeader = "# Codebase Context Dump\n"

@@ -6,13 +6,13 @@ import (
 	"github.com/david22573/codepicker/internal/config"
 	"github.com/david22573/codepicker/internal/database"
 	"github.com/david22573/codepicker/internal/logger"
+	"github.com/david22573/codepicker/internal/policy"
 	"github.com/david22573/codepicker/pkg/openrouter"
 )
 
 func TestNewEngine(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	// Initialize temp database for test
 	store, err := database.New(tmpDir)
 	if err != nil {
 		t.Fatalf("Failed to create test db: %v", err)
@@ -23,7 +23,8 @@ func TestNewEngine(t *testing.T) {
 	limits := config.DefaultLimits()
 	log := &logger.NoOpLogger{}
 
-	engine, err := NewEngine(client, "test-model", tmpDir, log, limits, store)
+	// FIX: Pass nil for config
+	engine, err := NewEngine(client, "test-model", tmpDir, log, limits, store, nil)
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
 	}
@@ -40,6 +41,10 @@ func TestNewEngine(t *testing.T) {
 		t.Error("Engine shadow manager not initialized")
 	}
 
+	if engine.FS == nil {
+		t.Error("Engine virtual filesystem not initialized")
+	}
+
 	if engine.Sentinel == nil {
 		t.Error("Engine sentinel not initialized")
 	}
@@ -52,14 +57,21 @@ func TestEngineCallback(t *testing.T) {
 	defer store.Close()
 
 	client := openrouter.NewClient("key")
-	eng, _ := NewEngine(client, "model", tmpDir, &logger.NoOpLogger{}, config.DefaultLimits(), store)
+	// FIX: Pass nil for config
+	eng, _ := NewEngine(client, "model", tmpDir, &logger.NoOpLogger{}, config.DefaultLimits(), store, nil)
 
-	if eng.ApprovalCallback("rm -rf /", "dangerous") {
-		t.Error("Default callback should deny permission")
+	if eng.Enforcer.Check("rm -rf /", "dangerous") {
+		t.Error("Default policy should deny permission for rm -rf")
 	}
 
-	eng.ApprovalCallback = func(c, r string) bool { return true }
-	if !eng.ApprovalCallback("ls", "listing") {
+	eng.Enforcer.Policy = policy.Interactive
+
+	if eng.Enforcer.Check("ls", "listing") {
+		t.Error("Default interaction handler should deny permission when in interactive mode")
+	}
+
+	eng.Enforcer.OnApproval = func(c, r string) bool { return true }
+	if !eng.Enforcer.Check("ls", "listing") {
 		t.Error("Overridden callback should allow permission")
 	}
 }

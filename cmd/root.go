@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/david22573/codepicker/internal/logger"
+	"github.com/david22573/codepicker/internal/ui"
 	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
 )
@@ -20,6 +21,7 @@ var (
 )
 
 var appLogger logger.Logger
+var userUI ui.UI
 
 var rootCmd = &cobra.Command{
 	Use:   "codepicker",
@@ -40,6 +42,7 @@ var rootCmd = &cobra.Command{
 
 func Execute() {
 	appLogger = logger.NewStandardLogger(1)
+	userUI = ui.NewConsoleUI()
 	if err := rootCmd.Execute(); err != nil {
 		appLogger.Error(fmt.Sprintf("Fatal error: %v", err))
 		os.Exit(1)

@@ -14,55 +14,17 @@ import (
 	_ "modernc.org/sqlite" // Pure Go SQLite driver
 )
 
-const schema = `
-CREATE TABLE IF NOT EXISTS history (
-	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	role TEXT NOT NULL,
-	content TEXT NOT NULL,
-	token_count INTEGER NOT NULL,
-	created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS memory_files (
-	path TEXT PRIMARY KEY,
-	content TEXT NOT NULL,
-	token_count INTEGER NOT NULL,
-	last_accessed DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS jobs (
-    id TEXT PRIMARY KEY,
-    task TEXT NOT NULL,
-    priority INTEGER DEFAULT 0,
-    status TEXT NOT NULL,
-    plan_json TEXT,
-    result TEXT,
-    error TEXT,
-    cost_usd REAL DEFAULT 0.0,
-    tokens_used INTEGER DEFAULT 0,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    started_at DATETIME,
-    completed_at DATETIME
-);
-
-CREATE TABLE IF NOT EXISTS plans (
-    id TEXT PRIMARY KEY,
-    task TEXT NOT NULL,
-    steps_json TEXT NOT NULL,
-    estimated_cost REAL,
-    estimated_turns INTEGER,
-    actual_cost REAL,
-    actual_turns INTEGER,
-    status TEXT DEFAULT 'created',
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
-CREATE INDEX IF NOT EXISTS idx_jobs_priority ON jobs(priority DESC, created_at ASC);
-`
-
 type Store struct {
 	db *sql.DB
+}
+
+// PlanRecord represents a saved plan in the database
+type PlanRecord struct {
+	ID            string
+	Task          string
+	StepsJSON     string
+	EstimatedCost float64
+	Status        string
 }
 
 func New(storageDir string) (*Store, error) {
@@ -76,9 +38,10 @@ func New(storageDir string) (*Store, error) {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
-	if _, err := db.Exec(schema); err != nil {
+	// CHANGED: Use the migration system instead of raw SQL execution
+	if err := Migrate(db); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("failed to init schema: %w", err)
+		return nil, fmt.Errorf("database migration failed: %w", err)
 	}
 
 	return &Store{db: db}, nil
@@ -88,7 +51,12 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-// History & Memory Methods (Existing)
+func (s *Store) DB() *sql.DB {
+	return s.db
+}
+
+// --- History Methods ---
+
 func (s *Store) AddMessage(role string, content string) error {
 	tokens := tokenizer.CountTokens(content)
 	_, err := s.db.Exec(
@@ -126,6 +94,7 @@ func (s *Store) GetContextAwareHistory(tokenBudget int) ([]openrouter.ChatMessag
 		currentTokens += tokens
 	}
 
+	// Reverse back to chronological order
 	messages := make([]openrouter.ChatMessage, len(reversedMessages))
 	for i, msg := range reversedMessages {
 		messages[len(reversedMessages)-1-i] = msg
@@ -138,6 +107,8 @@ func (s *Store) ClearHistory() error {
 	_, err := s.db.Exec("DELETE FROM history")
 	return err
 }
+
+// --- Working Memory Methods ---
 
 func (s *Store) UpdateWorkingMemory(path string, content string) error {
 	tokens := tokenizer.CountTokens(content)
@@ -205,15 +176,7 @@ func (s *Store) ListMemoryFiles() ([]string, error) {
 	return files, nil
 }
 
-// Plan Methods (New for Phase 1)
-
-type PlanRecord struct {
-	ID            string
-	Task          string
-	StepsJSON     string
-	EstimatedCost float64
-	Status        string
-}
+// --- Planning Methods ---
 
 func (s *Store) SavePlan(id, task string, steps interface{}, estCost float64) error {
 	stepsJSON, err := json.Marshal(steps)
@@ -245,8 +208,4 @@ func (s *Store) GetPlan(id string) (*PlanRecord, error) {
 func (s *Store) UpdatePlanStatus(id, status string) error {
 	_, err := s.db.Exec("UPDATE plans SET status = ? WHERE id = ?", status, id)
 	return err
-}
-
-func (s *Store) DB() *sql.DB {
-	return s.db
 }

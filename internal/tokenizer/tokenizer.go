@@ -1,16 +1,20 @@
 package tokenizer
 
 import (
+	"fmt"
+	"os"
+
 	"github.com/pkoukk/tiktoken-go"
 )
 
-// CountTokens returns the exact number of tokens in the text using GPT-4 encoding.
-// It falls back to a simple character count estimation if initialization fails.
+// CountTokens returns the number of tokens in the text string using cl100k_base.
+// If the tokenizer fails, it logs a warning to stderr and returns a conservative estimate.
 func CountTokens(text string) int {
-	// "cl100k_base" is the encoding for GPT-4 and GPT-3.5-Turbo
 	tkm, err := tiktoken.GetEncoding("cl100k_base")
 	if err != nil {
-		// Fallback: Estimate 4 characters per token
+		// Log explicit warning so the user knows metrics might be off
+		fmt.Fprintf(os.Stderr, "⚠️  Tokenizer warning: %v. Using fallback estimation.\n", err)
+		// Fallback: 4 chars per token is standard estimation for English text
 		return len(text) / 4
 	}
 
@@ -18,9 +22,8 @@ func CountTokens(text string) int {
 	return len(tokenized)
 }
 
-// EstimateCost calculates the approximate cost in USD (assuming generic blended rate).
-// This is purely indicative.
+// EstimateCost calculates USD cost based on DeepSeek/OpenAI pricing
 func EstimateCost(tokens int) float64 {
-	// $0.50 per 1M tokens (approximate average for input)
+	// $0.50 per 1M tokens (Approximate blend of input/output for cheap models)
 	return float64(tokens) / 1_000_000 * 0.50
 }

@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"sync"
 
 	"github.com/david22573/codepicker/internal/constants"
 	"gopkg.in/yaml.v3"
@@ -23,7 +24,7 @@ type ConfigFile struct {
 
 type AIConfig struct {
 	Model       string  `yaml:"model"`
-	WorkerModel string  `yaml:"worker_model"` // NEW: For Supervisor-Worker pattern
+	WorkerModel string  `yaml:"worker_model"`
 	Temperature float32 `yaml:"temperature"`
 }
 
@@ -39,34 +40,55 @@ type CustomTool struct {
 	Arguments   string `yaml:"args_schema"` // JSON schema for arguments
 }
 
-func LoadConfigFile(path string) (*ConfigFile, error) {
-	if path == "" {
-		for _, loc := range []string{".codepicker.yml", ".codepicker.yaml", "codepicker.yml"} {
-			if _, err := os.Stat(loc); err == nil {
-				path = loc
-				break
+// Global singleton instance
+var (
+	globalConfig *ConfigFile
+	configOnce   sync.Once
+	configErr    error
+)
+
+// GetOrLoadConfig ensures the config is loaded exactly once.
+// If path is empty, it searches default locations.
+func GetOrLoadConfig(path string) (*ConfigFile, error) {
+	configOnce.Do(func() {
+		// 1. Determine Path
+		if path == "" {
+			// Look in standard locations
+			for _, loc := range []string{".codepicker.yml", ".codepicker.yaml", "codepicker.yml"} {
+				if _, err := os.Stat(loc); err == nil {
+					path = loc
+					break
+				}
 			}
 		}
+
+		// 2. If still empty, return default (nil) without error
 		if path == "" {
-			return nil, nil
+			return
 		}
-	}
 
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read config file: %w", err)
-	}
+		// 3. Read File
+		data, err := os.ReadFile(path)
+		if err != nil {
+			configErr = fmt.Errorf("failed to read config file: %w", err)
+			return
+		}
 
-	var cfg ConfigFile
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("invalid YAML format: %w", err)
-	}
+		// 4. Parse
+		var cfg ConfigFile
+		if err := yaml.Unmarshal(data, &cfg); err != nil {
+			configErr = fmt.Errorf("invalid YAML format in %s: %w", path, err)
+			return
+		}
+		globalConfig = &cfg
+	})
 
-	return &cfg, nil
+	return globalConfig, configErr
 }
 
+// Helper method to get model with fallback
 func (c *ConfigFile) GetModel() string {
-	if c.AI.Model != "" {
+	if c != nil && c.AI.Model != "" {
 		return c.AI.Model
 	}
 	return constants.DefaultModel

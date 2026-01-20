@@ -37,17 +37,27 @@ func NewManager(srcRoot string) (*Manager, error) {
 }
 
 func (m *Manager) WriteFile(relPath string, content []byte) (string, error) {
-	// Security: Prevent Directory Traversal
-	if strings.Contains(relPath, "..") {
-		return "", fmt.Errorf("invalid path: cannot escape project root")
+	// 1. Sanitize the relative path to remove dotfiles/traversal logic
+	// We treat the relPath as relative to CWD for sanitization purposes first
+	// to ensure it doesn't contain traversal characters.
+	cleanRel := filepath.Clean(relPath)
+	if strings.HasPrefix(cleanRel, "..") || strings.HasPrefix(cleanRel, "/") {
+		return "", fmt.Errorf("invalid path: must be relative")
 	}
 
-	// Security: Prevent Disk Exhaustion
+	// 2. Size Check
 	if len(content) > MaxShadowSize {
 		return "", fmt.Errorf("content exceeds max shadow file size (%d bytes)", MaxShadowSize)
 	}
 
-	shadowPath := filepath.Join(m.ShadowRoot, relPath)
+	// 3. Construct full path
+	shadowPath := filepath.Join(m.ShadowRoot, cleanRel)
+
+	// 4. Security Check: Ensure the resulting path is actually inside ShadowRoot
+	// This prevents symlink attacks or weird join behaviors
+	if !strings.HasPrefix(shadowPath, m.ShadowRoot) {
+		return "", fmt.Errorf("security violation: attempted to write outside shadow directory")
+	}
 
 	if err := os.MkdirAll(filepath.Dir(shadowPath), 0755); err != nil {
 		return "", err

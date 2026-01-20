@@ -4,147 +4,112 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/david22573/codepicker/internal/config"
 	"github.com/david22573/codepicker/internal/database"
 	"github.com/david22573/codepicker/internal/logger"
-	"github.com/david22573/codepicker/internal/policy" // Import the new policy package
+	"github.com/david22573/codepicker/internal/policy"
 	"github.com/david22573/codepicker/internal/shadow"
 	"github.com/david22573/codepicker/internal/tracking"
+	"github.com/david22573/codepicker/internal/vfs"
 	"github.com/david22573/codepicker/pkg/openrouter"
 )
 
 type Engine struct {
-	Client      *openrouter.Client
-	Model       string
-	WorkerModel string
-	Sentinel    *Sentinel
-	Shadow      *shadow.Manager
+	Client *openrouter.Client
+	Model  string
+
+	// Sub-components
+	Enforcer *PolicyEnforcer
+	Worker   *WorkerRunner
+	Executor *ToolExecutor
+	Sentinel *Sentinel
+
+	// State & Infra
 	Memory      *WorkingMemory
-	Logger      logger.Logger
-	SrcRoot     string
+	Shadow      *shadow.Manager
+	FS          vfs.VirtualFileSystem
+	CostTracker *tracking.CostTracker
 
-	// New Policy Field
-	Policy policy.ExecutionPolicy
-
-	// ApprovalCallback is now derived from Policy + User Interaction
-	ApprovalCallback func(command string, reason string) bool
-
-	CostTracker  *tracking.CostTracker
+	// Config
+	Logger       logger.Logger
 	Limits       *config.Limits
 	Config       *config.ConfigFile
 	SystemPrompt string
 }
 
-// NewEngine - simplified signature
-func NewEngine(client *openrouter.Client, model, srcRoot string, log logger.Logger, limits *config.Limits, store *database.Store) (*Engine, error) {
+func NewEngine(
+	client *openrouter.Client,
+	model, srcRoot string,
+	log logger.Logger,
+	limits *config.Limits,
+	store *database.Store,
+	cfg *config.ConfigFile, // NEW: Explicit dependency
+) (*Engine, error) {
 	shadowMgr, err := shadow.NewManager(srcRoot)
 	if err != nil {
 		return nil, err
 	}
-
-	cfg, _ := config.LoadConfigFile("")
 
 	workerModel := "deepseek/deepseek-chat"
 	if cfg != nil && cfg.AI.WorkerModel != "" {
 		workerModel = cfg.AI.WorkerModel
 	}
 
+	// 1. Infrastructure
+	fs := vfs.NewOverlayFS(srcRoot, shadowMgr)
+	memory := NewMemory(store, fs)
+	sentinel := NewSentinel(limits)
+	costTracker := tracking.NewCostTracker(limits.DailyCostLimit)
+
+	// 2. Sub-components
+	worker := NewWorkerRunner(client, workerModel, fs, log)
+
+	// Default Enforcer (Policy set later)
+	enforcer := NewPolicyEnforcer(policy.Batch, log)
+
+	executor := NewToolExecutor(memory, fs, sentinel, cfg)
+
+	// Wire Enforcer into Executor
+	executor.OnApproval = enforcer.Check
+
 	return &Engine{
-		Client:      client,
-		Model:       model,
-		WorkerModel: workerModel,
-		Sentinel:    NewSentinel(limits),
+		Client: client,
+		Model:  model,
+
+		Enforcer: enforcer,
+		Worker:   worker,
+		Executor: executor,
+		Sentinel: sentinel,
+
+		Memory:      memory,
 		Shadow:      shadowMgr,
-		Memory:      NewMemory(srcRoot, store, shadowMgr),
-		Logger:      log,
-		SrcRoot:     srcRoot,
-		// Default secure callback (always deny until policy set)
-		ApprovalCallback: func(c, r string) bool { return false },
-		CostTracker:      tracking.NewCostTracker(limits.DailyCostLimit),
-		Limits:           limits,
-		Config:           cfg,
-		SystemPrompt:     DefaultSupervisorPrompt,
-		// Default Safe Policy
-		Policy: policy.Batch,
+		FS:          fs,
+		CostTracker: costTracker,
+
+		Logger:       log,
+		Limits:       limits,
+		Config:       cfg,
+		SystemPrompt: DefaultSupervisorPrompt,
 	}, nil
 }
 
 func (e *Engine) SetPolicy(p policy.ExecutionPolicy) {
-	e.Policy = p
 	e.Logger.Debug(fmt.Sprintf("Engine policy set to: %s (Mode: %s)", p.Name, p.Mode))
 
-	// Update approval logic based on policy
-	e.ApprovalCallback = func(command, reason string) bool {
-		// 1. Validate against policy rules first
-		if err := e.Policy.ValidateCommand(command); err != nil {
-			e.Logger.Warn(fmt.Sprintf("Policy Denied: %v", err))
-			return false
-		}
+	// Update the Enforcer
+	e.Enforcer.Policy = p
 
-		// 2. If Interactive, ask the human
-		if e.Policy.Mode == policy.LevelInteractive {
-			fmt.Printf("\n⚠️  Agent wants to run: %s\n   Reason: %s\n   Allow? [Y/n]: ", command, reason)
-			var resp string
-			fmt.Scanln(&resp)
-			return resp == "" || resp == "y" || resp == "Y"
-		}
-
-		// 3. If Auto/Batch, and validation passed, allow it
-		return true
+	// If interactive, use CLI default.
+	// (Server mode can override this by calling e.Enforcer.SetInteractionHandler directly)
+	if p.Mode == policy.LevelInteractive {
+		e.Enforcer.SetInteractionHandler(DefaultCLIInteraction)
 	}
-}
-
-func (e *Engine) runWorker(ctx context.Context, instruction string, files []string) (string, error) {
-	var fileContext strings.Builder
-
-	for _, f := range files {
-		f = strings.TrimSpace(f)
-		if f == "" {
-			continue
-		}
-		path := filepath.Join(e.SrcRoot, f)
-		content, err := os.ReadFile(path)
-		if err != nil {
-			e.Logger.Warn(fmt.Sprintf("Worker could not read file %s: %v", f, err))
-			continue
-		}
-		fileContext.WriteString(fmt.Sprintf("\n--- FILE: %s ---\n%s\n", f, string(content)))
-	}
-
-	workerPrompt := fmt.Sprintf(
-		"You are a Worker Agent. You perform concrete tasks efficiently.\n"+
-			"CONTEXT:\n%s\n"+
-			"INSTRUCTION: %s\n"+
-			"Output ONLY the result or code change. Do not chatter.",
-		fileContext.String(), instruction,
-	)
-
-	req := openrouter.ChatCompletionRequest{
-		Model: e.WorkerModel,
-		Messages: []openrouter.ChatMessage{
-			{Role: "system", Content: workerPrompt},
-			{Role: "user", Content: "Execute the instruction."},
-		},
-	}
-
-	resp, err := e.Client.CreateChatCompletion(ctx, req)
-	if err != nil {
-		return "", err
-	}
-
-	if len(resp.Choices) > 0 && resp.Choices[0].Message != nil {
-		return fmt.Sprintf("%v", resp.Choices[0].Message.Content), nil
-	}
-	return "No output from worker", nil
 }
 
 func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openrouter.ChatMessage)) (string, error) {
-
 	ctx, cancel := context.WithTimeout(ctx, e.Limits.AgentTimeout)
 	defer cancel()
 
@@ -166,7 +131,6 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 		}
 
 		currentContext := e.Memory.FormatContext()
-
 		fullSystemMsg := e.SystemPrompt + "\n" + currentContext
 
 		requestMessages := append([]openrouter.ChatMessage{{Role: "system", Content: fullSystemMsg}}, messages...)
@@ -177,7 +141,7 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 			Tools:    activeTools,
 		}
 
-		e.Logger.Info(fmt.Sprintf("Agent thinking (Turn %d/%d)...", i+1, e.Limits.AgentMaxTurns))
+		e.Logger.Debug(fmt.Sprintf("Agent thinking (Turn %d/%d)...", i+1, e.Limits.AgentMaxTurns))
 
 		cost, _ := e.CostTracker.GetStats()
 		if cost >= e.Limits.DailyCostLimit {
@@ -205,113 +169,55 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 			updateHistory(*msg)
 		}
 
+		// 1. Check if this is the final answer (no tool calls)
 		if len(msg.ToolCalls) == 0 {
 			return fmt.Sprintf("%v", msg.Content), nil
 		}
 
+		// 2. Log internal thoughts at Debug level (hidden from user)
+		if msg.Content != nil {
+			contentStr := fmt.Sprintf("%v", msg.Content)
+			if contentStr != "" {
+				e.Logger.Debug(fmt.Sprintf("💭 Thought: %s", contentStr))
+			}
+		}
+
+		// 3. Process tools with selective logging
 		for _, tool := range msg.ToolCalls {
 			resultStr := ""
-			e.Logger.Info(fmt.Sprintf("🔨 Executing Tool: %s", tool.Function.Name))
 
-			switch tool.Function.Name {
-			case "read_file":
-				var args struct {
-					Path string `json:"path"`
-				}
-				if err := json.Unmarshal([]byte(tool.Function.Arguments), &args); err != nil {
-					resultStr = fmt.Sprintf("Invalid arguments: %v", err)
-					break
-				}
-				if err := e.Memory.Add(args.Path); err != nil {
-					resultStr = fmt.Sprintf("Error reading '%s': %v", args.Path, err)
-				} else {
-					resultStr = fmt.Sprintf("✓ File '%s' loaded into context", args.Path)
-				}
+			// Selective Logging: Only INFO for major actions, DEBUG for read/search
+			if tool.Function.Name == "delegate_task" {
+				e.Logger.Info("👷 Delegating task to worker agent...")
+			} else if tool.Function.Name == "write_shadow_file" {
+				e.Logger.Info("📝 Writing code to shadow workspace...")
+			} else {
+				e.Logger.Debug(fmt.Sprintf("🔨 Executing Tool: %s", tool.Function.Name))
+			}
 
-			case "search_code":
-				var args struct {
-					Query string `json:"query"`
-				}
-				if err := json.Unmarshal([]byte(tool.Function.Arguments), &args); err != nil {
-					resultStr = fmt.Sprintf("Invalid arguments: %v", err)
-					break
-				}
-
-				e.Logger.Info(fmt.Sprintf("🔍 Searching for: %s", args.Query))
-				results, err := PerformSearch(e.SrcRoot, args.Query)
-				if err != nil {
-					resultStr = fmt.Sprintf("Search error: %v", err)
-				} else {
-					resultStr = results
-				}
-
-			case "write_shadow_file":
-				var args struct {
-					Path    string `json:"path"`
-					Content string `json:"content"`
-				}
-				if err := json.Unmarshal([]byte(tool.Function.Arguments), &args); err != nil {
-					resultStr = fmt.Sprintf("Invalid arguments: %v", err)
-					break
-				}
-				path, err := e.Shadow.WriteFile(args.Path, []byte(args.Content))
-				if err != nil {
-					resultStr = fmt.Sprintf("Error writing shadow file: %v", err)
-				} else {
-					resultStr = fmt.Sprintf("Changes written to shadow file: %s", path)
-				}
-
-			case "run_shell":
-				var args struct {
-					Command string `json:"command"`
-				}
-				if err := json.Unmarshal([]byte(tool.Function.Arguments), &args); err != nil {
-					resultStr = fmt.Sprintf("Invalid arguments: %v", err)
-					break
-				}
-
-				needsApproval, reason, binary, cmdArgs := e.Sentinel.CheckCommand(args.Command)
-				if needsApproval {
-					if !e.ApprovalCallback(args.Command, reason) {
-						resultStr = "Command denied by user."
-						break
-					}
-				}
-
-				recoveryResult := e.ExecuteWithRecovery(binary, cmdArgs, e.Limits.MaxRecoveryAttempts)
-				if recoveryResult.Success {
-					resultStr = recoveryResult.FinalOutput
-				} else {
-					resultStr = fmt.Sprintf("Command failed: %v\nOutput: %s", recoveryResult.FinalError, recoveryResult.FinalOutput)
-				}
-
-			case "delegate_task":
+			if tool.Function.Name == "delegate_task" {
 				var args struct {
 					Instruction  string `json:"instruction"`
 					ContextFiles string `json:"context_files"`
 				}
 				if err := json.Unmarshal([]byte(tool.Function.Arguments), &args); err != nil {
 					resultStr = fmt.Sprintf("Invalid arguments: %v", err)
-					break
-				}
-
-				files := strings.Split(args.ContextFiles, ",")
-				e.Logger.Info(fmt.Sprintf("👷 Delegating to Worker (%s): %s", e.WorkerModel, args.Instruction))
-
-				workerResult, err := e.runWorker(ctx, args.Instruction, files)
-				if err != nil {
-					resultStr = fmt.Sprintf("Worker failed: %v", err)
 				} else {
-					resultStr = fmt.Sprintf("Worker Output:\n%s", workerResult)
-				}
+					files := strings.Split(args.ContextFiles, ",")
+					// Detailed debug log for troubleshooting
+					e.Logger.Debug(fmt.Sprintf("👷 Delegation Details: %s", args.Instruction))
 
-			default:
-				out, err := ExecuteCustomTool(tool.Function.Name, tool.Function.Arguments, e.Config)
-				if err != nil {
-					resultStr = fmt.Sprintf("Tool execution error: %v", err)
-				} else {
-					resultStr = out
+					// Use extracted WorkerRunner
+					workerResult, err := e.Worker.Run(ctx, args.Instruction, files)
+
+					if err != nil {
+						resultStr = fmt.Sprintf("Worker failed: %v", err)
+					} else {
+						resultStr = fmt.Sprintf("Worker Output:\n%s", workerResult)
+					}
 				}
+			} else {
+				resultStr = e.Executor.Execute(tool)
 			}
 
 			toolMsg := openrouter.ChatMessage{

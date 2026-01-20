@@ -30,7 +30,8 @@ func New(port string, appCtx *app.AgentContext) *AgentServer {
 		approvalMap: make(map[string]chan bool),
 	}
 
-	appCtx.Engine.ApprovalCallback = srv.WaitForApproval
+	// FIX: Use Enforcer to set the interaction handler
+	appCtx.Engine.Enforcer.SetInteractionHandler(srv.WaitForApproval)
 	return srv
 }
 
@@ -85,7 +86,10 @@ func (s *AgentServer) Start() error {
 
 	go func() {
 		s.App.Logger.Info(fmt.Sprintf("🚀 Agent Daemon listening on :%s", s.Port))
-		s.App.Logger.Info(fmt.Sprintf("🛡️  Policy: %s (Mode: %s)", s.App.Engine.Policy.Name, s.App.Engine.Policy.Mode))
+		// FIX: Access Policy through Enforcer
+		s.App.Logger.Info(fmt.Sprintf("🛡️  Policy: %s (Mode: %s)",
+			s.App.Engine.Enforcer.Policy.Name,
+			s.App.Engine.Enforcer.Policy.Mode))
 
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			s.App.Logger.Error(fmt.Sprintf("Server failed: %v", err))
@@ -137,6 +141,7 @@ func (s *AgentServer) WaitForApproval(cmdStr, reason string) bool {
 func (s *AgentServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{
 		"status": "ok",
-		"mode":   string(s.App.Engine.Policy.Mode),
+		// FIX: Access Policy through Enforcer
+		"mode": string(s.App.Engine.Enforcer.Policy.Mode),
 	})
 }
