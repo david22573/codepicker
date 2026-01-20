@@ -219,3 +219,96 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 	}
 	return "", fmt.Errorf("agent exceeded max turns (%d)", e.Limits.AgentMaxTurns)
 }
+
+// RunSingleTurn executes exactly one agent reasoning cycle (thought + tool calls)
+// Returns the final assistant message content after all tools are executed
+func (e *Engine) RunSingleTurn(
+	ctx context.Context,
+	task string,
+	updateHistory func(openrouter.ChatMessage),
+) (string, error) {
+	// Check cost limits before starting
+	cost, _ := e.CostTracker.GetStats()
+	if cost >= e.Limits.DailyCostLimit {
+		return "", fmt.Errorf("daily cost limit exceeded ($%.2f)", e.Limits.DailyCostLimit)
+	}
+
+	// Build current context from memory
+	currentContext := e.Memory.FormatContext()
+	fullSystemMsg := e.SystemPrompt + "\n" + currentContext
+
+	// Prepare active tools
+	var activeTools []openrouter.Tool
+	for _, t := range e.Executor.Tools {
+		activeTools = append(activeTools, t.Definition())
+	}
+
+	// Build message history
+	messages := []openrouter.ChatMessage{
+		{Role: "system", Content: fullSystemMsg},
+		{Role: "user", Content: task},
+	}
+
+	// Make LLM request
+	req := openrouter.ChatCompletionRequest{
+		Model:     e.Model,
+		Messages:  messages,
+		Tools:     activeTools,
+		MaxTokens: e.Limits.MaxStepTokens,
+	}
+
+	resp, err := e.Client.CreateChatCompletion(ctx, req)
+	if err != nil {
+		return "", fmt.Errorf("LLM error: %w", err)
+	}
+
+	// Track usage
+	if resp.Usage != nil {
+		e.CostTracker.RecordRequest(
+			resp.Usage.PromptTokens,
+			resp.Usage.CompletionTokens,
+			e.Model,
+		)
+	}
+
+	// Get assistant response
+	msg := resp.Choices[0].Message
+	if updateHistory != nil {
+		updateHistory(*msg)
+	}
+
+	// If no tool calls, return the response content
+	if len(msg.ToolCalls) == 0 {
+		return fmt.Sprintf("%v", msg.Content), nil
+	}
+
+	// Execute all tool calls
+	e.Logger.Debug(fmt.Sprintf("Executing %d tools in this turn", len(msg.ToolCalls)))
+
+	for _, tool := range msg.ToolCalls {
+		e.Logger.Debug(fmt.Sprintf("🔨 Tool: %s", tool.Function.Name))
+
+		resultStr := e.Executor.Execute(ctx, tool)
+
+		// Enforce output limits
+		if len(resultStr) > e.Limits.MaxToolOutput {
+			e.Logger.Warn(fmt.Sprintf("Tool output truncated: %s (%d bytes)",
+				tool.Function.Name, len(resultStr)))
+			resultStr = resultStr[:e.Limits.MaxToolOutput] +
+				"\n...(output truncated by security limit)"
+		}
+
+		// Notify callback about tool result
+		if updateHistory != nil {
+			toolMsg := openrouter.ChatMessage{
+				Role:       "tool",
+				ToolCallID: tool.ID,
+				Content:    resultStr,
+			}
+			updateHistory(toolMsg)
+		}
+	}
+
+	// Return the assistant's reasoning (before tool calls)
+	return fmt.Sprintf("%v", msg.Content), nil
+}
