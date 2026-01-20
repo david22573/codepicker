@@ -24,13 +24,17 @@ func NewPlanExecutor(eng *Engine, plan *Plan) *PlanExecutor {
 func (pe *PlanExecutor) Execute(ctx context.Context) error {
 	pe.Engine.Logger.Info(fmt.Sprintf("🚀 Starting Plan Execution: %s (%d steps)", pe.Plan.ID, len(pe.Plan.Steps)))
 
-	// Update DB status
 	pe.Engine.Memory.Store.UpdatePlanStatus(pe.Plan.ID, "running")
+
+	// Load retry limit from config, default to 2 if 0
+	maxRetries := pe.Engine.Limits.MaxRecoveryAttempts
+	if maxRetries <= 0 {
+		maxRetries = 2
+	}
 
 	for i := range pe.Plan.Steps {
 		step := &pe.Plan.Steps[i]
 
-		// Skip if already done (allows resuming later)
 		if step.Status == "completed" {
 			pe.Engine.Logger.Info(fmt.Sprintf("⏭️  Skipping completed step %d", step.ID))
 			continue
@@ -38,9 +42,8 @@ func (pe *PlanExecutor) Execute(ctx context.Context) error {
 
 		pe.Engine.Logger.Info(fmt.Sprintf("\n⚡ Executing Step %d/%d: %s", step.ID, len(pe.Plan.Steps), step.Description))
 		step.Status = "running"
-		pe.savePlanState() // Checkpoint
+		pe.savePlanState()
 
-		// Load relevant files into context if specified
 		if len(step.Files) > 0 {
 			for _, f := range step.Files {
 				if err := pe.Engine.Memory.Add(f); err != nil {
@@ -49,8 +52,6 @@ func (pe *PlanExecutor) Execute(ctx context.Context) error {
 			}
 		}
 
-		// Inject step context into the Engine's history/system prompt for this run
-		// We execute the step using the main Engine.Run
 		printUpdate := func(msg openrouter.ChatMessage) {
 			if msg.Role == "assistant" && msg.Content != nil {
 				content := fmt.Sprintf("%v", msg.Content)
@@ -60,18 +61,44 @@ func (pe *PlanExecutor) Execute(ctx context.Context) error {
 			}
 		}
 
-		result, err := pe.Engine.Run(ctx, step.Instruction, printUpdate)
+		var result string
+		var err error
+
+		// --- RETRY LOOP ---
+		for attempt := 0; attempt <= maxRetries; attempt++ {
+			if attempt > 0 {
+				pe.Engine.Logger.Warn(fmt.Sprintf("🔄 Retry attempt %d/%d for Step %d...", attempt, maxRetries, step.ID))
+				// Simple backoff
+				time.Sleep(time.Duration(attempt) * 2 * time.Second)
+			}
+
+			// Add "Retry Context" to instruction if this is a retry
+			instruction := step.Instruction
+			if attempt > 0 && err != nil {
+				instruction = fmt.Sprintf("%s\n\n(NOTE: Previous attempt failed with error: %v. Please fix and retry.)", instruction, err)
+			}
+
+			result, err = pe.Engine.Run(ctx, instruction, printUpdate)
+			if err == nil {
+				break // Success!
+			}
+
+			pe.Engine.Logger.Warn(fmt.Sprintf("Step %d execution error: %v", step.ID, err))
+		}
+		// ------------------
 
 		if err != nil {
 			step.Status = "failed"
 			step.Result = err.Error()
 			pe.savePlanState()
-			pe.Engine.Logger.Error(fmt.Sprintf("❌ Step %d Failed: %v", step.ID, err))
+			pe.Engine.Logger.Error(fmt.Sprintf("❌ Step %d Failed after %d attempts: %v", step.ID, maxRetries+1, err))
 
 			if step.Critical {
 				pe.Engine.Memory.Store.UpdatePlanStatus(pe.Plan.ID, "failed")
 				return fmt.Errorf("critical step %d failed, aborting plan", step.ID)
 			}
+			// Allow non-critical steps to fail without stopping the whole plan
+			pe.Engine.Logger.Warn("⚠️  Non-critical step failed. Continuing plan...")
 			continue
 		}
 
@@ -80,7 +107,6 @@ func (pe *PlanExecutor) Execute(ctx context.Context) error {
 		pe.savePlanState()
 		pe.Engine.Logger.Info(fmt.Sprintf("✅ Step %d Complete", step.ID))
 
-		// Small cool-down to prevent rate limits
 		time.Sleep(1 * time.Second)
 	}
 
@@ -90,8 +116,5 @@ func (pe *PlanExecutor) Execute(ctx context.Context) error {
 }
 
 func (pe *PlanExecutor) savePlanState() {
-	// Sync current in-memory plan state to DB
-	// Note: In a real batch system we would update specific rows, but here we update the blob
-	// to keep it simple for Phase 1.
 	pe.Engine.Memory.Store.SavePlan(pe.Plan.ID, pe.Plan.OriginalTask, pe.Plan.Steps, pe.Plan.EstimatedCost)
 }

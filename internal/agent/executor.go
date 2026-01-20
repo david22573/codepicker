@@ -10,10 +10,12 @@ import (
 )
 
 type ToolExecutor struct {
-	Memory   *WorkingMemory
-	FS       vfs.VirtualFileSystem
-	Sentinel *Sentinel
-	Config   *config.ConfigFile
+	Memory      *WorkingMemory
+	FS          vfs.VirtualFileSystem
+	Sentinel    *Sentinel
+	Config      *config.ConfigFile
+	DryRun      bool   // 3.3: Dry Run Flag
+	CurrentTask string // 3.4: Context for Attribution
 
 	OnApproval func(command, reason string) bool
 }
@@ -31,6 +33,7 @@ func NewToolExecutor(mem *WorkingMemory, fs vfs.VirtualFileSystem, s *Sentinel, 
 func (e *ToolExecutor) Execute(tool openrouter.ToolCall) string {
 	switch tool.Function.Name {
 	case "read_file":
+		// Read operations are safe, execute normally even in dry run
 		var args struct {
 			Path string `json:"path"`
 		}
@@ -43,6 +46,7 @@ func (e *ToolExecutor) Execute(tool openrouter.ToolCall) string {
 		return fmt.Sprintf("✓ File '%s' loaded into context", args.Path)
 
 	case "search_code":
+		// Search is safe
 		var args struct {
 			Query string `json:"query"`
 		}
@@ -50,27 +54,9 @@ func (e *ToolExecutor) Execute(tool openrouter.ToolCall) string {
 			return fmt.Sprintf("Invalid arguments: %v", err)
 		}
 
-		// Note: Search still needs raw access to SrcRoot/Shadow logic to traverse directories,
-		// but since we are refactoring logic step-by-step, we'll keep the direct call to PerformSearch
-		// (which uses filepath.Walk) for now, as VFS is currently file-level access only.
-		// Ideally, VFS should eventually support Walk/Glob.
-		// For now, we assume Memory.FS is an OverlayFS which has the SrcRoot available if needed,
-		// but PerformSearch takes a root string path.
-
-		// Accessing srcRoot via type assertion if needed, or keeping it strictly separated.
-		// Since PerformSearch is a utility function taking a string path, we rely on the engine's root.
-		// However, ToolExecutor doesn't hold SrcRoot directly anymore.
-		// We'll assume for this pass that we can't easily fix Search without expanding VFS,
-		// so we might need to cast or pass SrcRoot in NewToolExecutor if we want to keep identical behavior.
-		// BUT: PerformSearch is imported from agent package (tools.go).
-		// Let's assume for this specific refactor we grab the root from the OverlayFS if possible,
-		// or update NewToolExecutor to accept srcRoot strictly for search.
-
-		// To keep it clean: We will attempt to use the Memory's underlying concept or just re-inject srcRoot.
-		// Let's check where PerformSearch is called. It uses e.Memory.SrcRoot which we deleted.
-		// We need to pass SrcRoot to ToolExecutor explicitly or via FS.
-
 		if overlay, ok := e.FS.(*vfs.OverlayFS); ok {
+			// Access SrcRoot from OverlayFS since search requires file walking logic
+			// found in agent.PerformSearch
 			results, err := PerformSearch(overlay.SrcRoot, args.Query)
 			if err != nil {
 				return fmt.Sprintf("Search error: %v", err)
@@ -87,10 +73,27 @@ func (e *ToolExecutor) Execute(tool openrouter.ToolCall) string {
 		if err := json.Unmarshal([]byte(tool.Function.Arguments), &args); err != nil {
 			return fmt.Sprintf("Invalid arguments: %v", err)
 		}
+
+		// 3.3: DRY RUN INTERCEPTION
+		if e.DryRun {
+			return fmt.Sprintf("[DRY RUN] Would write %d bytes to shadow file: %s", len(args.Content), args.Path)
+		}
+
 		path, err := e.FS.WriteFile(args.Path, []byte(args.Content))
 		if err != nil {
 			return fmt.Sprintf("Error writing shadow file: %v", err)
 		}
+
+		// 3.4: RECORD ATTRIBUTION
+		if overlay, ok := e.FS.(*vfs.OverlayFS); ok {
+			taskName := e.CurrentTask
+			if taskName == "" {
+				taskName = "Unknown Task"
+			}
+			// We use "AI Agent" as the generic actor name
+			overlay.Shadow.RecordAttribution(args.Path, "AI Agent", taskName)
+		}
+
 		return fmt.Sprintf("Changes written to shadow file: %s", path)
 
 	case "run_shell":
@@ -99,6 +102,11 @@ func (e *ToolExecutor) Execute(tool openrouter.ToolCall) string {
 		}
 		if err := json.Unmarshal([]byte(tool.Function.Arguments), &args); err != nil {
 			return fmt.Sprintf("Invalid arguments: %v", err)
+		}
+
+		// 3.3: DRY RUN INTERCEPTION
+		if e.DryRun {
+			return fmt.Sprintf("[DRY RUN] Would execute command: %s", args.Command)
 		}
 
 		needsApproval, reason, binary, cmdArgs := e.Sentinel.CheckCommand(args.Command)

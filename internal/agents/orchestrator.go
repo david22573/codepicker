@@ -17,8 +17,10 @@ import (
 )
 
 type Orchestrator struct {
-	Self *BaseAgent
-	Team map[AgentType]*BaseAgent
+	Self       *BaseAgent
+	Team       map[AgentType]*BaseAgent
+	Refinement *RefinementSystem
+	Shadow     *shadow.Manager
 }
 
 type PlanStep struct {
@@ -35,7 +37,7 @@ func NewOrchestrator(
 	srcRoot string,
 	log logger.Logger,
 	store *database.Store,
-	cfg *config.ConfigFile, // NEW
+	cfg *config.ConfigFile,
 ) (*Orchestrator, error) {
 
 	shadowMgr, err := shadow.NewManager(srcRoot)
@@ -43,32 +45,32 @@ func NewOrchestrator(
 		return nil, err
 	}
 
-	// REMOVED: Implicit config load
-	// cfg, _ := config.GetOrLoadConfig("")
-
 	model := constants.DefaultModel
 	if cfg != nil && cfg.AI.Model != "" {
 		model = cfg.AI.Model
 	}
 
-	// Initialize VFS
 	fs := vfs.NewOverlayFS(srcRoot, shadowMgr)
 
-	// Pass VFS to Memory
 	mem := agent.NewMemory(store, fs)
 	limits := config.DefaultLimits()
 	sentinel := agent.NewSentinel(limits)
 
+	// Initialize the Refinement System (Proposer/Judge)
+	refinement := NewRefinementSystem(client, model, log)
+
 	spawn := func(t AgentType, prompt string) *BaseAgent {
 		return NewBaseAgent(
 			t, client, model, prompt,
-			mem, fs, sentinel, log, limits, cfg, // Pass cfg here
+			mem, fs, sentinel, log, limits, cfg,
 		)
 	}
 
 	orch := &Orchestrator{
-		Self: spawn(AgentOrchestrator, PromptOrchestrator),
-		Team: make(map[AgentType]*BaseAgent),
+		Self:       spawn(AgentOrchestrator, PromptOrchestrator),
+		Team:       make(map[AgentType]*BaseAgent),
+		Refinement: refinement,
+		Shadow:     shadowMgr,
 	}
 
 	orch.Team[AgentContext] = spawn(AgentContext, PromptContext)
@@ -80,37 +82,99 @@ func NewOrchestrator(
 }
 
 func (o *Orchestrator) RunTask(ctx context.Context, userTask string) error {
-	o.Self.Logger.Info("🎼 Orchestrator planning task: " + userTask)
+	// --- PHASE 1: PROPOSER (Prompt Optimization) ---
+	// We use the Proposer to refine the user's intent before planning.
+	optimizedTask, err := o.Refinement.OptimizePrompt(ctx, userTask)
+	if err != nil {
+		o.Self.Logger.Warn("Proposer failed (using original task): " + err.Error())
+		optimizedTask = userTask
+	}
 
-	plan, err := o.createPlan(ctx, userTask)
+	o.Self.Logger.Info("🎼 Orchestrator planning task: " + optimizedTask)
+
+	plan, err := o.createPlan(ctx, optimizedTask)
 	if err != nil {
 		return fmt.Errorf("planning failed: %w", err)
 	}
 
 	o.Self.Logger.Info(fmt.Sprintf("📋 Plan generated with %d steps", len(plan.Steps)))
 
+	// --- PHASE 2: EXECUTION LOOP ---
 	for i, step := range plan.Steps {
+		maxRetries := 3
+		var stepResult string
+		var stepErr error
+
+		// Determine the worker for this step
 		worker := o.Team[step.Agent]
 		if worker == nil {
 			o.Self.Logger.Warn(fmt.Sprintf("⚠️ Unknown agent type '%s', defaulting to CodeModifier", step.Agent))
 			worker = o.Team[AgentModifier]
 		}
 
-		o.Self.Logger.Info(fmt.Sprintf("\n▶️  Step %d [%s]: %s", i+1, step.Agent, step.Task))
+		// We loop here to allow the Judge to reject work and force a retry
+		for attempt := 1; attempt <= maxRetries; attempt++ {
+			o.Self.Logger.Info(fmt.Sprintf("\n▶️  Step %d [%s] (Attempt %d/%d): %s", i+1, step.Agent, attempt, maxRetries, step.Task))
 
-		result, err := worker.Execute(ctx, step.Task)
-		if err != nil {
-			o.Self.Logger.Error(fmt.Sprintf("❌ [%s] Failed: %v", step.Agent, err))
-			return err
+			// Execute the Agent Task
+			stepResult, stepErr = worker.Execute(ctx, step.Task)
+			if stepErr != nil {
+				o.Self.Logger.Error(fmt.Sprintf("❌ [%s] Execution Failed: %v", step.Agent, stepErr))
+				return stepErr
+			}
+
+			// --- PHASE 3: JUDGE (Evaluation) ---
+			// Only trigger the Judge if we are Modifying Code to save tokens.
+			if step.Agent == AgentModifier {
+				// Gather context: The actual code changes currently in the shadow dir
+				files, _ := o.Shadow.ListShadowFiles()
+				diffContext := ""
+				for _, f := range files {
+					diff, _ := o.Shadow.PreviewDiff(f)
+					diffContext += diff + "\n"
+				}
+
+				// If no changes were made, the judge might be confused, but we run it anyway
+				// to ensure the "Agent Output" (reasoning) is valid.
+				if diffContext == "" {
+					diffContext = "(No file changes detected in shadow workspace)"
+				}
+
+				judgeResult, err := o.Refinement.EvaluateWork(ctx, step.Task, stepResult, diffContext)
+				if err != nil {
+					o.Self.Logger.Warn("Judge failed to evaluate (skipping check): " + err.Error())
+					break // If judge breaks, assume success to prevent infinite loops
+				}
+
+				if judgeResult.Pass {
+					o.Self.Logger.Info(fmt.Sprintf("✅ Judge PASSED (Score: %d/10)", judgeResult.Score))
+					break // Exit retry loop, proceed to next step
+				} else {
+					o.Self.Logger.Warn(fmt.Sprintf("❌ Judge REJECTED: %s", judgeResult.Feedback))
+
+					// CRITICAL: Update the task with the feedback so the agent knows what to fix
+					step.Task = fmt.Sprintf("Previous attempt failed.\nOriginal Task: %s\n\nJudge Feedback (YOU MUST FIX THIS): %s", step.Task, judgeResult.Feedback)
+
+					if attempt == maxRetries {
+						return fmt.Errorf("step failed after %d attempts. Final Judge feedback: %s", maxRetries, judgeResult.Feedback)
+					}
+					// Loop continues to next attempt...
+				}
+			} else {
+				// For non-modifier agents (Context, System), we trust the output immediately.
+				break
+			}
 		}
 
-		cleanResult := result
+		// Clean up result for logging
+		cleanResult := stepResult
 		if len(cleanResult) > 200 {
 			cleanResult = cleanResult[:200] + "..."
 		}
 		o.Self.Logger.Info(fmt.Sprintf("✅ [%s] Result: %s", step.Agent, cleanResult))
 
-		observation := fmt.Sprintf("Observation from %s: %s", step.Agent, result)
+		// Store observation in Orchestrator memory for context in subsequent steps
+		observation := fmt.Sprintf("Observation from %s: %s", step.Agent, stepResult)
 		o.Self.Memory.AddNote(observation)
 	}
 

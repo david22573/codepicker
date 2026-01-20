@@ -1,22 +1,37 @@
 package shadow
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/david22573/codepicker/internal/paths"
 )
 
 const (
 	ShadowDirName = ".codepicker/shadow"
+	ManifestName  = "manifest.json"
 	MaxShadowSize = 1024 * 1024 * 1 // 1MB Limit for shadow files
 )
+
+type ChangeMeta struct {
+	File      string    `json:"file"`
+	Agent     string    `json:"agent"`
+	Task      string    `json:"task"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
+type Manifest struct {
+	Changes map[string]ChangeMeta `json:"changes"`
+}
 
 type Manager struct {
 	SrcRoot    string
 	ShadowRoot string
+	Manifest   Manifest
 }
 
 func NewManager(srcRoot string) (*Manager, error) {
@@ -30,31 +45,28 @@ func NewManager(srcRoot string) (*Manager, error) {
 		return nil, fmt.Errorf("failed to create shadow root: %w", err)
 	}
 
-	return &Manager{
+	m := &Manager{
 		SrcRoot:    absSrc,
 		ShadowRoot: shadowRoot,
-	}, nil
+		Manifest:   Manifest{Changes: make(map[string]ChangeMeta)},
+	}
+	m.loadManifest()
+
+	return m, nil
 }
 
 func (m *Manager) WriteFile(relPath string, content []byte) (string, error) {
-	// 1. Sanitize the relative path to remove dotfiles/traversal logic
-	// We treat the relPath as relative to CWD for sanitization purposes first
-	// to ensure it doesn't contain traversal characters.
 	cleanRel := filepath.Clean(relPath)
 	if strings.HasPrefix(cleanRel, "..") || strings.HasPrefix(cleanRel, "/") {
 		return "", fmt.Errorf("invalid path: must be relative")
 	}
 
-	// 2. Size Check
 	if len(content) > MaxShadowSize {
 		return "", fmt.Errorf("content exceeds max shadow file size (%d bytes)", MaxShadowSize)
 	}
 
-	// 3. Construct full path
 	shadowPath := filepath.Join(m.ShadowRoot, cleanRel)
 
-	// 4. Security Check: Ensure the resulting path is actually inside ShadowRoot
-	// This prevents symlink attacks or weird join behaviors
 	if !strings.HasPrefix(shadowPath, m.ShadowRoot) {
 		return "", fmt.Errorf("security violation: attempted to write outside shadow directory")
 	}
@@ -68,6 +80,34 @@ func (m *Manager) WriteFile(relPath string, content []byte) (string, error) {
 	}
 
 	return shadowPath, nil
+}
+
+// RecordAttribution logs the agent and task responsible for a file change
+func (m *Manager) RecordAttribution(relPath, agent, task string) error {
+	m.Manifest.Changes[relPath] = ChangeMeta{
+		File:      relPath,
+		Agent:     agent,
+		Task:      task,
+		Timestamp: time.Now(),
+	}
+	return m.saveManifest()
+}
+
+func (m *Manager) loadManifest() {
+	path := filepath.Join(m.ShadowRoot, ManifestName)
+	data, err := os.ReadFile(path)
+	if err == nil {
+		json.Unmarshal(data, &m.Manifest)
+	}
+	if m.Manifest.Changes == nil {
+		m.Manifest.Changes = make(map[string]ChangeMeta)
+	}
+}
+
+func (m *Manager) saveManifest() error {
+	path := filepath.Join(m.ShadowRoot, ManifestName)
+	data, _ := json.MarshalIndent(m.Manifest, "", "  ")
+	return os.WriteFile(path, data, 0644)
 }
 
 func (m *Manager) GetShadowPath(relPath string) string {
@@ -97,6 +137,10 @@ func (m *Manager) ListShadowFiles() ([]string, error) {
 			return err
 		}
 		if d.IsDir() {
+			return nil
+		}
+		// Skip the manifest file so it doesn't show up in 'apply' list
+		if d.Name() == ManifestName {
 			return nil
 		}
 		rel, err := filepath.Rel(m.ShadowRoot, path)
