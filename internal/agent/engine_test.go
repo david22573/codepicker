@@ -23,7 +23,6 @@ func TestNewEngine(t *testing.T) {
 	limits := config.DefaultLimits()
 	log := &logger.NoOpLogger{}
 
-	// FIX: Pass nil for config
 	engine, err := NewEngine(client, "test-model", tmpDir, log, limits, store, nil)
 	if err != nil {
 		t.Fatalf("Failed to create engine: %v", err)
@@ -33,15 +32,21 @@ func TestNewEngine(t *testing.T) {
 		t.Errorf("Expected model 'test-model', got %s", engine.Model)
 	}
 
-	if engine.Memory == nil {
+	if engine.Executor == nil {
+		t.Fatal("Engine executor not initialized")
+	}
+
+	// FIX: Access fields via RuntimeContext
+	rt := engine.Executor.RuntimeContext
+	if rt == nil {
+		t.Fatal("Runtime context not initialized")
+	}
+
+	if rt.Memory == nil {
 		t.Error("Engine working memory not initialized")
 	}
 
-	if engine.Shadow == nil {
-		t.Error("Engine shadow manager not initialized")
-	}
-
-	if engine.FS == nil {
+	if rt.FS == nil {
 		t.Error("Engine virtual filesystem not initialized")
 	}
 
@@ -52,12 +57,11 @@ func TestNewEngine(t *testing.T) {
 
 func TestEngineCallback(t *testing.T) {
 	tmpDir := t.TempDir()
-
 	store, _ := database.New(tmpDir)
 	defer store.Close()
 
 	client := openrouter.NewClient("key")
-	// FIX: Pass nil for config
+
 	eng, _ := NewEngine(client, "model", tmpDir, &logger.NoOpLogger{}, config.DefaultLimits(), store, nil)
 
 	if eng.Enforcer.Check("rm -rf /", "dangerous") {

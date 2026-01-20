@@ -3,11 +3,15 @@ package config
 import (
 	"fmt"
 	"os"
+	"slices"
+	"strings"
 	"sync"
 
 	"github.com/david22573/codepicker/internal/constants"
 	"gopkg.in/yaml.v3"
 )
+
+var defaultIgnoredDirs = []string{".git", "node_modules", "vendor", ".codepicker"}
 
 type ConfigFile struct {
 	Src         string       `yaml:"src"`
@@ -19,7 +23,7 @@ type ConfigFile struct {
 	Verbose     bool         `yaml:"verbose"`
 	AI          AIConfig     `yaml:"ai"`
 	Server      ServerConfig `yaml:"server"`
-	CustomTools []CustomTool `yaml:"tools"` // Added Plugin Support
+	CustomTools []CustomTool `yaml:"tools"`
 }
 
 type AIConfig struct {
@@ -36,24 +40,19 @@ type ServerConfig struct {
 type CustomTool struct {
 	Name        string `yaml:"name"`
 	Description string `yaml:"description"`
-	Command     string `yaml:"command"`     // The actual shell command to run
-	Arguments   string `yaml:"args_schema"` // JSON schema for arguments
+	Command     string `yaml:"command"`
+	Arguments   string `yaml:"args_schema"`
 }
 
-// Global singleton instance
 var (
 	globalConfig *ConfigFile
 	configOnce   sync.Once
 	configErr    error
 )
 
-// GetOrLoadConfig ensures the config is loaded exactly once.
-// If path is empty, it searches default locations.
 func GetOrLoadConfig(path string) (*ConfigFile, error) {
 	configOnce.Do(func() {
-		// 1. Determine Path
 		if path == "" {
-			// Look in standard locations
 			for _, loc := range []string{".codepicker.yml", ".codepicker.yaml", "codepicker.yml"} {
 				if _, err := os.Stat(loc); err == nil {
 					path = loc
@@ -62,19 +61,16 @@ func GetOrLoadConfig(path string) (*ConfigFile, error) {
 			}
 		}
 
-		// 2. If still empty, return default (nil) without error
 		if path == "" {
 			return
 		}
 
-		// 3. Read File
 		data, err := os.ReadFile(path)
 		if err != nil {
 			configErr = fmt.Errorf("failed to read config file: %w", err)
 			return
 		}
 
-		// 4. Parse
 		var cfg ConfigFile
 		if err := yaml.Unmarshal(data, &cfg); err != nil {
 			configErr = fmt.Errorf("invalid YAML format in %s: %w", path, err)
@@ -86,10 +82,32 @@ func GetOrLoadConfig(path string) (*ConfigFile, error) {
 	return globalConfig, configErr
 }
 
-// Helper method to get model with fallback
 func (c *ConfigFile) GetModel() string {
 	if c != nil && c.AI.Model != "" {
 		return c.AI.Model
 	}
 	return constants.DefaultModel
+}
+
+func (c *ConfigFile) IsExtensionAllowed(ext string) bool {
+	if c == nil || len(c.Include) == 0 {
+		safeDefaults := map[string]bool{
+			".go": true, ".js": true, ".ts": true, ".py": true,
+			".md": true, ".txt": true, ".json": true,
+		}
+		return safeDefaults[ext]
+	}
+	for _, allowed := range c.Include {
+		if strings.TrimPrefix(allowed, ".") == strings.TrimPrefix(ext, ".") {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *ConfigFile) IsDirIgnored(dir string) bool {
+	if c == nil {
+		return false
+	}
+	return slices.Contains(c.Exclude, dir) || slices.Contains(defaultIgnoredDirs, dir)
 }

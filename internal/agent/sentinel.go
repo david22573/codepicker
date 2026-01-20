@@ -17,16 +17,15 @@ type Sentinel struct {
 	Limits       *config.Limits
 }
 
-// Add dangerous patterns to block immediately
 var dangerousPatterns = []string{
-	`curl.*\|.*sh`,  // Piped curl to shell
-	`wget.*\|.*sh`,  // Piped wget to shell
-	`eval`,          // Dangerous eval
-	`base64.*-d`,    // Decoding obfuscated payloads
-	`> /dev/`,       // Device writing
-	`dd if=`,        // Disk destruction
-	`mkfs`,          // Filesystem formatting
-	`:(){ :|:& };:`, // Fork bomb
+	`curl.*\|.*sh`,
+	`wget.*\|.*sh`,
+	`eval`,
+	`base64.*-d`,
+	`> /dev/`,
+	`dd if=`,
+	`mkfs`,
+	`:(){ :|:& };:`,
 }
 
 func NewSentinel(limits *config.Limits) *Sentinel {
@@ -44,8 +43,32 @@ func NewSentinel(limits *config.Limits) *Sentinel {
 	}
 }
 
+// BoundedBuffer limits the amount of data capturing from stdout/stderr
+type BoundedBuffer struct {
+	b     bytes.Buffer
+	limit int
+}
+
+func (b *BoundedBuffer) Write(p []byte) (n int, err error) {
+	if b.b.Len() >= b.limit {
+		return len(p), nil
+	}
+	toWrite := p
+	if b.b.Len()+len(p) > b.limit {
+		toWrite = p[:b.limit-b.b.Len()]
+	}
+	_, err = b.b.Write(toWrite)
+	if err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+func (b *BoundedBuffer) String() string {
+	return b.b.String()
+}
+
 func (s *Sentinel) CheckCommand(cmdStr string) (bool, string, string, []string) {
-	// Check dangerous patterns first
 	for _, pattern := range dangerousPatterns {
 		if matched, _ := regexp.MatchString(pattern, cmdStr); matched {
 			return true, "Potentially dangerous command pattern detected", "", nil
@@ -59,6 +82,14 @@ func (s *Sentinel) CheckCommand(cmdStr string) (bool, string, string, []string) 
 
 	binary := parts[0]
 	args := parts[1:]
+
+	if binary == "find" {
+		for _, arg := range args {
+			if strings.HasPrefix(arg, "-exec") || strings.HasPrefix(arg, "-delete") || strings.HasPrefix(arg, "-ok") {
+				return true, fmt.Sprintf("Forbidden flag '%s' used with find", arg), binary, args
+			}
+		}
+	}
 
 	if binary == "cat" || binary == "grep" || binary == "find" {
 		for _, arg := range args {
@@ -91,40 +122,13 @@ func (s *Sentinel) CheckCommand(cmdStr string) (bool, string, string, []string) 
 	return true, fmt.Sprintf("Unrecognized binary: %s", binary), binary, args
 }
 
-type BoundedBuffer struct {
-	b     bytes.Buffer
-	limit int
-}
-
-func (b *BoundedBuffer) Write(p []byte) (n int, err error) {
-	if b.b.Len() >= b.limit {
-		return len(p), nil
-	}
-	toWrite := p
-	if b.b.Len()+len(p) > b.limit {
-		toWrite = p[:b.limit-b.b.Len()]
-	}
-	_, err = b.b.Write(toWrite)
-	if err != nil {
-		return 0, err
-	}
-	return len(p), nil
-}
-
-func (b *BoundedBuffer) String() string {
-	return b.b.String()
-}
-
 func (s *Sentinel) Execute(binary string, args []string) (string, error) {
-
 	ctx, cancel := context.WithTimeout(context.Background(), s.Limits.CommandTimeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, binary, args...)
-
 	stdout := &BoundedBuffer{limit: s.Limits.MaxCommandOutput}
 	stderr := &BoundedBuffer{limit: s.Limits.MaxCommandOutput}
-
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
@@ -136,7 +140,7 @@ func (s *Sentinel) Execute(binary string, args []string) (string, error) {
 	}
 
 	if len(output) >= s.Limits.MaxCommandOutput {
-		return output + "\n...[TRUNCATED]...", fmt.Errorf("command output truncated (exceeded %d bytes)", s.Limits.MaxCommandOutput)
+		return output + "\n...[TRUNCATED]...", fmt.Errorf("command output truncated")
 	}
 
 	if err != nil {
