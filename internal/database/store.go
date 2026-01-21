@@ -28,7 +28,6 @@ type PlanRecord struct {
 	Status        string
 }
 
-// MemorySnapshot holds the state of working memory at a point in time
 type MemorySnapshot struct {
 	Files []MemoryFile
 }
@@ -66,7 +65,6 @@ func (s *Store) DB() *sql.DB {
 	return s.db
 }
 
-// [2.3] Deduplication Helper
 func calculateHash(content string) string {
 	hasher := sha256.New()
 	hasher.Write([]byte(content))
@@ -123,21 +121,18 @@ func (s *Store) ClearHistory() error {
 	return err
 }
 
-// [2.3] UpdateWorkingMemory with Deduplication
 func (s *Store) UpdateWorkingMemory(path string, content string) error {
 	newHash := calculateHash(content)
 
-	// Check if file exists and hash matches
 	var currentHash string
 	err := s.db.QueryRow("SELECT content_hash FROM memory_files WHERE path = ?", path).Scan(&currentHash)
 
 	if err == nil && currentHash == newHash {
-		// Content hasn't changed, just update timestamp
+		// Content hasn't changed, just update last_accessed
 		_, err := s.db.Exec("UPDATE memory_files SET last_accessed = ? WHERE path = ?", time.Now(), path)
 		return err
 	}
 
-	// Content changed or new file
 	tokens := tokenizer.CountTokens(content)
 	_, err = s.db.Exec(`
 		INSERT INTO memory_files (path, content, token_count, content_hash, last_accessed) 
@@ -182,6 +177,12 @@ func (s *Store) GetWorkingMemory() (string, int, error) {
 	return sb.String(), totalTokens, nil
 }
 
+// ClearWorkingMemory removes all files from the active context
+func (s *Store) ClearWorkingMemory() error {
+	_, err := s.db.Exec("DELETE FROM memory_files")
+	return err
+}
+
 func (s *Store) RemoveFromMemory(path string) error {
 	_, err := s.db.Exec("DELETE FROM memory_files WHERE path = ?", path)
 	return err
@@ -204,7 +205,6 @@ func (s *Store) ListMemoryFiles() ([]string, error) {
 	return files, nil
 }
 
-// [2.1] Snapshot Implementation
 func (s *Store) CreateSnapshot() (*MemorySnapshot, error) {
 	rows, err := s.db.Query("SELECT path, content, token_count FROM memory_files")
 	if err != nil {
@@ -223,20 +223,17 @@ func (s *Store) CreateSnapshot() (*MemorySnapshot, error) {
 	return snapshot, nil
 }
 
-// [2.1] Restore Implementation
 func (s *Store) RestoreSnapshot(snap *MemorySnapshot) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 
-	// Wipe current memory
 	if _, err := tx.Exec("DELETE FROM memory_files"); err != nil {
 		tx.Rollback()
 		return err
 	}
 
-	// Restore from snapshot
 	stmt, err := tx.Prepare(`
 		INSERT INTO memory_files (path, content, token_count, content_hash, last_accessed)
 		VALUES (?, ?, ?, ?, ?)

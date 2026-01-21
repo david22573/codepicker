@@ -26,12 +26,11 @@ var planCmd = &cobra.Command{
 	Example: `  codepicker agent plan "Refactor the database layer"
   codepicker agent plan --architect`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// 1. Handle Architect Mode (Audit)
+
 		if isArchitect {
 			return runArchitectAudit(cmd)
 		}
 
-		// 2. Handle Standard Planning
 		if len(args) < 1 {
 			return fmt.Errorf("task description required (or use --architect)")
 		}
@@ -45,7 +44,7 @@ func runArchitectAudit(cmd *cobra.Command) error {
 		SrcDir:   srcDir,
 		LogLevel: 1,
 		Mode:     app.ModeInteractive,
-		Policy:   policy.Batch, // ⚠️ CHANGED from policy.Architect
+		Policy:   policy.Batch,
 		Task:     "Architectural Audit",
 	})
 	if err != nil {
@@ -55,23 +54,22 @@ func runArchitectAudit(cmd *cobra.Command) error {
 
 	agentCtx.Logger.Info("🏗️  Starting Architecture Audit...")
 
-	// Generate project tree for context
 	tree, err := contextgen.GenerateTree(agentCtx.SrcDir)
 	if err != nil {
 		return err
 	}
 
-	// Set the improved prompt
 	agentCtx.Engine.SystemPrompt = prompts.ArchitectV2 + "\n\n" + tree
 
-	// Track completion and goals file
 	auditComplete := false
 	goalsFileWritten := false
 	turnCount := 0
-	maxTurns := 12 // Lower limit for focused audit
+
+	// UPDATED: Use the dynamic limit from config (default 30) instead of hardcoded 12
+	maxTurns := agentCtx.Limits.AgentMaxTurns
 
 	printUpdate := func(msg openrouter.ChatMessage) {
-		// Check for completion signal
+
 		if msg.Role == "assistant" && msg.Content != nil {
 			content := fmt.Sprintf("%v", msg.Content)
 
@@ -79,20 +77,18 @@ func runArchitectAudit(cmd *cobra.Command) error {
 				auditComplete = true
 			}
 
-			// Show thoughts (but not tool_calls JSON)
 			if content != "" && !strings.Contains(content, "tool_calls") {
 				fmt.Printf("\n🤖 Thought: %s\n", content)
 			}
 		}
 
-		// Track when goals file is written
 		if msg.Role == "tool" {
 			toolContent := fmt.Sprintf("%v", msg.Content)
 			if strings.Contains(toolContent, "ARCHITECTURE_GOALS.md") {
 				goalsFileWritten = true
 				fmt.Println("📝 Goals file written to shadow workspace")
 			}
-			// Show tool results (truncated)
+
 			if len(toolContent) > 200 {
 				toolContent = toolContent[:200] + "..."
 			}
@@ -100,7 +96,6 @@ func runArchitectAudit(cmd *cobra.Command) error {
 		}
 	}
 
-	// Main audit loop
 	task := "Begin the architectural audit following the workflow in your instructions."
 
 	for turnCount < maxTurns {
@@ -113,20 +108,17 @@ func runArchitectAudit(cmd *cobra.Command) error {
 			return fmt.Errorf("turn %d failed: %w", turnCount, err)
 		}
 
-		// Check for explicit completion
 		if auditComplete {
 			fmt.Println("\n✅ Agent signaled completion")
 			break
 		}
 
-		// Early exit if goals written and no more activity
 		if goalsFileWritten && strings.TrimSpace(result) == "" {
 			fmt.Println("\n✅ Goals file written, agent idle")
 			auditComplete = true
 			break
 		}
 
-		// Update task for next turn
 		if goalsFileWritten {
 			task = "You have written the goals file. Respond with 'AUDIT_COMPLETE'."
 		} else {
@@ -134,7 +126,6 @@ func runArchitectAudit(cmd *cobra.Command) error {
 		}
 	}
 
-	// Validate completion
 	if !goalsFileWritten {
 		return fmt.Errorf("audit failed: ARCHITECTURE_GOALS.md was never created (used %d turns)", turnCount)
 	}
@@ -148,7 +139,6 @@ func runArchitectAudit(cmd *cobra.Command) error {
 	fmt.Println(strings.Repeat("=", 60))
 	fmt.Printf("Turns used: %d/%d\n", turnCount, maxTurns)
 
-	// Show cost
 	cost, count := agentCtx.Engine.CostTracker.GetStats()
 	fmt.Printf("API calls: %d | Cost: $%.4f\n", count, cost)
 
@@ -160,12 +150,12 @@ func runArchitectAudit(cmd *cobra.Command) error {
 }
 
 func runStandardPlan(cmd *cobra.Command, task string) error {
-	// Standard Planner uses a specialized AgentContext just for reading
+
 	agentCtx, err := app.NewAgentContext(cmd.Context(), app.ContextOptions{
 		SrcDir:   srcDir,
 		LogLevel: 1,
 		Mode:     app.ModeInteractive,
-		Policy:   policy.Batch, // Planning is safe/automated
+		Policy:   policy.Batch,
 		Task:     task,
 	})
 	if err != nil {
@@ -187,20 +177,15 @@ func runStandardPlan(cmd *cobra.Command, task string) error {
 		return err
 	}
 
-	// Save to DB
 	if err := agentCtx.Store.SavePlan(plan.ID, task, plan.Steps, plan.EstimatedCost); err != nil {
 		agentCtx.Logger.Warn("Failed to save plan to database: " + err.Error())
 	}
 
-	// Render Output
 	printPlanTable(plan)
 
-	// Optional: Immediate Execution
 	if executeAfter {
 		fmt.Println("\n🚀 Executing plan immediately...")
 
-		// Re-initialize engine limits for execution
-		// In a perfect world, we'd reuse the context, but the Planner isn't full engine yet.
 		executor := agent.NewPlanExecutor(agentCtx.Engine, plan)
 		if err := executor.Execute(cmd.Context()); err != nil {
 			return err
@@ -208,7 +193,7 @@ func runStandardPlan(cmd *cobra.Command, task string) error {
 		fmt.Println("\n✅ Plan completed successfully.")
 	} else {
 		fmt.Printf("\n👉 To execute this plan, run: codepicker agent run --plan %s\n", plan.ID)
-		// NOTE: You will need to add --plan support to agent run in a future step!
+
 	}
 
 	return nil

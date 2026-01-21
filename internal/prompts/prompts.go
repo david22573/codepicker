@@ -138,6 +138,9 @@ PHASE 1: DISCOVERY (Max 10 tool calls)
   - Search for: "// HACK", "XXX", "WARN", "deprecated"
   - Search for: Common antipatterns in your language
 
+  **FAIL-SAFE RULE:** If 'search_code' returns "No matches found", DO NOT RETRY the same search.
+  Assume the code is clean in that aspect and immediately proceed to 'read_file'.
+
 → Use 'read_file' strategically (max 5 files):
   - Read main entry points (e.g., main.go, cmd/*.go)
   - Read core domain logic files
