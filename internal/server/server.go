@@ -115,8 +115,8 @@ func (s *AgentServer) Start() error {
 	return nil
 }
 
-// WaitForApproval matches the new agent.InteractionFunc signature
-func (s *AgentServer) WaitForApproval(req agent.ApprovalRequest) bool {
+// WaitForApproval updated to return agent.ApprovalResponse
+func (s *AgentServer) WaitForApproval(req agent.ApprovalRequest) agent.ApprovalResponse {
 	reqID := fmt.Sprintf("%d", time.Now().UnixNano())
 	responseChan := make(chan bool)
 
@@ -130,18 +130,14 @@ func (s *AgentServer) WaitForApproval(req agent.ApprovalRequest) bool {
 		s.approvalLock.Unlock()
 	}()
 
-	// We log the request here since we can't easily push to a stream
-	// unless we are inside the handler loop (which is handled by the closure in handlers.go).
-	// This fallback is mostly for when the server is running without an active SSE stream
-	// or in a background context.
 	s.App.Logger.Info(fmt.Sprintf("⏳ Waiting for approval: %s %s", req.Tool, req.Args))
 
 	select {
 	case approved := <-responseChan:
-		return approved
+		return agent.ApprovalResponse{Approved: approved, SessionScope: false}
 	case <-time.After(60 * time.Second):
 		s.App.Logger.Warn(fmt.Sprintf("Approval timed out for %s", reqID))
-		return false
+		return agent.ApprovalResponse{Approved: false}
 	}
 }
 

@@ -10,10 +10,29 @@ const (
 	CapImport  Capability = "import"  // Importing/Requiring external modules
 )
 
-// PolicyMap maps high-level policy flags to required capabilities
 var PolicyMap = map[Capability]string{
-	CapRead:    "always_allowed", // Usually implicitly allowed
+	CapRead:    "always_allowed",
 	CapWrite:   "AllowFileWrite",
 	CapExecute: "AllowShell",
-	CapNetwork: "AllowNetwork", // Future expansion
+	CapNetwork: "AllowNetwork",
+}
+
+// IsReadOnly returns true if the capability set implies no side effects
+func IsReadOnly(caps []Capability) bool {
+	for _, c := range caps {
+		if c != CapRead {
+			return false
+		}
+	}
+	return true
+}
+
+// HasCapability checks if a specific capability exists in the set
+func HasCapability(caps []Capability, target Capability) bool {
+	for _, c := range caps {
+		if c == target {
+			return true
+		}
+	}
+	return false
 }

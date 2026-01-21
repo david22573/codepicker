@@ -30,6 +30,7 @@ func (s *AgentServer) handleAgentTask(w http.ResponseWriter, r *http.Request) {
 
 	eventStream := make(chan string)
 
+	// Save original callback to restore later
 	originalCallback := s.App.Engine.Enforcer.OnApproval
 
 	reqID := fmt.Sprintf("%s", r.Context().Value("request_id"))
@@ -37,16 +38,19 @@ func (s *AgentServer) handleAgentTask(w http.ResponseWriter, r *http.Request) {
 		reqID = "req_" + taskQuery[:3]
 	}
 
-	// Update closure to use agent.ApprovalRequest
-	s.App.Engine.Enforcer.OnApproval = func(req agent.ApprovalRequest) bool {
+	// Update handler to match new signature: returns ApprovalResponse
+	s.App.Engine.Enforcer.OnApproval = func(req agent.ApprovalRequest) agent.ApprovalResponse {
 
 		select {
 		case <-r.Context().Done():
 			s.App.Logger.Warn("Client disconnected before approval request")
-			return false
+			return agent.ApprovalResponse{Approved: false}
 		default:
 		}
 
+		// Channel now accepts generic approval struct or just bool logic mapping
+		// For the server, we might need to expand the protocol later to support "Session" clicks
+		// For now, we map simple boolean back to Response
 		ch := make(chan bool, 1)
 
 		s.approvalLock.Lock()
@@ -72,21 +76,23 @@ func (s *AgentServer) handleAgentTask(w http.ResponseWriter, r *http.Request) {
 		case eventStream <- string(jsonMsg):
 		case <-r.Context().Done():
 			s.App.Logger.Warn("Client disconnected during approval dispatch")
-			return false
+			return agent.ApprovalResponse{Approved: false}
 		case <-time.After(5 * time.Second):
 			s.App.Logger.Warn("Timed out writing approval request to stream")
-			return false
+			return agent.ApprovalResponse{Approved: false}
 		}
 
 		select {
 		case approved := <-ch:
-			return approved
+			// Server currently only supports Yes/No via this endpoint
+			// TODO: Update frontend protocol to support "Always"
+			return agent.ApprovalResponse{Approved: approved, SessionScope: false}
 		case <-r.Context().Done():
 			s.App.Logger.Warn(fmt.Sprintf("Client disconnected while waiting for approval on %s", reqID))
-			return false
+			return agent.ApprovalResponse{Approved: false}
 		case <-time.After(60 * time.Second):
 			s.App.Logger.Warn(fmt.Sprintf("Approval timed out for %s", reqID))
-			return false
+			return agent.ApprovalResponse{Approved: false}
 		}
 	}
 

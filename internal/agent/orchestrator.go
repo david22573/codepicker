@@ -28,6 +28,11 @@ type Orchestrator struct {
 	Self       *Engine
 	Team       map[AgentType]*Engine
 	Refinement *RefinementSystem
+
+	// Hooks for UI interaction
+	PlanReviewHandler func(*ExecutionPlan) bool
+	// Updated signature: now receives the AI's analysis
+	StepErrorHandler func(step PlanStep, err error, analysis string) string
 }
 
 type PlanStep struct {
@@ -49,7 +54,7 @@ func NewOrchestrator(
 
 	spawn := func(role AgentType, rolePolicy policy.ExecutionPolicy, prompt string) (*Engine, error) {
 		model := cfg.GetModel()
-		// [Fixed] Pass empty DebugConfig
+
 		eng, err := NewEngine(client, model, srcRoot, log, config.DefaultLimits(), store, cfg, DebugConfig{})
 		if err != nil {
 			return nil, err
@@ -99,28 +104,106 @@ func (o *Orchestrator) RunTask(ctx context.Context, userTask string) error {
 		return fmt.Errorf("planning failed: %w", err)
 	}
 
-	o.Self.Logger.Info(fmt.Sprintf("📋 Plan generated with %d steps", len(plan.Steps)))
+	if o.PlanReviewHandler != nil {
+		o.Self.Logger.Info("⏸️  Pausing for plan review...")
+		if approved := o.PlanReviewHandler(plan); !approved {
+			return fmt.Errorf("plan rejected by user")
+		}
+	}
+
+	o.Self.Logger.Info(fmt.Sprintf("🚀 Executing Plan (%d steps)", len(plan.Steps)))
 
 	for i, step := range plan.Steps {
 		worker := o.Team[step.Agent]
 		if worker == nil {
 			worker = o.Team[AgentModifier]
 		}
-		o.Self.Logger.Info(fmt.Sprintf("\n▶️  Step %d [%s]: %s", i+1, step.Agent, step.Task))
-		result, err := worker.Run(ctx, step.Task, nil)
-		if err != nil {
-			return fmt.Errorf("step execution failed: %w", err)
+
+		// Retry Loop
+		for {
+			o.Self.Logger.Info(fmt.Sprintf("\n▶️  Step %d [%s]: %s", i+1, step.Agent, step.Task))
+
+			// Capture the stream of thoughts to analyze later if needed
+			var recentThoughts []string
+			captureHistory := func(msg openrouter.ChatMessage) {
+				if msg.Role == "assistant" && msg.Content != nil {
+					content := fmt.Sprintf("%v", msg.Content)
+					if content != "" && !strings.Contains(content, "tool_calls") {
+						recentThoughts = append(recentThoughts, content)
+						// Keep buffer small (last 10 thoughts)
+						if len(recentThoughts) > 10 {
+							recentThoughts = recentThoughts[1:]
+						}
+					}
+				}
+			}
+
+			result, err := worker.Run(ctx, step.Task, captureHistory)
+
+			if err == nil {
+				displayResult := truncate(result, 150)
+				o.Self.Logger.Info(fmt.Sprintf("✅ Result: %s", displayResult))
+				o.Self.Memory.AddNote(fmt.Sprintf("Observation from %s: %s", step.Agent, result))
+				break
+			}
+
+			o.Self.Logger.Error(fmt.Sprintf("❌ Step failed: %v", err))
+
+			if o.StepErrorHandler != nil {
+				// 🧠 INTELLIGENCE INJECTION
+				// Ask the Orchestrator to analyze the situation
+				analysis := "No analysis available."
+				if len(recentThoughts) > 0 {
+					o.Self.Logger.Info("🤔 Analyzing failure context...")
+					summaryPrompt := fmt.Sprintf(
+						"A worker agent failed to complete this task:\n\"%s\"\n\n"+
+							"Here are its last thoughts before failure:\n%s\n\n"+
+							"Error: %v\n\n"+
+							"Briefly analyze: Was it making progress? Is it stuck in a loop? "+
+							"Is it worth RETRYING (it was close) or SKIPPING (it was stuck)?",
+						step.Task,
+						strings.Join(recentThoughts, "\n---\n"),
+						err,
+					)
+
+					// We use a separate ephemeral run so we don't pollute the main orchestrator memory too much
+					advice, _ := o.Self.RunSingleTurn(ctx, summaryPrompt, nil)
+					if advice != "" {
+						analysis = advice
+					}
+				}
+
+				action := o.StepErrorHandler(step, err, analysis)
+
+				switch action {
+				case "retry":
+					o.Self.Logger.Info("🔄 Retrying step...")
+					continue
+				case "skip":
+					o.Self.Logger.Warn("⏭️  Skipping step by user request.")
+					o.Self.Memory.AddNote(fmt.Sprintf("Step [%s] was SKIPPED due to error: %v", step.Agent, err))
+					break
+				default:
+					return fmt.Errorf("step execution failed: %w", err)
+				}
+				break
+			} else {
+				return fmt.Errorf("step execution failed: %w", err)
+			}
 		}
-		o.Self.Logger.Info(fmt.Sprintf("✅ Result: %s", truncate(result, 100)))
-		o.Self.Memory.AddNote(fmt.Sprintf("Observation from %s: %s", step.Agent, result))
 	}
 	return nil
 }
 
 func (o *Orchestrator) createPlan(ctx context.Context, task string) (*ExecutionPlan, error) {
 	prompt := fmt.Sprintf(`TASK: %s
-Available Agents: Context, CodeModifier, System, Quality.
-Return JSON: {"steps": [{"agent": "Context", "task": "Search..."}]}`, task)
+Available Agents: 
+- Context (Search/Read)
+- CodeModifier (Write Code)
+- System (Shell/Test)
+- Quality (Review/Lint)
+
+Return JSON ONLY: {"steps": [{"agent": "Context", "task": "Search..."}]}`, task)
 
 	resp, err := o.Self.Run(ctx, prompt, nil)
 	if err != nil {

@@ -3,12 +3,14 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/david22573/codepicker/internal/agent"
 	"github.com/david22573/codepicker/internal/app"
 	"github.com/david22573/codepicker/internal/policy"
 	"github.com/david22573/codepicker/internal/ui"
+	"github.com/olekukonko/tablewriter"
 	"github.com/spf13/cobra"
 )
 
@@ -99,7 +101,6 @@ func runSavedPlan(ctx *app.AgentContext, id string) error {
 func runOrchestrator(ctx *app.AgentContext, task string) error {
 	ctx.Logger.Info("🤖 Initializing Multi-Agent Orchestrator...")
 
-	// UPDATED: Now calling agent.NewOrchestrator instead of agents.NewOrchestrator
 	orch, err := agent.NewOrchestrator(
 		ctx.Engine.Client,
 		srcDir,
@@ -112,11 +113,57 @@ func runOrchestrator(ctx *app.AgentContext, task string) error {
 		return fmt.Errorf("failed to start orchestrator: %w", err)
 	}
 
-	// NOTE: We don't need to manually set Clients anymore,
-	// NewOrchestrator handles initialization fully.
+	orch.PlanReviewHandler = func(plan *agent.ExecutionPlan) bool {
+		fmt.Println("\n" + strings.Repeat("=", 60))
+		fmt.Println("📋 PROPOSED EXECUTION PLAN")
+		fmt.Println(strings.Repeat("=", 60))
 
-	// Dry run flag handled by tool executor config in future updates
-	// For now, Orchestrator runs in configured mode.
+		table := tablewriter.NewWriter(os.Stdout)
+		table.Header([]string{"Step", "Agent", "Task"})
+
+		for i, step := range plan.Steps {
+			displayTask := step.Task
+			if len(displayTask) > 60 {
+				displayTask = displayTask[:57] + "..."
+			}
+			table.Append([]string{
+				fmt.Sprintf("%d", i+1),
+				string(step.Agent),
+				displayTask,
+			})
+		}
+		table.Render()
+		fmt.Println(strings.Repeat("=", 60))
+
+		return ui.Standard.Confirm("Execute this plan?", true)
+	}
+
+	// Phase 3.2: Error Recovery Hook with Analysis
+	orch.StepErrorHandler = func(step agent.PlanStep, err error, analysis string) string {
+		ui.Standard.Error("\n🛑 Step failed: %v", err)
+
+		fmt.Println(strings.Repeat("-", 60))
+		fmt.Println("🤖 ORCHESTRATOR ADVICE:")
+		fmt.Println(analysis)
+		fmt.Println(strings.Repeat("-", 60))
+
+		fmt.Println("\nRecover Strategy:")
+		choices := []string{
+			"Retry (Run step again - use if close)",
+			"Skip (Mark done - use if stuck)",
+			"Abort (Exit)"}
+
+		choice, _, _ := ui.Standard.Select("How to proceed?", choices)
+
+		switch choice {
+		case 0:
+			return "retry"
+		case 1:
+			return "skip"
+		default:
+			return "fail"
+		}
+	}
 
 	fmt.Println("🚀 Starting Orchestrated Execution...")
 

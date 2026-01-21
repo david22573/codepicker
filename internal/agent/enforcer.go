@@ -3,6 +3,7 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/david22573/codepicker/internal/logger"
 	"github.com/david22573/codepicker/internal/policy"
@@ -15,7 +16,18 @@ type ApprovalRequest struct {
 	Reason string
 }
 
-type InteractionFunc func(req ApprovalRequest) bool
+// ApprovalResponse allows the UI to return more than just a boolean
+type ApprovalResponse struct {
+	Approved     bool
+	SessionScope bool // If true, approve this capability for the rest of the session
+}
+
+type InteractionFunc func(req ApprovalRequest) ApprovalResponse
+
+type SessionApprovals struct {
+	AllowWrite bool
+	AllowExec  bool
+}
 
 type PolicyEnforcer struct {
 	Policy     policy.ExecutionPolicy
@@ -23,6 +35,7 @@ type PolicyEnforcer struct {
 	Sentinel   *Sentinel
 	OnApproval InteractionFunc
 	ToolCaps   map[string][]tools.Capability
+	Session    SessionApprovals
 	Debug      bool
 }
 
@@ -52,10 +65,15 @@ func (pe *PolicyEnforcer) AllowTool(req ApprovalRequest) bool {
 		return false
 	}
 
+	// 1. PHASE 1 FIX: Silent Read-Only
+	// If the tool is purely read-only (e.g. search_code, read_file), we NEVER ask for permission
+	// unless we are in a hyper-strict mode (which we aren't implementing yet).
+	if tools.IsReadOnly(caps) {
+		return true
+	}
+
+	// 2. Check Hard Policy blocks (e.g. Shell disabled in Batch mode)
 	for _, cap := range caps {
-		if pe.Debug {
-			pe.Logger.Info(fmt.Sprintf("[Policy] Required Capability: %s", cap))
-		}
 		switch cap {
 		case tools.CapExecute:
 			if !pe.Policy.AllowShell {
@@ -70,16 +88,13 @@ func (pe *PolicyEnforcer) AllowTool(req ApprovalRequest) bool {
 		}
 	}
 
-	// [Fixed] Rename contains -> hasCapability
-	if hasCapability(caps, tools.CapExecute) {
+	// 3. Sentinel Checks (Command Injection / Dangerous Patterns)
+	if tools.HasCapability(caps, tools.CapExecute) {
 		var shellArgs struct {
 			Command string `json:"command"`
 		}
 		if err := json.Unmarshal([]byte(req.Args), &shellArgs); err == nil {
 			classification := pe.Sentinel.ClassifyCommand(shellArgs.Command)
-			if pe.Debug {
-				pe.Logger.Info(fmt.Sprintf("[Policy] Classification: %s", classification))
-			}
 
 			if classification == ClassDangerous && pe.Policy.Mode != policy.LevelInteractive {
 				pe.Logger.Warn(fmt.Sprintf("Security: Blocked dangerous command '%s'", shellArgs.Command))
@@ -92,30 +107,63 @@ func (pe *PolicyEnforcer) AllowTool(req ApprovalRequest) bool {
 		}
 	}
 
+	// 4. PHASE 2 FIX: Session Caching
+	// If we have already approved this capability for this session, skip the prompt.
 	if pe.Policy.Mode == policy.LevelInteractive {
+		if tools.HasCapability(caps, tools.CapWrite) && pe.Session.AllowWrite {
+			return true
+		}
+		if tools.HasCapability(caps, tools.CapExecute) && pe.Session.AllowExec {
+			// Even if exec is allowed, we might want to prompt for *new* dangerous commands
+			// But for now, we follow the roadmap: Trust the session.
+			return true
+		}
+
 		if pe.OnApproval == nil {
 			return false
 		}
-		return pe.OnApproval(req)
+
+		// 5. Ask User
+		resp := pe.OnApproval(req)
+
+		if resp.Approved && resp.SessionScope {
+			if tools.HasCapability(caps, tools.CapWrite) {
+				pe.Session.AllowWrite = true
+				pe.Logger.Info("🔓 Write access granted for remainder of session.")
+			}
+			if tools.HasCapability(caps, tools.CapExecute) {
+				pe.Session.AllowExec = true
+				pe.Logger.Info("🔓 Shell access granted for remainder of session.")
+			}
+		}
+
+		return resp.Approved
 	}
+
 	return true
 }
 
 func (pe *PolicyEnforcer) SetInteractionHandler(fn InteractionFunc) { pe.OnApproval = fn }
 
-func DefaultCLIInteraction(req ApprovalRequest) bool {
-	fmt.Printf("\n⚠️  Agent Request Approval\n   Tool: %s\n   Args: %s\n   Allow? [Y/n]: ", req.Tool, req.Args)
+// DefaultCLIInteraction updated to support "Always" options
+func DefaultCLIInteraction(req ApprovalRequest) ApprovalResponse {
+	// Simple heuristic to pretty-print args
+	displayArgs := req.Args
+	if len(displayArgs) > 100 {
+		displayArgs = displayArgs[:97] + "..."
+	}
+
+	fmt.Printf("\n⚠️  Agent Request: \033[1m%s\033[0m\n   Args: %s\n", req.Tool, displayArgs)
+	fmt.Printf("   [y] Yes  [n] No  [a] Always allow (Session)\n   Action? ")
+
 	var resp string
 	fmt.Scanln(&resp)
-	return resp == "" || resp == "y" || resp == "Y"
-}
+	resp = strings.ToLower(strings.TrimSpace(resp))
 
-// [Fixed] Renamed function
-func hasCapability(caps []tools.Capability, target tools.Capability) bool {
-	for _, c := range caps {
-		if c == target {
-			return true
-		}
+	if resp == "a" || resp == "all" {
+		return ApprovalResponse{Approved: true, SessionScope: true}
 	}
-	return false
+
+	approved := resp == "" || resp == "y" || resp == "yes"
+	return ApprovalResponse{Approved: approved, SessionScope: false}
 }
