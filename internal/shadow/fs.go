@@ -50,7 +50,7 @@ func NewManager(srcRoot string) (*Manager, error) {
 		ShadowRoot: shadowRoot,
 		Manifest:   Manifest{Changes: make(map[string]ChangeMeta)},
 	}
-	m.loadManifest()
+	m.LoadManifest()
 
 	return m, nil
 }
@@ -82,7 +82,6 @@ func (m *Manager) WriteFile(relPath string, content []byte) (string, error) {
 	return shadowPath, nil
 }
 
-// RecordAttribution logs the agent and task responsible for a file change
 func (m *Manager) RecordAttribution(relPath, agent, task string) error {
 	m.Manifest.Changes[relPath] = ChangeMeta{
 		File:      relPath,
@@ -93,7 +92,7 @@ func (m *Manager) RecordAttribution(relPath, agent, task string) error {
 	return m.saveManifest()
 }
 
-func (m *Manager) loadManifest() {
+func (m *Manager) LoadManifest() {
 	path := filepath.Join(m.ShadowRoot, ManifestName)
 	data, err := os.ReadFile(path)
 	if err == nil {
@@ -139,7 +138,7 @@ func (m *Manager) ListShadowFiles() ([]string, error) {
 		if d.IsDir() {
 			return nil
 		}
-		// Skip the manifest file so it doesn't show up in 'apply' list
+
 		if d.Name() == ManifestName {
 			return nil
 		}

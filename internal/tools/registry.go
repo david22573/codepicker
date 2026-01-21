@@ -42,11 +42,12 @@ func (r *Registry) GetImplementation(set ToolSet) []Tool {
 	write := &WriteShadowFileTool{}
 	shell := &RunShellTool{}
 	delegate := &DelegateTaskTool{}
+	list := &ListFilesTool{Root: r.root}
 
 	var tools []Tool
 
 	// Base tools
-	base := []Tool{read, search}
+	base := []Tool{read, search, list}
 
 	switch set {
 	case SetReadOnly:

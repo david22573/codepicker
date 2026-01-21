@@ -1,14 +1,15 @@
 package openrouter
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
-	goerrors "errors"
 	"fmt"
 	"io"
 	"math"
 	"math/rand"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -21,8 +22,8 @@ import (
 const (
 	defaultBaseURL = "https://openrouter.ai/api/v1"
 	contentType    = "application/json"
-	// Increased timeout to handle large context processing
-	defaultTimeout = 5 * time.Minute
+	// Keep timeout high for reasoning models like DeepSeek
+	defaultTimeout = 30 * time.Minute
 )
 
 type Client struct {
@@ -60,11 +61,26 @@ func WithTitle(title string) Option {
 }
 
 func NewClient(apiKey string, opts ...Option) *Client {
+	// Custom Transport to handle long-lived connections better
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second, // Aggressive KeepAlive to prevent middlebox drops
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+
 	c := &Client{
 		apiKey:  apiKey,
 		baseURL: defaultBaseURL,
 		httpClient: &http.Client{
-			Timeout: defaultTimeout,
+			Timeout:   defaultTimeout,
+			Transport: transport,
 		},
 	}
 	for _, opt := range opts {
@@ -97,6 +113,142 @@ func (c *Client) ListModels(ctx context.Context) (*ListModelsResponse, error) {
 		return nil, err
 	}
 	return &resp, nil
+}
+
+// CreateChatCompletion now internally uses streaming to prevent idle timeouts
+func (c *Client) CreateChatCompletion(
+	ctx context.Context,
+	req ChatCompletionRequest,
+) (*ChatCompletionResponse, error) {
+
+	// We force stream=true to keep the connection alive with data chunks,
+	// then aggregate them back into a single response for the caller.
+	req.Stream = true
+
+	stream, err := c.CreateChatCompletionStream(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	defer stream.Close()
+
+	// Accumulate the stream
+	fullResp := &ChatCompletionResponse{
+		Choices: []Choice{{
+			Message: &ChatMessage{Role: "assistant"},
+		}},
+	}
+
+	var toolCalls []ToolCall
+	var contentBuilder strings.Builder
+
+	for {
+		chunk, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("stream interrupted: %w", err)
+		}
+
+		if len(chunk.Choices) > 0 {
+			delta := chunk.Choices[0].Delta
+
+			// Append Content
+			if delta.Content != nil {
+				contentBuilder.WriteString(fmt.Sprintf("%v", delta.Content))
+			}
+
+			// Append Tool Calls (Complex because they stream in parts)
+			if len(delta.ToolCalls) > 0 {
+				for _, tc := range delta.ToolCalls {
+					// Expand slice if needed
+					if tc.Index >= len(toolCalls) {
+						newCalls := make([]ToolCall, tc.Index+1)
+						copy(newCalls, toolCalls)
+						toolCalls = newCalls
+					}
+
+					current := &toolCalls[tc.Index]
+					if tc.ID != "" {
+						current.ID = tc.ID
+						current.Type = tc.Type
+						current.Function.Name = tc.Function.Name
+					}
+					current.Function.Arguments += tc.Function.Arguments
+				}
+			}
+
+			// Copy usage if present (usually last chunk)
+			if chunk.Usage != nil {
+				fullResp.Usage = chunk.Usage
+			}
+
+			// Copy ID/Model from first chunk
+			if fullResp.ID == "" {
+				fullResp.ID = chunk.ID
+				fullResp.Model = chunk.Model
+			}
+		}
+	}
+
+	fullResp.Choices[0].Message.Content = contentBuilder.String()
+	fullResp.Choices[0].Message.ToolCalls = toolCalls
+
+	return fullResp, nil
+}
+
+func (c *Client) CreateChatCompletionStream(
+	ctx context.Context,
+	req ChatCompletionRequest,
+) (*ChatCompletionStream, error) {
+
+	req.Stream = true
+
+	reqBytes, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	var lastErr error
+
+	for attempt := 0; attempt < constants.MaxRetries; attempt++ {
+		if attempt > 0 {
+			delay := constants.RetryDelay * time.Duration(1<<attempt)
+			jitter := time.Duration(float64(delay) * (rand.Float64() * 0.2))
+			time.Sleep(delay + jitter)
+		}
+
+		httpReq, err := c.newRequestWithBytes(ctx, http.MethodPost, "/chat/completions", reqBytes)
+		if err != nil {
+			return nil, err
+		}
+
+		resp, err := c.httpClient.Do(httpReq)
+		if err != nil {
+			lastErr = err
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			continue
+		}
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			defer resp.Body.Close()
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			lastErr = errors.NewInternalError(
+				"openrouter.stream",
+				fmt.Errorf("status %d: %s", resp.StatusCode, string(body)),
+			)
+			continue
+		}
+
+		return &ChatCompletionStream{
+			reader: bufio.NewReader(resp.Body),
+			body:   resp.Body,
+		}, nil
+	}
+
+	return nil, fmt.Errorf("max retries exceeded: %w", lastErr)
 }
 
 func (c *Client) newRequestWithBytes(
@@ -146,22 +298,20 @@ func (c *Client) newRequest(
 	return c.newRequestWithBytes(ctx, method, path, b)
 }
 
-// sendRequest handles HTTP execution with Exponential Backoff for 429s
 func (c *Client) sendRequest(req *http.Request, v any) error {
 	var lastErr error
-	// Use more retries than default for rate limits
+
 	maxAttempts := constants.MaxRetries + 2
 
 	for attempt := 0; attempt <= maxAttempts; attempt++ {
-		// 1. Handle Backoff
+
 		if attempt > 0 {
-			// Calculate exponential backoff: 2s, 4s, 8s, 16s...
+
 			delay := time.Duration(math.Pow(2, float64(attempt))) * time.Second
-			// Add jitter
+
 			jitter := time.Duration(rand.Int63n(int64(1000 * time.Millisecond)))
 			sleepTime := delay + jitter
 
-			// Check if context is already canceled before sleeping
 			if ctxErr := req.Context().Err(); ctxErr != nil {
 				return ctxErr
 			}
@@ -169,7 +319,6 @@ func (c *Client) sendRequest(req *http.Request, v any) error {
 			time.Sleep(sleepTime)
 		}
 
-		// 2. Rewind Body (Critical for retries)
 		if attempt > 0 && req.GetBody != nil {
 			bodyCopy, err := req.GetBody()
 			if err != nil {
@@ -178,34 +327,29 @@ func (c *Client) sendRequest(req *http.Request, v any) error {
 			req.Body = bodyCopy
 		}
 
-		// 3. Execute
 		res, err := c.httpClient.Do(req)
 		if err != nil {
-			if goerrors.Is(err, context.Canceled) || goerrors.Is(err, context.DeadlineExceeded) {
+			if strings.Contains(err.Error(), "context canceled") || strings.Contains(err.Error(), "deadline exceeded") {
 				return err
 			}
 			lastErr = errors.NewInternalError("openrouter.http", err)
-			continue // Network error, retry
+			continue
 		}
 
-		// 4. Handle Rate Limits & Server Errors
 		if res.StatusCode == 429 || (res.StatusCode >= 500 && res.StatusCode != 501) {
-			res.Body.Close() // Close immediately to reuse connection
+			res.Body.Close()
 
-			// Check for specific Retry-After header
 			if retryAfter := res.Header.Get("Retry-After"); retryAfter != "" {
 				if seconds, err := strconv.Atoi(retryAfter); err == nil {
-					// Use server's suggestion if valid
 					time.Sleep(time.Duration(seconds) * time.Second)
 					continue
 				}
 			}
 
 			lastErr = fmt.Errorf("server error %d", res.StatusCode)
-			continue // Retry with standard backoff
+			continue
 		}
 
-		// 5. Handle Other Failures (Non-retryable)
 		defer res.Body.Close()
 		if res.StatusCode < 200 || res.StatusCode >= 300 {
 			body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
@@ -215,7 +359,6 @@ func (c *Client) sendRequest(req *http.Request, v any) error {
 			)
 		}
 
-		// 6. Success - Decode
 		if v == nil {
 			return nil
 		}
@@ -228,4 +371,40 @@ func (c *Client) sendRequest(req *http.Request, v any) error {
 	}
 
 	return fmt.Errorf("max retries exceeded: %w", lastErr)
+}
+
+// --- ChatCompletionStream Definitions (Previously in chat.go) ---
+
+type ChatCompletionStream struct {
+	reader *bufio.Reader
+	body   io.Closer
+}
+
+func (s *ChatCompletionStream) Recv() (*ChatCompletionResponse, error) {
+	for {
+		line, err := s.reader.ReadBytes('\n')
+		if err != nil {
+			return nil, err
+		}
+
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 || !bytes.HasPrefix(line, []byte("data: ")) {
+			continue
+		}
+
+		data := bytes.TrimPrefix(line, []byte("data: "))
+		if string(data) == "[DONE]" {
+			return nil, io.EOF
+		}
+
+		var response ChatCompletionResponse
+		if err := json.Unmarshal(data, &response); err != nil {
+			return nil, fmt.Errorf("stream unmarshal error: %w", err)
+		}
+		return &response, nil
+	}
+}
+
+func (s *ChatCompletionStream) Close() error {
+	return s.body.Close()
 }

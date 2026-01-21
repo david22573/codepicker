@@ -9,6 +9,7 @@ import (
 
 	"github.com/david22573/codepicker/internal/app"
 	"github.com/david22573/codepicker/internal/policy"
+	"github.com/david22573/codepicker/internal/ui"
 	"github.com/david22573/codepicker/pkg/openrouter"
 	"github.com/spf13/cobra"
 )
@@ -19,9 +20,12 @@ var improveCmd = &cobra.Command{
 	Long:    `Reads the ARCHITECTURE_GOALS.md file, finds the first unchecked box, and instructs the agent to implement it. Automatically updates the file upon completion.`,
 	Example: `  codepicker agent improve`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// 1. Locate and Parse Goals
-		// We do this *before* spinning up the agent to fail fast if the file is missing.
-		goalsFile := filepath.Join(srcDir, "ARCHITECTURE_GOALS.md") // srcDir is global from root.go
+
+		if ui.Standard == nil {
+			ui.Standard = ui.NewConsoleUI()
+		}
+
+		goalsFile := filepath.Join(srcDir, "ARCHITECTURE_GOALS.md")
 		content, err := os.ReadFile(goalsFile)
 		if err != nil {
 			return fmt.Errorf("could not find ARCHITECTURE_GOALS.md: %w\n(Run 'codepicker agent plan --architect' first)", err)
@@ -40,8 +44,6 @@ var improveCmd = &cobra.Command{
 
 		fmt.Printf("\n🎯 \033[1mNext Goal Identified:\033[0m \"%s\"\n", nextTask)
 
-		// 2. Initialize Agent Context
-		// using ModeInteractive ensures we get the "Allow? [y/N]" prompts for shell commands
 		agentCtx, err := app.NewAgentContext(cmd.Context(), app.ContextOptions{
 			SrcDir:   srcDir,
 			LogLevel: 1,
@@ -54,12 +56,10 @@ var improveCmd = &cobra.Command{
 		}
 		defer agentCtx.Close()
 
-		// 3. Construct Prompt
 		prompt := fmt.Sprintf("Your Goal: Implement this specific task from the improvement plan: '%s'. \n"+
 			"Verify your work with tests if possible. \n"+
 			"When finished, you DO NOT need to update ARCHITECTURE_GOALS.md, I will handle that.", nextTask)
 
-		// 4. Output Handler
 		printUpdate := func(msg openrouter.ChatMessage) {
 			if msg.Role == "assistant" && msg.Content != nil {
 				content := fmt.Sprintf("%v", msg.Content)
@@ -69,18 +69,42 @@ var improveCmd = &cobra.Command{
 			}
 		}
 
-		// 5. Run Execution
 		fmt.Println("🚀 Starting execution...")
-		result, err := agentCtx.Engine.Run(agentCtx.Ctx, prompt, printUpdate)
-		if err != nil {
-			return fmt.Errorf("agent failed to complete task: %w", err)
+
+		// RETRY LOOP: This prevents the 30-turn crash
+		var result string
+		for {
+			result, err = agentCtx.Engine.Run(agentCtx.Ctx, prompt, printUpdate)
+			if err == nil {
+				break
+			}
+
+			ui.Standard.Error("\n🛑 Agent stopped: %v", err)
+
+			// If it's the context limit or turn limit, we can usually continue or retry
+			choice, _, _ := ui.Standard.Select("How do you want to proceed?", []string{
+				"Retry (Resume/Try Again)",
+				"Skip (Mark as Done anyway)",
+				"Abort (Exit)",
+			})
+
+			if choice == 0 {
+				fmt.Println("🔄 Retrying...")
+				// Optional: Append a "continue" instruction if we wanted to be smarter,
+				// but a raw retry often works if it was a network/random failure.
+				continue
+			} else if choice == 1 {
+				fmt.Println("⏭️  Skipping task (assuming it was completed manually or is minor).")
+				result = "Skipped by user."
+				break
+			} else {
+				return fmt.Errorf("agent failed to complete task: %w", err)
+			}
 		}
 
 		fmt.Println("\n✅ Task execution finished.")
 		fmt.Println("   " + result)
 
-		// 6. Update the Goals File
-		// We assume success if the agent didn't error out.
 		newContent := strings.Replace(string(content), fullLine, "- [x] "+nextTask, 1)
 		if err := os.WriteFile(goalsFile, []byte(newContent), 0644); err != nil {
 			return fmt.Errorf("failed to update ARCHITECTURE_GOALS.md: %w", err)
@@ -93,6 +117,5 @@ var improveCmd = &cobra.Command{
 }
 
 func init() {
-	// Register 'improve' under the 'agent' namespace
 	agentCmd.AddCommand(improveCmd)
 }

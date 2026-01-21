@@ -100,6 +100,7 @@ type ToolFunction struct {
 }
 
 type ToolCall struct {
+	Index    int              `json:"index"` // Added this field
 	ID       string           `json:"id"`
 	Type     string           `json:"type"`
 	Function ToolCallFunction `json:"function"`

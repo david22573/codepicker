@@ -16,7 +16,6 @@ import (
 	"github.com/david22573/codepicker/pkg/openrouter"
 )
 
-// [Phase 5] Debug Configuration
 type DebugConfig struct {
 	Policy bool
 	Tools  bool
@@ -47,7 +46,7 @@ func NewEngine(
 	limits *config.Limits,
 	store *database.Store,
 	cfg *config.ConfigFile,
-	debug DebugConfig, // [Phase 5] Added arg
+	debug DebugConfig,
 ) (*Engine, error) {
 	shadowMgr, err := shadow.NewManager(srcRoot)
 	if err != nil {
@@ -55,7 +54,6 @@ func NewEngine(
 	}
 	fs := vfs.NewOverlayFS(srcRoot, shadowMgr)
 
-	// [Phase 5] Pass debug flag to Memory
 	memory := NewMemory(store, fs, debug.Memory)
 
 	sentinel := NewSentinel(limits)
@@ -75,10 +73,8 @@ func NewEngine(
 		Worker:   workerRunner,
 	}
 
-	// [Phase 5] Pass debug flag to Enforcer
 	enforcer := NewPolicyEnforcer(policy.Batch, log, sentinel, debug.Policy)
 
-	// [Phase 5] Pass debug flag to Executor
 	executor := NewToolExecutor(nil, runtimeCtx, enforcer, debug.Tools)
 
 	e := &Engine{
@@ -157,7 +153,18 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 		activeTools = append(activeTools, t.Definition())
 	}
 
+	// [Auto-Extension] Track unique actions to prevent premature timeout on valid traversals
+	seenActions := make(map[string]bool)
+	hardLimit := e.Limits.AgentMaxTurns * 3 // Absolute ceiling to prevent infinite bills
+	totalTurns := 0
+
+	// Loop uses standard max turns, but we might manipulate 'i' if progress is detected
 	for i := 0; i < e.Limits.AgentMaxTurns; i++ {
+		totalTurns++
+		if totalTurns >= hardLimit {
+			return "", fmt.Errorf("agent hit HARD safety limit (%d turns) despite making progress", hardLimit)
+		}
+
 		cost, _ := e.CostTracker.GetStats()
 		if cost >= e.Limits.DailyCostLimit {
 			return "", fmt.Errorf("daily cost limit exceeded ($%.2f). Stopping execution to prevent billing overrun", e.Limits.DailyCostLimit)
@@ -182,11 +189,6 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 			e.CostTracker.RecordRequest(resp.Usage.PromptTokens, resp.Usage.CompletionTokens, e.Model)
 		}
 
-		newCost, _ := e.CostTracker.GetStats()
-		if newCost >= e.Limits.DailyCostLimit {
-			return "Cost limit exceeded during generation.", fmt.Errorf("daily cost limit exceeded ($%.2f)", e.Limits.DailyCostLimit)
-		}
-
 		msg := resp.Choices[0].Message
 		messages = append(messages, *msg)
 		if updateHistory != nil {
@@ -194,11 +196,22 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 		}
 
 		if len(msg.ToolCalls) == 0 {
+			// No tools called means the model is done or asking a question
 			return fmt.Sprintf("%v", msg.Content), nil
 		}
 
+		isProgressMade := false
+
 		for _, tool := range msg.ToolCalls {
 			e.Logger.Debug(fmt.Sprintf("🔨 Executing Tool: %s", tool.Function.Name))
+
+			// [Auto-Extension] Check for uniqueness
+			actionSig := fmt.Sprintf("%s:%s", tool.Function.Name, tool.Function.Arguments)
+			if !seenActions[actionSig] {
+				seenActions[actionSig] = true
+				isProgressMade = true
+			}
+
 			resultStr := e.Executor.Execute(ctx, tool)
 
 			if len(resultStr) > e.Limits.MaxToolOutput {
@@ -216,40 +229,46 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 				updateHistory(toolMsg)
 			}
 		}
+
+		// [Auto-Extension] Logic
+		if isProgressMade {
+			// If we did something new this turn, give the agent a "free turn"
+			// by decrementing the loop counter.
+			// We handle the infinite risk via 'totalTurns' and 'hardLimit' above.
+			if i > 0 {
+				i--
+				e.Logger.Debug("🔄 Progress detected (unique tool usage). Turn budget extended.")
+			}
+		}
 	}
-	return "", fmt.Errorf("agent exceeded max turns (%d)", e.Limits.AgentMaxTurns)
+
+	return "", fmt.Errorf("agent exceeded max turns (%d) without sufficient unique progress", e.Limits.AgentMaxTurns)
 }
 
-// RunSingleTurn executes exactly one agent reasoning cycle (thought + tool calls)
-// Returns the final assistant message content after all tools are executed
 func (e *Engine) RunSingleTurn(
 	ctx context.Context,
 	task string,
 	updateHistory func(openrouter.ChatMessage),
 ) (string, error) {
-	// Check cost limits before starting
+
 	cost, _ := e.CostTracker.GetStats()
 	if cost >= e.Limits.DailyCostLimit {
 		return "", fmt.Errorf("daily cost limit exceeded ($%.2f)", e.Limits.DailyCostLimit)
 	}
 
-	// Build current context from memory
 	currentContext := e.Memory.FormatContext()
 	fullSystemMsg := e.SystemPrompt + "\n" + currentContext
 
-	// Prepare active tools
 	var activeTools []openrouter.Tool
 	for _, t := range e.Executor.Tools {
 		activeTools = append(activeTools, t.Definition())
 	}
 
-	// Build message history
 	messages := []openrouter.ChatMessage{
 		{Role: "system", Content: fullSystemMsg},
 		{Role: "user", Content: task},
 	}
 
-	// Make LLM request
 	req := openrouter.ChatCompletionRequest{
 		Model:     e.Model,
 		Messages:  messages,
@@ -262,7 +281,6 @@ func (e *Engine) RunSingleTurn(
 		return "", fmt.Errorf("LLM error: %w", err)
 	}
 
-	// Track usage
 	if resp.Usage != nil {
 		e.CostTracker.RecordRequest(
 			resp.Usage.PromptTokens,
@@ -271,18 +289,15 @@ func (e *Engine) RunSingleTurn(
 		)
 	}
 
-	// Get assistant response
 	msg := resp.Choices[0].Message
 	if updateHistory != nil {
 		updateHistory(*msg)
 	}
 
-	// If no tool calls, return the response content
 	if len(msg.ToolCalls) == 0 {
 		return fmt.Sprintf("%v", msg.Content), nil
 	}
 
-	// Execute all tool calls
 	e.Logger.Debug(fmt.Sprintf("Executing %d tools in this turn", len(msg.ToolCalls)))
 
 	for _, tool := range msg.ToolCalls {
@@ -290,7 +305,6 @@ func (e *Engine) RunSingleTurn(
 
 		resultStr := e.Executor.Execute(ctx, tool)
 
-		// Enforce output limits
 		if len(resultStr) > e.Limits.MaxToolOutput {
 			e.Logger.Warn(fmt.Sprintf("Tool output truncated: %s (%d bytes)",
 				tool.Function.Name, len(resultStr)))
@@ -298,7 +312,6 @@ func (e *Engine) RunSingleTurn(
 				"\n...(output truncated by security limit)"
 		}
 
-		// Notify callback about tool result
 		if updateHistory != nil {
 			toolMsg := openrouter.ChatMessage{
 				Role:       "tool",
@@ -309,6 +322,5 @@ func (e *Engine) RunSingleTurn(
 		}
 	}
 
-	// Return the assistant's reasoning (before tool calls)
 	return fmt.Sprintf("%v", msg.Content), nil
 }

@@ -29,10 +29,8 @@ type Orchestrator struct {
 	Team       map[AgentType]*Engine
 	Refinement *RefinementSystem
 
-	// Hooks for UI interaction
 	PlanReviewHandler func(*ExecutionPlan) bool
-	// Updated signature: now receives the AI's analysis
-	StepErrorHandler func(step PlanStep, err error, analysis string) string
+	StepErrorHandler  func(step PlanStep, err error, analysis string) string
 }
 
 type PlanStep struct {
@@ -54,12 +52,10 @@ func NewOrchestrator(
 
 	spawn := func(role AgentType, rolePolicy policy.ExecutionPolicy, prompt string) (*Engine, error) {
 		model := cfg.GetModel()
-
 		eng, err := NewEngine(client, model, srcRoot, log, config.DefaultLimits(), store, cfg, DebugConfig{})
 		if err != nil {
 			return nil, err
 		}
-
 		eng.SetPolicy(rolePolicy)
 		eng.SystemPrompt = prompt
 		return eng, nil
@@ -71,6 +67,7 @@ func NewOrchestrator(
 	}
 
 	team := make(map[AgentType]*Engine)
+	// Context agent often hits limits reading files, so we give it lenient policy
 	if ctxAgent, err := spawn(AgentContext, policy.Architect, prompts.ContextSpecialist); err == nil {
 		team[AgentContext] = ctxAgent
 	}
@@ -119,18 +116,15 @@ func (o *Orchestrator) RunTask(ctx context.Context, userTask string) error {
 			worker = o.Team[AgentModifier]
 		}
 
-		// Retry Loop
 		for {
 			o.Self.Logger.Info(fmt.Sprintf("\n▶️  Step %d [%s]: %s", i+1, step.Agent, step.Task))
 
-			// Capture the stream of thoughts to analyze later if needed
 			var recentThoughts []string
 			captureHistory := func(msg openrouter.ChatMessage) {
 				if msg.Role == "assistant" && msg.Content != nil {
 					content := fmt.Sprintf("%v", msg.Content)
 					if content != "" && !strings.Contains(content, "tool_calls") {
 						recentThoughts = append(recentThoughts, content)
-						// Keep buffer small (last 10 thoughts)
 						if len(recentThoughts) > 10 {
 							recentThoughts = recentThoughts[1:]
 						}
@@ -147,26 +141,18 @@ func (o *Orchestrator) RunTask(ctx context.Context, userTask string) error {
 				break
 			}
 
-			o.Self.Logger.Error(fmt.Sprintf("❌ Step failed: %v", err))
+			// Force log to stdout regardless of logger settings
+			fmt.Printf("\n❌ Step Error: %v\n", err)
 
 			if o.StepErrorHandler != nil {
-				// 🧠 INTELLIGENCE INJECTION
-				// Ask the Orchestrator to analyze the situation
 				analysis := "No analysis available."
 				if len(recentThoughts) > 0 {
 					o.Self.Logger.Info("🤔 Analyzing failure context...")
 					summaryPrompt := fmt.Sprintf(
-						"A worker agent failed to complete this task:\n\"%s\"\n\n"+
-							"Here are its last thoughts before failure:\n%s\n\n"+
-							"Error: %v\n\n"+
-							"Briefly analyze: Was it making progress? Is it stuck in a loop? "+
-							"Is it worth RETRYING (it was close) or SKIPPING (it was stuck)?",
-						step.Task,
-						strings.Join(recentThoughts, "\n---\n"),
-						err,
+						"Worker failed on: \"%s\"\n\nLast thoughts:\n%s\n\nError: %v\n\n"+
+							"Analyze: Was it stuck? Close to finish? Suggest RETRY or SKIP.",
+						step.Task, strings.Join(recentThoughts, "\n"), err,
 					)
-
-					// We use a separate ephemeral run so we don't pollute the main orchestrator memory too much
 					advice, _ := o.Self.RunSingleTurn(ctx, summaryPrompt, nil)
 					if advice != "" {
 						analysis = advice
@@ -181,7 +167,7 @@ func (o *Orchestrator) RunTask(ctx context.Context, userTask string) error {
 					continue
 				case "skip":
 					o.Self.Logger.Warn("⏭️  Skipping step by user request.")
-					o.Self.Memory.AddNote(fmt.Sprintf("Step [%s] was SKIPPED due to error: %v", step.Agent, err))
+					o.Self.Memory.AddNote(fmt.Sprintf("Step [%s] SKIPPED. Error: %v", step.Agent, err))
 					break
 				default:
 					return fmt.Errorf("step execution failed: %w", err)
@@ -197,12 +183,7 @@ func (o *Orchestrator) RunTask(ctx context.Context, userTask string) error {
 
 func (o *Orchestrator) createPlan(ctx context.Context, task string) (*ExecutionPlan, error) {
 	prompt := fmt.Sprintf(`TASK: %s
-Available Agents: 
-- Context (Search/Read)
-- CodeModifier (Write Code)
-- System (Shell/Test)
-- Quality (Review/Lint)
-
+Available Agents: Context, CodeModifier, System, Quality.
 Return JSON ONLY: {"steps": [{"agent": "Context", "task": "Search..."}]}`, task)
 
 	resp, err := o.Self.Run(ctx, prompt, nil)
