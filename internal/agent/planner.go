@@ -4,7 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 
+	"github.com/david22573/codepicker/internal/code"
 	"github.com/david22573/codepicker/internal/logger"
 	"github.com/david22573/codepicker/internal/prompts"
 	"github.com/david22573/codepicker/pkg/openrouter"
@@ -25,10 +29,10 @@ func NewPlanner(client *openrouter.Client, model string, log logger.Logger) *Pla
 	}
 }
 
-func (p *Planner) CreatePlan(ctx context.Context, task string, projectContext string) (*Plan, error) {
+func (p *Planner) CreatePlan(ctx context.Context, task string, projectTree string) (*Plan, error) {
 	p.Logger.Info("🧠 Thinking about plan...")
 
-	userMsg := fmt.Sprintf("TASK: %s\n\nPROJECT STRUCTURE:\n%s", task, projectContext)
+	userMsg := fmt.Sprintf("TASK: %s\n\nPROJECT STRUCTURE:\n%s", task, projectTree)
 
 	req := openrouter.ChatCompletionRequest{
 		Model: p.Model,
@@ -37,6 +41,8 @@ func (p *Planner) CreatePlan(ctx context.Context, task string, projectContext st
 			{Role: "user", Content: userMsg},
 		},
 		ResponseFormat: &openrouter.ResponseFormat{Type: "json_object"},
+		// Use Phase 1 Prefill to ensure valid JSON start
+		Prefill: "{\n  \"reasoning\": \"",
 	}
 
 	resp, err := p.Client.CreateChatCompletion(ctx, req)
@@ -57,7 +63,6 @@ func (p *Planner) CreatePlan(ctx context.Context, task string, projectContext st
 		return nil, fmt.Errorf("failed to parse plan JSON: %w", err)
 	}
 
-	// Sanitize and default status
 	for i := range aiResp.Steps {
 		aiResp.Steps[i].Status = "pending"
 		if aiResp.Steps[i].ID == 0 {
@@ -74,4 +79,37 @@ func (p *Planner) CreatePlan(ctx context.Context, task string, projectContext st
 	}
 
 	return plan, nil
+}
+
+// GenerateContextSummary creates a compressed view of the codebase using Skeletonization
+// This can be used if we want to give the Planner more than just a file tree.
+func (p *Planner) GenerateContextSummary(root string, files []string) string {
+	var sb strings.Builder
+	sb.WriteString("### SELECTED FILE SKELETONS:\n")
+
+	for _, path := range files {
+		fullPath := filepath.Join(root, path)
+		content, err := os.ReadFile(fullPath)
+		if err != nil {
+			continue
+		}
+
+		// If it's a Go file, skeletonize it
+		if strings.HasSuffix(path, ".go") {
+			skel, err := code.Skeletonize(path, content)
+			if err == nil {
+				sb.WriteString(fmt.Sprintf("\n--- FILE: %s ---\n%s\n", path, string(skel)))
+				continue
+			}
+		}
+
+		// Fallback: Just first 10 lines for other files
+		lines := strings.Split(string(content), "\n")
+		if len(lines) > 10 {
+			lines = lines[:10]
+		}
+		sb.WriteString(fmt.Sprintf("\n--- FILE: %s (Head) ---\n%s\n", path, strings.Join(lines, "\n")))
+	}
+
+	return sb.String()
 }

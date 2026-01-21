@@ -14,16 +14,17 @@ import (
 var defaultIgnoredDirs = []string{".git", "node_modules", "vendor", ".codepicker"}
 
 type ConfigFile struct {
-	Src         string       `yaml:"src"`
-	Output      string       `yaml:"output"`
-	Include     []string     `yaml:"include"`
-	Exclude     []string     `yaml:"exclude"`
-	Minify      bool         `yaml:"minify"`
-	Tokens      bool         `yaml:"tokens"`
-	Verbose     bool         `yaml:"verbose"`
-	AI          AIConfig     `yaml:"ai"`
-	Server      ServerConfig `yaml:"server"`
-	CustomTools []CustomTool `yaml:"tools"`
+	Src         string            `yaml:"src"`
+	Output      string            `yaml:"output"`
+	Include     []string          `yaml:"include"`
+	Exclude     []string          `yaml:"exclude"`
+	Minify      bool              `yaml:"minify"`
+	Tokens      bool              `yaml:"tokens"`
+	Verbose     bool              `yaml:"verbose"`
+	AI          AIConfig          `yaml:"ai"`
+	Server      ServerConfig      `yaml:"server"`
+	CustomTools []CustomTool      `yaml:"tools"`
+	MCPServers  []MCPServerConfig `yaml:"mcp_servers"` // NEW: Phase 4
 }
 
 type AIConfig struct {
@@ -42,6 +43,14 @@ type CustomTool struct {
 	Description string `yaml:"description"`
 	Command     string `yaml:"command"`
 	Arguments   string `yaml:"args_schema"`
+}
+
+// NEW: Configuration for an MCP Server (e.g. "github", "postgres")
+type MCPServerConfig struct {
+	Name    string   `yaml:"name"`
+	Command string   `yaml:"command"`
+	Args    []string `yaml:"args"`
+	Env     []string `yaml:"env"`
 }
 
 var (

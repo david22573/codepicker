@@ -1,9 +1,12 @@
 package shadow
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -13,8 +16,9 @@ import (
 
 const (
 	ShadowDirName = ".codepicker/shadow"
+	BackupDirName = ".codepicker/backups"
 	ManifestName  = "manifest.json"
-	MaxShadowSize = 1024 * 1024 * 1 // 1MB Limit for shadow files
+	MaxShadowSize = 1024 * 1024 * 1 // 1MB Limit
 )
 
 type ChangeMeta struct {
@@ -31,6 +35,7 @@ type Manifest struct {
 type Manager struct {
 	SrcRoot    string
 	ShadowRoot string
+	BackupRoot string
 	Manifest   Manifest
 }
 
@@ -41,6 +46,8 @@ func NewManager(srcRoot string) (*Manager, error) {
 	}
 
 	shadowRoot := filepath.Join(absSrc, ShadowDirName)
+	backupRoot := filepath.Join(absSrc, BackupDirName)
+
 	if err := os.MkdirAll(shadowRoot, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create shadow root: %w", err)
 	}
@@ -48,6 +55,7 @@ func NewManager(srcRoot string) (*Manager, error) {
 	m := &Manager{
 		SrcRoot:    absSrc,
 		ShadowRoot: shadowRoot,
+		BackupRoot: backupRoot,
 		Manifest:   Manifest{Changes: make(map[string]ChangeMeta)},
 	}
 	m.LoadManifest()
@@ -55,6 +63,7 @@ func NewManager(srcRoot string) (*Manager, error) {
 	return m, nil
 }
 
+// WriteFile writes content to the shadow directory
 func (m *Manager) WriteFile(relPath string, content []byte) (string, error) {
 	cleanRel := filepath.Clean(relPath)
 	if strings.HasPrefix(cleanRel, "..") || strings.HasPrefix(cleanRel, "/") {
@@ -113,16 +122,93 @@ func (m *Manager) GetShadowPath(relPath string) string {
 	return filepath.Join(m.ShadowRoot, relPath)
 }
 
-func (m *Manager) Apply(relPath string) error {
+// ApplyAtomic applies a single file but creates a backup first.
+// Returns the path to the backup file if successful.
+func (m *Manager) ApplyAtomic(relPath string) (string, error) {
 	shadowPath := filepath.Join(m.ShadowRoot, relPath)
 	realPath := filepath.Join(m.SrcRoot, relPath)
 
 	content, err := os.ReadFile(shadowPath)
 	if err != nil {
-		return fmt.Errorf("shadow file not found: %w", err)
+		return "", fmt.Errorf("shadow file not found: %w", err)
 	}
 
-	return os.WriteFile(realPath, content, 0644)
+	// 1. Create Backup
+	backupPath, err := m.createBackup(relPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to create safety backup: %w", err)
+	}
+
+	// 2. Overwrite Destination
+	if err := os.MkdirAll(filepath.Dir(realPath), 0755); err != nil {
+		return backupPath, err
+	}
+
+	if err := os.WriteFile(realPath, content, 0644); err != nil {
+		return backupPath, err
+	}
+
+	return backupPath, nil
+}
+
+// createBackup copies the current live file to .codepicker/backups/timestamp/file
+func (m *Manager) createBackup(relPath string) (string, error) {
+	realPath := filepath.Join(m.SrcRoot, relPath)
+
+	// If file doesn't exist, nothing to back up (it's a new file)
+	if _, err := os.Stat(realPath); os.IsNotExist(err) {
+		return "", nil
+	}
+
+	ts := time.Now().Format("20060102-150405")
+	backupPath := filepath.Join(m.BackupRoot, ts, relPath)
+
+	if err := os.MkdirAll(filepath.Dir(backupPath), 0755); err != nil {
+		return "", err
+	}
+
+	src, err := os.Open(realPath)
+	if err != nil {
+		return "", err
+	}
+	defer src.Close()
+
+	dst, err := os.Create(backupPath)
+	if err != nil {
+		return "", err
+	}
+	defer dst.Close()
+
+	if _, err := io.Copy(dst, src); err != nil {
+		return "", err
+	}
+
+	return backupPath, nil
+}
+
+// Restore copies the backup file back to the real path
+func (m *Manager) Restore(relPath, backupPath string) error {
+	if backupPath == "" {
+		// If no backup path, it means the file was new. We should delete the created file.
+		realPath := filepath.Join(m.SrcRoot, relPath)
+		return os.Remove(realPath)
+	}
+
+	realPath := filepath.Join(m.SrcRoot, relPath)
+	src, err := os.Open(backupPath)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+
+	dst, err := os.Create(realPath)
+	if err != nil {
+		return err
+	}
+	defer dst.Close()
+
+	_, err = io.Copy(dst, src)
+	return err
 }
 
 func (m *Manager) Cleanup() error {
@@ -131,6 +217,10 @@ func (m *Manager) Cleanup() error {
 
 func (m *Manager) ListShadowFiles() ([]string, error) {
 	var files []string
+	if _, err := os.Stat(m.ShadowRoot); os.IsNotExist(err) {
+		return files, nil
+	}
+
 	err := filepath.WalkDir(m.ShadowRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -138,7 +228,6 @@ func (m *Manager) ListShadowFiles() ([]string, error) {
 		if d.IsDir() {
 			return nil
 		}
-
 		if d.Name() == ManifestName {
 			return nil
 		}
@@ -152,26 +241,39 @@ func (m *Manager) ListShadowFiles() ([]string, error) {
 	return files, err
 }
 
+// PreviewDiff generates a diff. Falls back to simple text comparison if system diff fails.
 func (m *Manager) PreviewDiff(relPath string) (string, error) {
 	shadowPath := filepath.Join(m.ShadowRoot, relPath)
 	realPath := filepath.Join(m.SrcRoot, relPath)
 
-	shadowContent, err := os.ReadFile(shadowPath)
+	shadowBytes, err := os.ReadFile(shadowPath)
 	if err != nil {
-		return "", fmt.Errorf("could not read shadow file: %w", err)
+		return "", fmt.Errorf("reading shadow: %w", err)
 	}
 
-	realContent, err := os.ReadFile(realPath)
+	realBytes, err := os.ReadFile(realPath)
 	if os.IsNotExist(err) {
-		return fmt.Sprintf("+++ NEW FILE: %s\n(File does not exist in source)\n", relPath), nil
-	} else if err != nil {
-		return "", fmt.Errorf("could not read source file: %w", err)
+		return fmt.Sprintf("+++ NEW FILE: %s\n\n%s", relPath, string(shadowBytes)), nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("reading source: %w", err)
 	}
 
-	if string(shadowContent) == string(realContent) {
-		return fmt.Sprintf("=== %s\n(No changes detected)", relPath), nil
+	if bytes.Equal(shadowBytes, realBytes) {
+		return fmt.Sprintf("=== %s (No changes)", relPath), nil
 	}
 
-	return fmt.Sprintf("M   %s\n    Original Size: %d bytes\n    New Size:      %d bytes",
-		relPath, len(realContent), len(shadowContent)), nil
+	// Try system diff
+	cmd := exec.Command("diff", "-u", "--color=always", realPath, shadowPath)
+	out, err := cmd.CombinedOutput()
+	if len(out) > 0 {
+		return string(out), nil
+	}
+
+	// Fallback for Windows/Container without diff
+	return fmt.Sprintf("MODIFIED: %s\n<<< OLD (%d bytes)\n%s\n>>> NEW (%d bytes)\n%s",
+		relPath,
+		len(realBytes), string(realBytes),
+		len(shadowBytes), string(shadowBytes),
+	), nil
 }

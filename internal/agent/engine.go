@@ -7,6 +7,7 @@ import (
 	"github.com/david22573/codepicker/internal/config"
 	"github.com/david22573/codepicker/internal/database"
 	"github.com/david22573/codepicker/internal/logger"
+	"github.com/david22573/codepicker/internal/mcp"
 	"github.com/david22573/codepicker/internal/policy"
 	"github.com/david22573/codepicker/internal/prompts"
 	"github.com/david22573/codepicker/internal/shadow"
@@ -31,6 +32,7 @@ type Engine struct {
 	Executor    *ToolExecutor
 	Sentinel    *Sentinel
 	CostTracker *tracking.CostTracker
+	MCPManager  *mcp.Manager // NEW: Phase 4
 
 	Config *config.ConfigFile
 	Memory *WorkingMemory
@@ -75,7 +77,20 @@ func NewEngine(
 
 	enforcer := NewPolicyEnforcer(policy.Batch, log, sentinel, debug.Policy)
 
+	// --- PHASE 4: MCP Initialization ---
+	mcpMgr := mcp.NewManager(log)
+	if cfg != nil && len(cfg.MCPServers) > 0 {
+		// Start servers in background context
+		// Note: In a real app, you might want to manage this context lifecycle more carefully
+		go mcpMgr.StartServers(context.Background(), cfg.MCPServers)
+	}
+	// -----------------------------------
+
 	executor := NewToolExecutor(nil, runtimeCtx, enforcer, debug.Tools)
+
+	// Middleware from Phase 5
+	executor.AddMiddleware(NewSafetyLogMiddleware(log))
+	executor.AddMiddleware(NewFormattingMiddleware(shadowMgr.ShadowRoot, log))
 
 	e := &Engine{
 		Client:       client,
@@ -84,6 +99,7 @@ func NewEngine(
 		Enforcer:     enforcer,
 		Executor:     executor,
 		Sentinel:     sentinel,
+		MCPManager:   mcpMgr, // NEW
 		Config:       cfg,
 		Memory:       memory,
 		CostTracker:  costTracker,
@@ -104,7 +120,24 @@ func (e *Engine) rebuildTools(toolSet tools.ToolSet) {
 	}
 
 	registry := tools.NewRegistry(srcRoot, e.Config)
+	// Get internal tools (FileSystem, Search, Skeleton, etc.)
 	newTools := registry.GetImplementation(toolSet)
+
+	// --- PHASE 4: Inject MCP Tools ---
+	if e.MCPManager != nil {
+		// Fetch tools from connected MCP servers
+		// We use a short timeout context just for listing
+		mcpTools, err := e.MCPManager.GetTools(context.Background())
+		if err == nil {
+			for _, mt := range mcpTools {
+				// Wrap them in our bridge adapter
+				adapter := tools.NewMCPToolAdapter(mt.ServerName, mt.Tool, e.MCPManager)
+				newTools = append(newTools, adapter)
+				e.Logger.Debug(fmt.Sprintf("🔗 Bridged MCP Tool: %s", adapter.Name()))
+			}
+		}
+	}
+	// --------------------------------
 
 	e.Executor.Tools = make(map[string]tools.Tool)
 
@@ -153,12 +186,10 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 		activeTools = append(activeTools, t.Definition())
 	}
 
-	// [Auto-Extension] Track unique actions to prevent premature timeout on valid traversals
 	seenActions := make(map[string]bool)
-	hardLimit := e.Limits.AgentMaxTurns * 3 // Absolute ceiling to prevent infinite bills
+	hardLimit := e.Limits.AgentMaxTurns * 3
 	totalTurns := 0
 
-	// Loop uses standard max turns, but we might manipulate 'i' if progress is detected
 	for i := 0; i < e.Limits.AgentMaxTurns; i++ {
 		totalTurns++
 		if totalTurns >= hardLimit {
@@ -196,7 +227,7 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 		}
 
 		if len(msg.ToolCalls) == 0 {
-			// No tools called means the model is done or asking a question
+
 			return fmt.Sprintf("%v", msg.Content), nil
 		}
 
@@ -205,7 +236,6 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 		for _, tool := range msg.ToolCalls {
 			e.Logger.Debug(fmt.Sprintf("🔨 Executing Tool: %s", tool.Function.Name))
 
-			// [Auto-Extension] Check for uniqueness
 			actionSig := fmt.Sprintf("%s:%s", tool.Function.Name, tool.Function.Arguments)
 			if !seenActions[actionSig] {
 				seenActions[actionSig] = true
@@ -230,11 +260,7 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 			}
 		}
 
-		// [Auto-Extension] Logic
 		if isProgressMade {
-			// If we did something new this turn, give the agent a "free turn"
-			// by decrementing the loop counter.
-			// We handle the infinite risk via 'totalTurns' and 'hardLimit' above.
 			if i > 0 {
 				i--
 				e.Logger.Debug("🔄 Progress detected (unique tool usage). Turn budget extended.")

@@ -19,7 +19,6 @@ type Registry struct {
 	config *config.ConfigFile
 }
 
-// Update constructor to take config
 func NewRegistry(root string, cfg *config.ConfigFile) *Registry {
 	return &Registry{
 		root:   root,
@@ -43,11 +42,12 @@ func (r *Registry) GetImplementation(set ToolSet) []Tool {
 	shell := &RunShellTool{}
 	delegate := &DelegateTaskTool{}
 	list := &ListFilesTool{Root: r.root}
+	skel := &SkeletonizeTool{} // NEW: Added SkeletonizeTool
 
 	var tools []Tool
 
-	// Base tools
-	base := []Tool{read, search, list}
+	// Add skel to base tools so it's available in read-only modes too
+	base := []Tool{read, search, list, skel}
 
 	switch set {
 	case SetReadOnly:
@@ -62,7 +62,6 @@ func (r *Registry) GetImplementation(set ToolSet) []Tool {
 		tools = base
 	}
 
-	// Add Custom Tools (only for Standard and Admin sets)
 	if (set == SetStandard || set == SetAdmin) && r.config != nil {
 		for _, ct := range r.config.CustomTools {
 			tools = append(tools, &CustomScriptTool{DefinitionModel: ct})

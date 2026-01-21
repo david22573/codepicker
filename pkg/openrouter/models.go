@@ -36,6 +36,7 @@ type ProviderInfo struct {
 type ChatCompletionRequest struct {
 	Messages          []ChatMessage        `json:"messages"`
 	Model             string               `json:"model"` // Primary model ID
+	Prefill           string               `json:"-"`     // Internal use: Text to force-start the assistant's response
 	Stream            bool                 `json:"stream,omitempty"`
 	Temperature       *float32             `json:"temperature,omitempty"`
 	TopP              *float32             `json:"top_p,omitempty"`
@@ -100,7 +101,7 @@ type ToolFunction struct {
 }
 
 type ToolCall struct {
-	Index    int              `json:"index"` // Added this field
+	Index    int              `json:"index"`
 	ID       string           `json:"id"`
 	Type     string           `json:"type"`
 	Function ToolCallFunction `json:"function"`

@@ -24,6 +24,9 @@ const (
 	AgentQuality      AgentType = "Quality"
 )
 
+// ObserverFunc is a callback for UI updates
+type ObserverFunc func(eventType, content string)
+
 type Orchestrator struct {
 	Self       *Engine
 	Team       map[AgentType]*Engine
@@ -31,6 +34,9 @@ type Orchestrator struct {
 
 	PlanReviewHandler func(*ExecutionPlan) bool
 	StepErrorHandler  func(step PlanStep, err error, analysis string) string
+
+	// NEW: Hook for the UI
+	Observer ObserverFunc
 }
 
 type PlanStep struct {
@@ -67,7 +73,7 @@ func NewOrchestrator(
 	}
 
 	team := make(map[AgentType]*Engine)
-	// Context agent often hits limits reading files, so we give it lenient policy
+
 	if ctxAgent, err := spawn(AgentContext, policy.Architect, prompts.ContextSpecialist); err == nil {
 		team[AgentContext] = ctxAgent
 	}
@@ -88,13 +94,19 @@ func NewOrchestrator(
 	}, nil
 }
 
+func (o *Orchestrator) notify(eventType, content string) {
+	if o.Observer != nil {
+		o.Observer(eventType, content)
+	}
+}
+
 func (o *Orchestrator) RunTask(ctx context.Context, userTask string) error {
 	optimizedTask, err := o.Refinement.OptimizePrompt(ctx, userTask)
 	if err != nil {
-		o.Self.Logger.Warn("Proposer failed (using original): " + err.Error())
 		optimizedTask = userTask
 	}
-	o.Self.Logger.Info("🎼 Orchestrator planning task: " + optimizedTask)
+
+	o.notify("thought", "Planning: "+optimizedTask)
 
 	plan, err := o.createPlan(ctx, optimizedTask)
 	if err != nil {
@@ -102,13 +114,10 @@ func (o *Orchestrator) RunTask(ctx context.Context, userTask string) error {
 	}
 
 	if o.PlanReviewHandler != nil {
-		o.Self.Logger.Info("⏸️  Pausing for plan review...")
 		if approved := o.PlanReviewHandler(plan); !approved {
 			return fmt.Errorf("plan rejected by user")
 		}
 	}
-
-	o.Self.Logger.Info(fmt.Sprintf("🚀 Executing Plan (%d steps)", len(plan.Steps)))
 
 	for i, step := range plan.Steps {
 		worker := o.Team[step.Agent]
@@ -116,65 +125,53 @@ func (o *Orchestrator) RunTask(ctx context.Context, userTask string) error {
 			worker = o.Team[AgentModifier]
 		}
 
-		for {
-			o.Self.Logger.Info(fmt.Sprintf("\n▶️  Step %d [%s]: %s", i+1, step.Agent, step.Task))
+		o.notify("step", fmt.Sprintf("[%d/%d] %s: %s", i+1, len(plan.Steps), step.Agent, step.Task))
 
+		for {
 			var recentThoughts []string
+
+			// Capture history logic (modified to use Observer)
 			captureHistory := func(msg openrouter.ChatMessage) {
 				if msg.Role == "assistant" && msg.Content != nil {
 					content := fmt.Sprintf("%v", msg.Content)
 					if content != "" && !strings.Contains(content, "tool_calls") {
 						recentThoughts = append(recentThoughts, content)
-						if len(recentThoughts) > 10 {
-							recentThoughts = recentThoughts[1:]
-						}
+						o.notify("thought", content)
 					}
+				}
+				if len(msg.ToolCalls) > 0 {
+					for _, tool := range msg.ToolCalls {
+						o.notify("tool_start", tool.Function.Name)
+					}
+				}
+				if msg.Role == "tool" {
+					o.notify("tool_end", "Completed")
 				}
 			}
 
 			result, err := worker.Run(ctx, step.Task, captureHistory)
 
 			if err == nil {
-				displayResult := truncate(result, 150)
-				o.Self.Logger.Info(fmt.Sprintf("✅ Result: %s", displayResult))
 				o.Self.Memory.AddNote(fmt.Sprintf("Observation from %s: %s", step.Agent, result))
 				break
 			}
 
-			// Force log to stdout regardless of logger settings
-			fmt.Printf("\n❌ Step Error: %v\n", err)
-
+			// Error handling logic...
 			if o.StepErrorHandler != nil {
 				analysis := "No analysis available."
-				if len(recentThoughts) > 0 {
-					o.Self.Logger.Info("🤔 Analyzing failure context...")
-					summaryPrompt := fmt.Sprintf(
-						"Worker failed on: \"%s\"\n\nLast thoughts:\n%s\n\nError: %v\n\n"+
-							"Analyze: Was it stuck? Close to finish? Suggest RETRY or SKIP.",
-						step.Task, strings.Join(recentThoughts, "\n"), err,
-					)
-					advice, _ := o.Self.RunSingleTurn(ctx, summaryPrompt, nil)
-					if advice != "" {
-						analysis = advice
-					}
-				}
-
 				action := o.StepErrorHandler(step, err, analysis)
 
-				switch action {
-				case "retry":
-					o.Self.Logger.Info("🔄 Retrying step...")
+				if action == "retry" {
+					o.notify("thought", "Retrying step...")
 					continue
-				case "skip":
-					o.Self.Logger.Warn("⏭️  Skipping step by user request.")
-					o.Self.Memory.AddNote(fmt.Sprintf("Step [%s] SKIPPED. Error: %v", step.Agent, err))
+				} else if action == "skip" {
+					o.notify("thought", "Skipping step.")
 					break
-				default:
-					return fmt.Errorf("step execution failed: %w", err)
+				} else {
+					return err
 				}
-				break
 			} else {
-				return fmt.Errorf("step execution failed: %w", err)
+				return err
 			}
 		}
 	}

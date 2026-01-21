@@ -61,12 +61,12 @@ func WithTitle(title string) Option {
 }
 
 func NewClient(apiKey string, opts ...Option) *Client {
-	// Custom Transport to handle long-lived connections better
+
 	transport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
 			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second, // Aggressive KeepAlive to prevent middlebox drops
+			KeepAlive: 30 * time.Second,
 		}).DialContext,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          100,
@@ -115,14 +115,21 @@ func (c *Client) ListModels(ctx context.Context) (*ListModelsResponse, error) {
 	return &resp, nil
 }
 
-// CreateChatCompletion now internally uses streaming to prevent idle timeouts
 func (c *Client) CreateChatCompletion(
 	ctx context.Context,
 	req ChatCompletionRequest,
 ) (*ChatCompletionResponse, error) {
 
-	// We force stream=true to keep the connection alive with data chunks,
-	// then aggregate them back into a single response for the caller.
+	// PREFILL INJECTION:
+	// If a prefill is defined, we append it as the last message with role "assistant".
+	// This forces the model to continue from this point.
+	if req.Prefill != "" {
+		req.Messages = append(req.Messages, ChatMessage{
+			Role:    "assistant",
+			Content: req.Prefill,
+		})
+	}
+
 	req.Stream = true
 
 	stream, err := c.CreateChatCompletionStream(ctx, req)
@@ -131,15 +138,23 @@ func (c *Client) CreateChatCompletion(
 	}
 	defer stream.Close()
 
-	// Accumulate the stream
+	// Initialize the response with the prefill content already present.
+	// The API will only return the *continuation*, so we must prepend
+	// the prefill to ensure the caller gets the full valid text/JSON.
 	fullResp := &ChatCompletionResponse{
 		Choices: []Choice{{
-			Message: &ChatMessage{Role: "assistant"},
+			Message: &ChatMessage{
+				Role:    "assistant",
+				Content: req.Prefill,
+			},
 		}},
 	}
 
 	var toolCalls []ToolCall
 	var contentBuilder strings.Builder
+
+	// Start builder with prefill so we append subsequent chunks correctly
+	contentBuilder.WriteString(req.Prefill)
 
 	for {
 		chunk, err := stream.Recv()
@@ -153,15 +168,13 @@ func (c *Client) CreateChatCompletion(
 		if len(chunk.Choices) > 0 {
 			delta := chunk.Choices[0].Delta
 
-			// Append Content
 			if delta.Content != nil {
 				contentBuilder.WriteString(fmt.Sprintf("%v", delta.Content))
 			}
 
-			// Append Tool Calls (Complex because they stream in parts)
 			if len(delta.ToolCalls) > 0 {
 				for _, tc := range delta.ToolCalls {
-					// Expand slice if needed
+
 					if tc.Index >= len(toolCalls) {
 						newCalls := make([]ToolCall, tc.Index+1)
 						copy(newCalls, toolCalls)
@@ -178,12 +191,10 @@ func (c *Client) CreateChatCompletion(
 				}
 			}
 
-			// Copy usage if present (usually last chunk)
 			if chunk.Usage != nil {
 				fullResp.Usage = chunk.Usage
 			}
 
-			// Copy ID/Model from first chunk
 			if fullResp.ID == "" {
 				fullResp.ID = chunk.ID
 				fullResp.Model = chunk.Model
@@ -372,8 +383,6 @@ func (c *Client) sendRequest(req *http.Request, v any) error {
 
 	return fmt.Errorf("max retries exceeded: %w", lastErr)
 }
-
-// --- ChatCompletionStream Definitions (Previously in chat.go) ---
 
 type ChatCompletionStream struct {
 	reader *bufio.Reader
