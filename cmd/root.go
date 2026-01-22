@@ -18,7 +18,7 @@ var (
 	verbose     bool
 	minify      bool
 
-	// [Phase 5] Debug Flags
+	// Debug Flags
 	debugPolicy bool
 	traceTools  bool
 	traceMemory bool
@@ -38,9 +38,10 @@ var rootCmd = &cobra.Command{
 		}
 		appLogger = logger.NewStandardLogger(level)
 	},
-
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return generateCmd.RunE(cmd, args)
+	// Phase 0 Fix: Default to help
+	Run: func(cmd *cobra.Command, args []string) {
+		cmd.Help()
+		fmt.Println("\n💡 Hint: Run 'codepicker context gen' to generate context, or 'codepicker agent' to start the AI.")
 	},
 }
 
@@ -65,7 +66,6 @@ func init() {
 
 	rootCmd.PersistentFlags().BoolVarP(&minify, "minify", "m", true, "Minify output (global default)")
 
-	// [Phase 5] Debug Mode Flags
 	rootCmd.PersistentFlags().BoolVar(&debugPolicy, "debug-policy", false, "Log detailed policy decisions")
 	rootCmd.PersistentFlags().BoolVar(&traceTools, "trace-tools", false, "Log full tool arguments and outputs")
 	rootCmd.PersistentFlags().BoolVar(&traceMemory, "trace-memory", false, "Log memory snapshot/restore operations")

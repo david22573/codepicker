@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 	"path/filepath"
-	"strings"
 
 	"github.com/david22573/codepicker/internal/shadow"
 	"github.com/david22573/codepicker/internal/tui"
@@ -15,7 +14,7 @@ var (
 	autoApprove   bool
 	acceptPattern string
 	rejectPattern string
-	useTUI        bool
+	interactive   bool
 )
 
 var applyCmd = &cobra.Command{
@@ -43,14 +42,15 @@ var applyCmd = &cobra.Command{
 			return nil
 		}
 
-		// FILTERING
 		var pendingFiles []string
 		for _, f := range files {
-			if acceptPattern != "" && matchesPattern(f, acceptPattern) {
-				pendingFiles = append(pendingFiles, f)
+			if rejectPattern != "" && matchesPattern(f, rejectPattern) {
 				continue
 			}
-			if rejectPattern != "" && matchesPattern(f, rejectPattern) {
+			if acceptPattern != "" {
+				if matchesPattern(f, acceptPattern) {
+					pendingFiles = append(pendingFiles, f)
+				}
 				continue
 			}
 			pendingFiles = append(pendingFiles, f)
@@ -61,12 +61,11 @@ var applyCmd = &cobra.Command{
 			return nil
 		}
 
-		// TUI MODE
-		if useTUI && !autoApprove {
+		// Phase 1: Explicit interactive mode check
+		if interactive && !autoApprove {
 			return tui.Run(sm, pendingFiles)
 		}
 
-		// CLI MODE
 		ui.Standard.Info("📦 Pending Changes:")
 		var rows [][]string
 		for _, f := range pendingFiles {
@@ -78,7 +77,7 @@ var applyCmd = &cobra.Command{
 		if !autoApprove {
 			choice, _, _ := ui.Standard.Select("How to proceed?", []string{
 				"Apply All (Batch)",
-				"Interactive Review",
+				"Interactive Review (TUI)",
 				"Discard All",
 			})
 
@@ -98,23 +97,19 @@ var applyCmd = &cobra.Command{
 	},
 }
 
-// runBatchApply attempts to apply all files with rollback capability
 func runBatchApply(sm *shadow.Manager, files []string) error {
 	ui.Standard.Info("🚀 Applying %d files...", len(files))
 
-	var backups = make(map[string]string) // file -> backupPath
+	var backups = make(map[string]string)
 	var applied []string
 
 	for _, file := range files {
 		backupPath, err := sm.ApplyAtomic(file)
 		if err != nil {
 			ui.Standard.Error("❌ Failed to apply %s: %v", file, err)
-
-			if ui.Standard.Confirm("Apply failed. Rollback previous changes?", true) {
-				rollback(sm, backups, applied)
-				return fmt.Errorf("operation aborted and rolled back")
-			}
-			return fmt.Errorf("operation stopped (partial apply)")
+			ui.Standard.Warn("⚠️  Batch application failed. Initiating auto-rollback...")
+			rollback(sm, backups, applied)
+			return fmt.Errorf("operation aborted and rolled back due to error on %s", file)
 		}
 
 		backups[file] = backupPath
@@ -129,7 +124,8 @@ func runBatchApply(sm *shadow.Manager, files []string) error {
 
 func rollback(sm *shadow.Manager, backups map[string]string, applied []string) {
 	ui.Standard.Warn("↺ Rolling back changes...")
-	for _, f := range applied {
+	for i := len(applied) - 1; i >= 0; i-- {
+		f := applied[i]
 		backup := backups[f]
 		if err := sm.Restore(f, backup); err != nil {
 			ui.Standard.Error("  CRITICAL: Failed to restore %s from %s", f, backup)
@@ -140,42 +136,8 @@ func rollback(sm *shadow.Manager, backups map[string]string, applied []string) {
 }
 
 func runInteractiveReview(sm *shadow.Manager, files []string) error {
-	for i, file := range files {
-		fmt.Println("\n" + strings.Repeat("=", 60))
-		ui.Standard.Info("[%d/%d] Reviewing: %s", i+1, len(files), file)
-		fmt.Println(strings.Repeat("=", 60))
-
-		diff, _ := sm.PreviewDiff(file)
-		fmt.Println(diff)
-
-		choice, _, _ := ui.Standard.Select("Action?", []string{
-			"Apply",
-			"Skip",
-			"Apply All Remaining",
-			"Quit",
-		})
-
-		switch choice {
-		case 0: // Apply
-			if _, err := sm.ApplyAtomic(file); err != nil {
-				ui.Standard.Error("Failed to apply: %v", err)
-			} else {
-				ui.Standard.Success("Applied.")
-			}
-		case 1: // Skip
-			ui.Standard.Warn("Skipped.")
-		case 2: // Apply Remaining
-			remaining := files[i:]
-			return runBatchApply(sm, remaining)
-		case 3: // Quit
-			return nil
-		}
-	}
-
-	if ui.Standard.Confirm("Clean up remaining shadow files?", true) {
-		sm.Cleanup()
-	}
-	return nil
+	// Re-route to TUI if selected from menu
+	return tui.Run(sm, files)
 }
 
 func matchesPattern(file, pattern string) bool {
@@ -189,7 +151,7 @@ func matchesPattern(file, pattern string) bool {
 func init() {
 	rootCmd.AddCommand(applyCmd)
 	applyCmd.Flags().BoolVarP(&autoApprove, "yes", "y", false, "Automatically apply all changes without prompting")
-	applyCmd.Flags().StringVar(&acceptPattern, "accept", "", "Glob pattern to auto-accept (e.g. '*.go')")
-	applyCmd.Flags().StringVar(&rejectPattern, "reject", "", "Glob pattern to auto-reject (e.g. '*.md')")
-	applyCmd.Flags().BoolVar(&useTUI, "tui", true, "Use interactive TUI for review (disable for CI/CD)")
+	applyCmd.Flags().StringVar(&acceptPattern, "accept", "", "Glob pattern to auto-accept (e.g. '*.go') - acts as a whitelist")
+	applyCmd.Flags().StringVar(&rejectPattern, "reject", "", "Glob pattern to auto-reject (e.g. '*.md') - takes precedence")
+	applyCmd.Flags().BoolVarP(&interactive, "interactive", "i", false, "Use interactive TUI for review")
 }

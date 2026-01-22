@@ -3,7 +3,10 @@ package batch
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/david22573/codepicker/internal/app"
@@ -14,12 +17,13 @@ import (
 )
 
 type Runner struct {
-	Queue       *Queue
-	Store       *database.Store
-	Logger      logger.Logger
-	Concurrency int
-	SrcDir      string
-	// Removed Client/APIKey fields - AgentContext handles this now
+	Queue        *Queue
+	Store        *database.Store
+	Logger       logger.Logger
+	Concurrency  int
+	SrcDir       string
+	shuttingDown bool
+	mu           sync.Mutex
 }
 
 func NewRunner(q *Queue, s *database.Store, log logger.Logger, workers int, srcDir string) *Runner {
@@ -39,21 +43,44 @@ func (r *Runner) Start(ctx context.Context) error {
 	r.Logger.Info(fmt.Sprintf("🚀 Starting Batch Runner with %d workers", r.Concurrency))
 	r.Logger.Info("🛡️  Policy: Batch (No shell access, strict allowances)")
 
+	// Phase 3: Graceful Shutdown Handling
+	stopChan := make(chan os.Signal, 1)
+	signal.Notify(stopChan, os.Interrupt, syscall.SIGTERM)
+
+	// Create a cancellable context for workers
+	workerCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, r.Concurrency)
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
+	go func() {
+		<-stopChan
+		r.Logger.Warn("🛑 Shutdown signal received. Draining active jobs...")
+		r.mu.Lock()
+		r.shuttingDown = true
+		r.mu.Unlock()
+		cancel() // Signal workers to stop picking up NEW work
+	}()
+
 	for {
+		// Check shutdown status
+		r.mu.Lock()
+		isDown := r.shuttingDown
+		r.mu.Unlock()
+		if isDown {
+			break
+		}
+
 		select {
-		case <-ctx.Done():
-			r.Logger.Info("🛑 Batch Runner stopping...")
-			wg.Wait()
-			return nil
+		case <-workerCtx.Done():
+			goto DRAIN
 		case <-ticker.C:
 			select {
 			case sem <- struct{}{}:
-				// Try to claim a job
+				// Acquired a worker slot
 				job, err := r.Queue.Next()
 				if err != nil {
 					r.Logger.Error("Queue error: " + err.Error())
@@ -61,7 +88,7 @@ func (r *Runner) Start(ctx context.Context) error {
 					continue
 				}
 				if job == nil {
-					<-sem // Release slot if no job
+					<-sem
 					continue
 				}
 
@@ -69,13 +96,21 @@ func (r *Runner) Start(ctx context.Context) error {
 				go func(j *Job) {
 					defer wg.Done()
 					defer func() { <-sem }()
-					r.processJob(ctx, j)
+					// We use a fresh background context for the job itself so it finishes
+					// even if the runner is shutting down (unless hard killed).
+					r.processJob(context.Background(), j)
 				}(job)
 			default:
 				continue
 			}
 		}
 	}
+
+DRAIN:
+	r.Logger.Info("⏳ Waiting for active jobs to finish...")
+	wg.Wait()
+	r.Logger.Info("✅ Batch Runner stopped cleanly.")
+	return nil
 }
 
 func (r *Runner) processJob(ctx context.Context, job *Job) {
@@ -86,13 +121,11 @@ func (r *Runner) processJob(ctx context.Context, job *Job) {
 		return
 	}
 
-	// 1. Initialize Safe Context per Job
-	// We use ModeBatch which sets up the restrictive policy automatically.
 	agentCtx, err := app.NewAgentContext(ctx, app.ContextOptions{
 		SrcDir:   r.SrcDir,
 		LogLevel: 1,
-		Mode:     app.ModeBatch, // <--- Crucial: Enforces non-interactive policy
-		Policy:   policy.Batch,  // Explicitly set Batch policy
+		Mode:     app.ModeBatch,
+		Policy:   policy.Batch,
 		Task:     job.Task,
 	})
 
@@ -102,24 +135,11 @@ func (r *Runner) processJob(ctx context.Context, job *Job) {
 	}
 	defer agentCtx.Close()
 
-	// 2. Planning (Optional but recommended for Batch)
-	// We use the planner to create structure, then execute it.
-	// planner := agent.NewPlanner(agentCtx.Engine.Client, agentCtx.Engine.Model, r.Logger)
-
-	// Create a simple one-shot plan if the task is simple, or a full plan for complex ones
-	// For robustness in batch, we default to direct execution via Engine for now
-	// unless we want to enforce planning for everything.
-	// Let's stick to direct Engine execution for simplicity, OR use the planner if you prefer.
-	// Below relies on the standard Engine run loop which is robust enough.
-
+	// Capture partial updates if needed, but for batch we mainly care about the final result
 	printUpdate := func(msg openrouter.ChatMessage) {
-		// Log thoughts to internal logger only, or update job progress in DB if you add that field
-		if msg.Role == "assistant" && msg.Content != nil {
-			// r.Logger.Debug(fmt.Sprintf("[Job %s] Thought: %v", job.ID[:8], msg.Content))
-		}
+		// Optional: Could log progress to a separate file or DB field
 	}
 
-	// 3. Execution
 	result, err := agentCtx.Engine.Run(ctx, job.Task, printUpdate)
 
 	if err != nil {
@@ -127,7 +147,8 @@ func (r *Runner) processJob(ctx context.Context, job *Job) {
 		return
 	}
 
-	// 4. Completion
+	// Phase 3: Pre-apply change summaries would be generated here by inspecting
+	// the shadow manager. For now, we append the result.
 	if err := r.Queue.UpdateStatus(job.ID, StatusCompleted, result, ""); err != nil {
 		r.Logger.Error("Failed to mark complete: " + err.Error())
 	}

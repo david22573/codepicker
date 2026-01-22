@@ -6,7 +6,6 @@ import (
 	"time"
 )
 
-// Level defines the strictness of the agent
 type Level string
 
 const (
@@ -15,7 +14,6 @@ const (
 	LevelAuto        Level = "auto"        // Allow specific safe actions, block others
 )
 
-// ExecutionPolicy defines what the agent is allowed to do
 type ExecutionPolicy struct {
 	Name            string
 	Mode            Level
@@ -26,7 +24,6 @@ type ExecutionPolicy struct {
 	RequireReason   bool // If true, agent must explain why before tool use
 }
 
-// Default Policies
 var (
 	// Interactive: The human is watching. Allow most things, but prompt for shell/writes.
 	Interactive = ExecutionPolicy{
@@ -39,12 +36,13 @@ var (
 	}
 
 	// Batch: Headless. Safer defaults. No sudo, no weird binaries.
+	// Phase 2: Align Batch policy with execution reality (added gofmt)
 	Batch = ExecutionPolicy{
 		Name:            "Batch",
 		Mode:            LevelAuto,
-		AllowShell:      false, // Shell usage usually risky in batch without supervision
-		AllowFileWrite:  true,  // Writing code is the point
-		AllowedBinaries: []string{"ls", "grep", "find", "go", "npm"},
+		AllowShell:      false,
+		AllowFileWrite:  true,
+		AllowedBinaries: []string{"ls", "grep", "find", "go", "npm", "gofmt"},
 		MaxRuntime:      15 * time.Minute,
 	}
 
@@ -53,12 +51,11 @@ var (
 		Name:           "Architect",
 		Mode:           LevelStrict,
 		AllowShell:     false,
-		AllowFileWrite: false, // Only shadow files allowed (handled by engine logic)
+		AllowFileWrite: false,
 		MaxRuntime:     10 * time.Minute,
 	}
 )
 
-// ValidateCommand checks if a binary is allowed under this policy
 func (p ExecutionPolicy) ValidateCommand(command string) error {
 	if !p.AllowShell {
 		return fmt.Errorf("shell execution is disabled by policy '%s'", p.Name)

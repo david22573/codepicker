@@ -6,11 +6,14 @@ import (
 
 	"github.com/charmbracelet/huh"
 	"github.com/david22573/codepicker/internal/constants"
+	"github.com/david22573/codepicker/internal/ui"
 	"github.com/spf13/cobra"
 )
 
-// FIX: Define the flag variable that was missing
-var forceInit bool
+var (
+	forceInit   bool
+	skipConfirm bool
+)
 
 type InitOptions struct {
 	Language    string
@@ -23,16 +26,28 @@ var initCmd = &cobra.Command{
 	Use:   "init",
 	Short: "Interactive project setup wizard",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// FIX: Use forceInit check here
-		if _, err := os.Stat(".codepicker.yml"); err == nil && !forceInit {
-			return fmt.Errorf(".codepicker.yml already exists. Use --force to overwrite")
+
+		if ui.Standard == nil {
+			ui.Standard = ui.NewConsoleUI()
+		}
+
+		if _, err := os.Stat(".codepicker.yml"); err == nil {
+			if !forceInit {
+				return fmt.Errorf(".codepicker.yml already exists. Use --force to overwrite")
+			}
+
+			// Phase 0: Explicit confirmation on init --force
+			if !skipConfirm {
+				if !ui.Standard.Confirm("⚠️  Overwrite existing .codepicker.yml?", false) {
+					return fmt.Errorf("operation cancelled by user")
+				}
+			}
 		}
 
 		opts := InitOptions{
 			ModelChoice: constants.DefaultModel,
 		}
 
-		// 1. Define the Form
 		form := huh.NewForm(
 			huh.NewGroup(
 				huh.NewSelect[string]().
@@ -63,16 +78,13 @@ var initCmd = &cobra.Command{
 			),
 		)
 
-		// 2. Run the Form
 		err := form.Run()
 		if err != nil {
-			return nil // User cancelled
+			return nil
 		}
 
-		// 3. Generate Config based on answers
 		configContent := generateConfigContent(opts)
 
-		// 4. Write File
 		if err := os.WriteFile(".codepicker.yml", []byte(configContent), 0644); err != nil {
 			return fmt.Errorf("failed to write config: %w", err)
 		}
@@ -84,8 +96,9 @@ var initCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(initCmd)
-	// FIX: Register the force flag
+
 	initCmd.Flags().BoolVarP(&forceInit, "force", "f", false, "Overwrite existing config file")
+	initCmd.Flags().BoolVarP(&skipConfirm, "yes", "y", false, "Skip confirmation prompts (automated mode)")
 }
 
 func generateConfigContent(opts InitOptions) string {

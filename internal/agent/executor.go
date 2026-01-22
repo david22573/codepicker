@@ -2,18 +2,16 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/david22573/codepicker/internal/tools"
 	"github.com/david22573/codepicker/pkg/openrouter"
 )
 
-// ToolMiddleware defines hooks that run before and after tool execution.
 type ToolMiddleware interface {
-	// BeforeExecute is called before the tool runs. If it returns an error, execution stops.
 	BeforeExecute(toolName string, args string) error
-
-	// AfterExecute is called after the tool runs successfully.
+	// AfterExecute can return error to modify result/log, but usually just logs
 	AfterExecute(toolName string, result string) error
 }
 
@@ -23,6 +21,13 @@ type ToolExecutor struct {
 	Enforcer       *PolicyEnforcer
 	Middlewares    []ToolMiddleware
 	Trace          bool
+}
+
+// Phase 2: Structured Tool Results
+type ToolResponse struct {
+	Status string `json:"status"` // "success", "error", "policy_blocked"
+	Result string `json:"result,omitempty"`
+	Error  string `json:"error,omitempty"`
 }
 
 func NewToolExecutor(
@@ -50,36 +55,37 @@ func (e *ToolExecutor) AddMiddleware(m ToolMiddleware) {
 }
 
 func (e *ToolExecutor) Execute(ctx context.Context, call openrouter.ToolCall) string {
-	// 1. Policy Check
+
 	req := ApprovalRequest{
 		Tool: call.Function.Name,
 		Args: call.Function.Arguments,
 	}
 
+	// 1. Policy Check
 	if !e.Enforcer.AllowTool(req) {
-		return "Action denied by security policy."
+		return e.formatError("policy_blocked", "Action denied by security policy.")
 	}
 
 	tool, exists := e.Tools[call.Function.Name]
 	if !exists {
-		return fmt.Sprintf("Error: Tool '%s' is not available in this context.", call.Function.Name)
+		return e.formatError("error", fmt.Sprintf("Tool '%s' is not available in this context.", call.Function.Name))
 	}
 
-	// 2. Middleware: BeforeExecute
+	// 2. Middleware Pre-Check (Fail-Closed)
 	for _, mw := range e.Middlewares {
 		if err := mw.BeforeExecute(call.Function.Name, call.Function.Arguments); err != nil {
-			return fmt.Sprintf("Action blocked by middleware: %v", err)
+			return e.formatError("policy_blocked", fmt.Sprintf("Action blocked by safety middleware: %v", err))
 		}
 	}
 
-	// 3. Execution
 	if e.Trace {
 		fmt.Printf("\n[TRACE] >>> EXECUTE %s\nARGS: %s\n", call.Function.Name, call.Function.Arguments)
 	}
 
+	// 3. Execution
 	result, err := tool.Execute(ctx, call.Function.Arguments, e.RuntimeContext)
 	if err != nil {
-		return fmt.Sprintf("Tool execution failed: %v", err)
+		return e.formatError("error", fmt.Sprintf("Tool execution failed: %v", err))
 	}
 
 	if e.Trace {
@@ -90,10 +96,10 @@ func (e *ToolExecutor) Execute(ctx context.Context, call openrouter.ToolCall) st
 		fmt.Printf("[TRACE] <<< RESULT: %s\n", out)
 	}
 
-	// 4. Middleware: AfterExecute
+	// 4. Middleware Post-Hook
 	for _, mw := range e.Middlewares {
-		// We log errors from AfterExecute but do not fail the tool execution itself
-		// as the action has already occurred.
+		// Post-hooks are generally cosmetic (formatting/logging), so we don't hard fail here
+		// unless necessary.
 		if mwErr := mw.AfterExecute(call.Function.Name, result); mwErr != nil {
 			if e.Trace {
 				fmt.Printf("[TRACE] Middleware Post-Hook Error: %v\n", mwErr)
@@ -102,4 +108,13 @@ func (e *ToolExecutor) Execute(ctx context.Context, call openrouter.ToolCall) st
 	}
 
 	return result
+}
+
+func (e *ToolExecutor) formatError(status, msg string) string {
+	resp := ToolResponse{
+		Status: status,
+		Error:  msg,
+	}
+	b, _ := json.Marshal(resp)
+	return string(b)
 }

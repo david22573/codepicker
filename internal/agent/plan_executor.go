@@ -23,11 +23,15 @@ func NewPlanExecutor(eng *Engine, plan *Plan) *PlanExecutor {
 }
 
 func (pe *PlanExecutor) Execute(ctx context.Context) error {
+	// Phase 3: Plan Validation
+	if len(pe.Plan.Steps) == 0 {
+		return fmt.Errorf("invalid plan: no steps to execute")
+	}
+
 	pe.Engine.Logger.Info(fmt.Sprintf("🚀 Starting Plan Execution: %s (%d steps)", pe.Plan.ID, len(pe.Plan.Steps)))
 
 	pe.Engine.Memory.Store.UpdatePlanStatus(pe.Plan.ID, "running")
 
-	// Get access to Shadow Manager to check for progress
 	var shadowMgr *shadow.Manager
 	if overlay, ok := pe.Engine.Memory.FS.(interface{ GetShadowManager() *shadow.Manager }); ok {
 		shadowMgr = overlay.GetShadowManager()
@@ -45,7 +49,7 @@ func (pe *PlanExecutor) Execute(ctx context.Context) error {
 		step.Status = "running"
 		pe.savePlanState()
 
-		// Load Context
+		// Load context files for this step
 		if len(step.Files) > 0 {
 			for _, f := range step.Files {
 				if err := pe.Engine.Memory.Add(f); err != nil {
@@ -54,8 +58,10 @@ func (pe *PlanExecutor) Execute(ctx context.Context) error {
 			}
 		}
 
-		// Execution Loop with Smart Resume
-		maxRetries := 3
+		// Phase 3: Smart Retry Logic
+		// We retry up to 2 times (Total 3 attempts).
+		// If it fails, we feed the error back into the prompt.
+		maxRetries := 2
 		var result string
 		var err error
 		startTime := time.Now()
@@ -63,38 +69,37 @@ func (pe *PlanExecutor) Execute(ctx context.Context) error {
 		for attempt := 0; attempt <= maxRetries; attempt++ {
 			instruction := step.Instruction
 
-			// --- SMART RESUME LOGIC ---
 			if attempt > 0 {
 				pe.Engine.Logger.Warn(fmt.Sprintf("🔄 Retry attempt %d/%d...", attempt, maxRetries))
 
-				// Check if files were written since we started this step
+				// Check if any shadow files were written despite the failure
+				var partialProgress []string
 				if shadowMgr != nil {
-					progress := pe.checkProgress(shadowMgr, startTime)
-					if len(progress) > 0 {
-						pe.Engine.Logger.Info(fmt.Sprintf("🧠 Detected partial progress on %d files. Adjusting prompt.", len(progress)))
-
-						instruction += fmt.Sprintf(
-							"\n\n[SYSTEM NOTICE]: The previous attempt timed out or failed, BUT you successfully wrote these files to shadow: %s.\n"+
-								"DO NOT rewrite them unless necessary. Pick up exactly where you left off and complete the remaining work.",
-							strings.Join(progress, ", "),
-						)
-					} else {
-						instruction += fmt.Sprintf("\n\n[SYSTEM NOTICE]: Previous attempt failed with error: %v. Please try again.", err)
-					}
+					partialProgress = pe.checkProgress(shadowMgr, startTime)
 				}
+
+				if len(partialProgress) > 0 {
+					pe.Engine.Logger.Info(fmt.Sprintf("🧠 Detected partial progress on %d files. Adjusting prompt.", len(partialProgress)))
+					instruction += fmt.Sprintf(
+						"\n\n[SYSTEM NOTICE]: The previous attempt timed out or failed, BUT you successfully wrote these files to shadow: %s.\n"+
+							"DO NOT rewrite them unless necessary. Pick up exactly where you left off and complete the remaining work.",
+						strings.Join(partialProgress, ", "),
+					)
+				} else {
+					instruction += fmt.Sprintf("\n\n[SYSTEM NOTICE]: Previous attempt failed with error: %v. Please try again. Review your logic and syntax.", err)
+				}
+
+				// Backoff
 				time.Sleep(2 * time.Second)
 			}
-			// --------------------------
 
 			result, err = pe.Engine.Run(ctx, instruction, pe.makePrintCallback(step.ID))
 			if err == nil {
 				break
 			}
 
-			// Special handling for Context Deadline (Timeout)
 			if strings.Contains(err.Error(), "deadline exceeded") || strings.Contains(err.Error(), "timeout") {
-				pe.Engine.Logger.Warn("⏳ Step timed out. Attempting smart resume...")
-				// We don't break, we loop to retry with the "Smart Resume" instruction
+				pe.Engine.Logger.Warn("⏳ Step timed out.")
 			} else {
 				pe.Engine.Logger.Warn(fmt.Sprintf("Step %d execution error: %v", step.ID, err))
 			}
@@ -102,7 +107,7 @@ func (pe *PlanExecutor) Execute(ctx context.Context) error {
 
 		if err != nil {
 			pe.handleStepFailure(step, err)
-			return fmt.Errorf("step %d failed", step.ID)
+			return fmt.Errorf("step %d failed after retries: %w", step.ID, err)
 		}
 
 		step.Status = "completed"
@@ -110,8 +115,7 @@ func (pe *PlanExecutor) Execute(ctx context.Context) error {
 		pe.savePlanState()
 		pe.Engine.Logger.Info(fmt.Sprintf("✅ Step %d Complete", step.ID))
 
-		// Reset start time for next step logic
-		startTime = time.Now()
+		startTime = time.Now() // Reset timer for next step
 		time.Sleep(1 * time.Second)
 	}
 
@@ -122,8 +126,7 @@ func (pe *PlanExecutor) Execute(ctx context.Context) error {
 
 func (pe *PlanExecutor) checkProgress(sm *shadow.Manager, since time.Time) []string {
 	var recentFiles []string
-	// Reload manifest to get latest disk state
-	sm.LoadManifest()
+	sm.LoadManifest() // Reload from disk to see latest changes
 
 	for file, meta := range sm.Manifest.Changes {
 		if meta.Timestamp.After(since) {
@@ -138,7 +141,9 @@ func (pe *PlanExecutor) makePrintCallback(stepID int) func(openrouter.ChatMessag
 		if msg.Role == "assistant" && msg.Content != nil {
 			content := fmt.Sprintf("%v", msg.Content)
 			if content != "" && !strings.Contains(content, "tool_calls") {
-				fmt.Printf("🤖 Step %d Thought: %s\n", stepID, content)
+				// Only print if we are debugging or it's a significant thought
+				pe.Engine.Logger.Debug(fmt.Sprintf("%d: %s", stepID, content))
+				// For CLI feedback, we might just print a dot or spinner update
 			}
 		}
 	}

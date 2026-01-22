@@ -1,7 +1,6 @@
-sample.txt
-claude/
-phases.md
+roadmaps/
 go.mod
 LICENSE
 README.md
 go.sum
+codepicker_context.md

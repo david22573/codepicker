@@ -16,10 +16,10 @@ import (
 )
 
 var (
-	ctxCopy      bool
-	ctxOut       string
-	ctxTokens    bool
-	ctxMinify    bool
+	ctxCopy   bool
+	ctxOut    string
+	ctxTokens bool
+	// ctxMinify removed: uses global 'minify' from root.go
 	ctxDiffRef   string
 	ctxDryRun    bool
 	ctxOverwrite bool
@@ -65,7 +65,7 @@ func init() {
 
 	generateCmd.Flags().StringVarP(&ctxOut, "out", "o", "", "Output file path")
 	generateCmd.Flags().BoolVarP(&ctxTokens, "tokens", "t", false, "Show token count")
-	generateCmd.Flags().BoolVarP(&ctxMinify, "minify", "m", true, "Minify code")
+	// Phase 1: Removed local minify flag definition to unify with root global flag
 	generateCmd.Flags().BoolVarP(&ctxOverwrite, "yes", "y", false, "Overwrite existing output")
 	generateCmd.Flags().StringVarP(&ctxDiffRef, "diff", "d", "", "Scan only changed files (git diff)")
 	generateCmd.Flags().BoolVarP(&ctxDryRun, "dry-run", "D", false, "Simulate scan")
@@ -115,19 +115,18 @@ func runContextScan(cmd *cobra.Command, strategyName string) error {
 		}
 		outPath = ctxOut
 
-		// [0.1] Fix overwrite protection
 		if _, err := os.Stat(outPath); err == nil && !ctxDryRun && !ctxOverwrite {
 			return fmt.Errorf("file '%s' already exists; use --yes to overwrite", outPath)
 		}
 
-		w = writer.NewConcatStrategy(outPath, ctxMinify, ctxTokens)
+		// Phase 1: Uses global 'minify' variable
+		w = writer.NewConcatStrategy(outPath, minify, ctxTokens)
 		if ctxDryRun {
 			w = writer.NewDryRunStrategy(w, appLogger)
 			appLogger.Info("🌵 Dry-run enabled")
 		}
 	}
 
-	// [0.2] Nil-safe lifecycle handling
 	if w != nil {
 		defer w.Close()
 	} else {
@@ -154,7 +153,15 @@ func runContextScan(cmd *cobra.Command, strategyName string) error {
 			return nil
 		}
 		s.SetWhitelist(files)
-		appLogger.Info(fmt.Sprintf("🔍 Diff mode: scanning %d changed files", len(files)))
+
+		// Phase 1: Clarify diff behavior with explicit logging
+		ref := ctxDiffRef
+		if ref == "" {
+			ref = "Working Tree (Uncommitted)"
+		} else if ref == "staged" {
+			ref = "Index (Staged Changes)"
+		}
+		appLogger.Info(fmt.Sprintf("🔍 Diff mode active. Base: %s | Files: %d", ref, len(files)))
 	}
 
 	if err := s.Scan(cmd.Context()); err != nil {

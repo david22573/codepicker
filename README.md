@@ -1,124 +1,181 @@
-# codepicker ⛏️
+# Codepicker
 
-**Codepicker** is an autonomous developer agent and context harvester. It bridges your local filesystem with Large Language Models (LLMs) to analyze code, answer questions, and perform complex refactoring tasks safely.
+**Codepicker** is an AI-native developer tool that turns your codebase into context for LLMs and provides autonomous agents to perform complex refactoring, analysis, and architectural tasks.
 
-## ✨ Features
+It is designed for safety, predictability, and automation.
 
-### 🧠 Agentic Capabilities
-* **Interactive Chat:** Chat with your codebase (`codepicker chat`) with persistent history.
-* **Autonomous Tasks:** Ask the agent to "Refactor the logging" or "Write a unit test" (`codepicker do`).
-* **Shadow Workspace:** The agent proposes changes in a sandboxed `.codepicker/shadow` directory. It **never** modifies your code without permission.
-* **Review & Apply:** Use `codepicker apply` to review diffs and commit agent changes.
+## 🚀 Key Features
 
-### 🛠️ Core Tools
-* **Context Generation:** Scans and minifies code into a single Markdown file optimized for LLM context windows.
-* **Smart Selection:** "Smart Mode" uses AI to pick only relevant files for a query, saving tokens.
-* **Plugin System:** Extend the agent with custom shell commands defined in `.codepicker.yml`.
-* **Git Aware:** Scan only changed files with `--diff` or `--diff staged`.
+* **Context Generation**: Turn your entire repo into a single, token-optimized Markdown file for LLM consumption.
+* **Autonomous Agents**: Delegate complex tasks (refactoring, audits, bug fixes) to AI agents that plan and execute multi-step workflows.
+* **Shadow Workspace**: Agents write code to a hidden `.codepicker/shadow` directory. No changes touch your live code until you review and `apply` them.
+* **CI/CD Ready**: Strict headless modes, cost tracking, and deterministic behavior for automated pipelines.
+* **Safety First**: Granular execution policies (Architect, Batch, Interactive) prevent unauthorized shell access or file destruction.
+* **Extensible**: Connect external tools via [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) or define custom scripts in YAML.
 
-### ⚙️ Production Ready
-* **Daemon Mode:** Run as a server with `codepicker serve`.
-* **Observability:** Structured JSON logs and Prometheus metrics at `/metrics`.
-* **Security:** Rate limiting, CORS configuration, and file size quotas.
+---
 
-## 🚀 Quick Start
+## 📦 Installation
 
-### Installation
 ```bash
 go install [github.com/david22573/codepicker@latest](https://github.com/david22573/codepicker@latest)
 
 ```
 
-### Basic Usage
+Or build from source:
 
-1. **Initialize** configuration:
+```bash
+git clone [https://github.com/david22573/codepicker.git](https://github.com/david22573/codepicker.git)
+cd codepicker
+go build -o codepicker main.go
+
+```
+
+---
+
+## ⚡ Quick Start
+
+### 1. Initialize
+
+Run the interactive setup wizard to configure your language, ignore patterns, and AI model.
+
 ```bash
 codepicker init
 
 ```
 
+### 2. Generate Context
 
-2. **Generate Context** (for manual LLM pasting):
+Create a single file representation of your codebase to paste into ChatGPT or Claude.
+
 ```bash
-codepicker --out context.md
+codepicker context gen --out context.md --tokens
 
 ```
 
+### 3. Run an Agent Task
 
-3. **Ask a Question**:
+Ask the agent to plan and execute a task.
+
 ```bash
-export OPENROUTER_API_KEY=sk-or-...
-codepicker ask "Explain how the tokenizer works"
+codepicker agent run "Refactor the logging interface to use slog"
 
 ```
 
+### 4. Review & Apply
 
-4. **Perform a Task**:
+The agent writes to a shadow filesystem. Review changes safely before applying them.
+
 ```bash
-# 1. Agent plans and writes code to shadow dir
-codepicker do "Create a new handler for the /health endpoint"
-
-# 2. You review and apply the changes
+# Interactive TUI review
 codepicker apply
 
-```
-
-
-
-## 🔌 Configuration & Plugins
-
-Configure behavior in `.codepicker.yml`. You can also define **Custom Tools** that the agent can execute!
-
-```yaml
-ai:
-  model: xiaomi/mimo-v2-flash:free
-
-# Define custom tools for the agent
-tools:
-  - name: run_tests
-    description: Run the project unit tests
-    command: go test ./...
-  
-  - name: deploy_staging
-    description: Deploy the current build to staging
-    command: ./scripts/deploy.sh
-    args_schema: '{ "properties": { "env": { "type": "string" } } }'
+# Batch apply all changes (safe for trusted outputs)
+codepicker apply --yes
 
 ```
 
-## 🐳 Docker & CI/CD
+---
 
-### Run via Docker
+## 🛡️ Security & Policies
+
+Codepicker enforces strict policies to ensure the AI behaves predictably.
+
+| Policy | Shell Access | File Write | Use Case |
+| --- | --- | --- | --- |
+| **Interactive** (Default) | ✅ (Ask) | ✅ (Ask) | Local development, pair programming. |
+| **Batch** | ❌ | ✅ | Background jobs, automated refactoring. |
+| **Architect** | ❌ | ❌ | Code audits, read-only analysis. |
+| **CI Mode** | ❌ | ✅ | GitHub Actions, headless pipelines. |
+
+**CI Mode:**
+To run safely in CI pipelines, use the `--ci` flag. This disables the TUI, enforces the Batch policy, and auto-approves safe file writes.
 
 ```bash
-docker run -p 22573:22573 -e OPENROUTER_API_KEY=... ghcr.io/david22573/codepicker serve
+codepicker agent run "Lint and fix formatting" --ci
 
 ```
 
-### GitHub Action
+---
 
-Use Codepicker in your workflow to review PRs or generate documentation:
+## 🤖 Advanced Usage
+
+### Planning Mode
+
+For complex tasks, generate a step-by-step plan before execution.
+
+```bash
+# Generate a plan
+codepicker agent plan "Migrate database from SQLite to Postgres"
+
+# Execute a specific plan ID
+codepicker agent run --plan <plan-id>
+
+```
+
+### Batch Processing
+
+Queue multiple tasks to run in the background with worker pools.
+
+```bash
+codepicker batch add "Refactor pkg/api"
+codepicker batch add "Write tests for pkg/utils"
+codepicker batch run --concurrent 2
+
+```
+
+### Architecture Audit
+
+Have the agent perform a deep scan of your codebase and generate a prioritized improvement plan (`ARCHITECTURE_GOALS.md`).
+
+```bash
+codepicker agent plan --architect
+
+```
+
+---
+
+## 🔌 Extensibility (MCP & Custom Tools)
+
+Configure extensions in `.codepicker.yml`:
 
 ```yaml
-steps:
-  - uses: david22573/codepicker@v1
-    with:
-      openai_key: ${{ secrets.OPENROUTER_KEY }}
-      task: "Review this PR and check for security flaws"
+# Connect to external data sources (e.g., GitHub, Postgres, Slack)
+mcp_servers:
+  - name: github
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-github"]
+    env:
+      - "GITHUB_PERSONAL_ACCESS_TOKEN=..."
+
+# Define custom project-specific tools
+tools:
+  - name: run_linter
+    description: "Run the project linter"
+    command: "make lint"
 
 ```
 
-## 🛡️ Server API
+Validate your configuration and connections:
 
-When running `codepicker serve`, the following endpoints are available:
+```bash
+codepicker check
 
-| Method | Endpoint | Description |
-| --- | --- | --- |
-| `POST` | `/agent/task?q=...` | Stream agent thoughts and actions (SSE) |
-| `POST` | `/agent/approve` | Approve/Deny sensitive commands |
-| `GET` | `/metrics` | Prometheus metrics (Req count, Cost, Memory) |
-| `GET` | `/health` | Health check |
+```
 
-## License
+---
+
+## 📚 Documentation
+
+For a full reference of all commands and flags, generate the CLI documentation:
+
+```bash
+codepicker doc --dir docs/cli
+
+```
+
+---
+
+## 📄 License
 
 MIT

@@ -19,7 +19,7 @@ import (
 
 type DebugConfig struct {
 	Policy bool
-	Tools  bool
+	Tools  bool // Used as "Trace" mode to reveal internal thoughts
 	Memory bool
 }
 
@@ -32,7 +32,7 @@ type Engine struct {
 	Executor    *ToolExecutor
 	Sentinel    *Sentinel
 	CostTracker *tracking.CostTracker
-	MCPManager  *mcp.Manager // NEW: Phase 4
+	MCPManager  *mcp.Manager
 
 	Config *config.ConfigFile
 	Memory *WorkingMemory
@@ -77,18 +77,13 @@ func NewEngine(
 
 	enforcer := NewPolicyEnforcer(policy.Batch, log, sentinel, debug.Policy)
 
-	// --- PHASE 4: MCP Initialization ---
 	mcpMgr := mcp.NewManager(log)
 	if cfg != nil && len(cfg.MCPServers) > 0 {
-		// Start servers in background context
-		// Note: In a real app, you might want to manage this context lifecycle more carefully
 		go mcpMgr.StartServers(context.Background(), cfg.MCPServers)
 	}
-	// -----------------------------------
 
 	executor := NewToolExecutor(nil, runtimeCtx, enforcer, debug.Tools)
 
-	// Middleware from Phase 5
 	executor.AddMiddleware(NewSafetyLogMiddleware(log))
 	executor.AddMiddleware(NewFormattingMiddleware(shadowMgr.ShadowRoot, log))
 
@@ -99,7 +94,7 @@ func NewEngine(
 		Enforcer:     enforcer,
 		Executor:     executor,
 		Sentinel:     sentinel,
-		MCPManager:   mcpMgr, // NEW
+		MCPManager:   mcpMgr,
 		Config:       cfg,
 		Memory:       memory,
 		CostTracker:  costTracker,
@@ -120,24 +115,19 @@ func (e *Engine) rebuildTools(toolSet tools.ToolSet) {
 	}
 
 	registry := tools.NewRegistry(srcRoot, e.Config)
-	// Get internal tools (FileSystem, Search, Skeleton, etc.)
+
 	newTools := registry.GetImplementation(toolSet)
 
-	// --- PHASE 4: Inject MCP Tools ---
 	if e.MCPManager != nil {
-		// Fetch tools from connected MCP servers
-		// We use a short timeout context just for listing
 		mcpTools, err := e.MCPManager.GetTools(context.Background())
 		if err == nil {
 			for _, mt := range mcpTools {
-				// Wrap them in our bridge adapter
 				adapter := tools.NewMCPToolAdapter(mt.ServerName, mt.Tool, e.MCPManager)
 				newTools = append(newTools, adapter)
 				e.Logger.Debug(fmt.Sprintf("🔗 Bridged MCP Tool: %s", adapter.Name()))
 			}
 		}
 	}
-	// --------------------------------
 
 	e.Executor.Tools = make(map[string]tools.Tool)
 
@@ -222,12 +212,20 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 
 		msg := resp.Choices[0].Message
 		messages = append(messages, *msg)
-		if updateHistory != nil {
+
+		// Phase 2: Gate chain-of-thought output.
+		// We only report back to the UI if:
+		// 1. A tool is being called (Action)
+		// 2. OR explicit debug/trace mode is enabled (Thought)
+		// This keeps the user view clean.
+		shouldReport := len(msg.ToolCalls) > 0 || e.Debug.Tools
+
+		if updateHistory != nil && shouldReport {
 			updateHistory(*msg)
 		}
 
 		if len(msg.ToolCalls) == 0 {
-
+			// This is the final answer or a pure thought block (if no tools called).
 			return fmt.Sprintf("%v", msg.Content), nil
 		}
 

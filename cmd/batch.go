@@ -56,7 +56,7 @@ var batchRunCmd = &cobra.Command{
 	Use:   "run",
 	Short: "Start processing the job queue",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// We validate the key here early, though AgentContext will also check it per job.
+
 		if os.Getenv("OPENROUTER_API_KEY") == "" {
 			return fmt.Errorf("OPENROUTER_API_KEY is not set")
 		}
@@ -70,8 +70,6 @@ var batchRunCmd = &cobra.Command{
 		q := batch.NewQueue(store.DB())
 		absSrc, _ := filepath.Abs(srcDir)
 
-		// Create the runner. Note we don't pass the Client anymore.
-		// The Runner creates a fresh AgentContext for each job.
 		runner := batch.NewRunner(q, store, appLogger, batchConcurrency, absSrc)
 
 		return runner.Start(cmd.Context())

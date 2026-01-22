@@ -4,20 +4,15 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/david22573/codepicker/internal/logger"
 )
 
 type Middleware func(http.HandlerFunc) http.HandlerFunc
-
-func (s *AgentServer) Chain(h http.HandlerFunc, middleware ...Middleware) http.HandlerFunc {
-	for i := len(middleware) - 1; i >= 0; i-- {
-		h = middleware[i](h)
-	}
-	return h
-}
 
 func RequestID() Middleware {
 	return func(next http.HandlerFunc) http.HandlerFunc {
@@ -43,13 +38,35 @@ func RequestLogger(log logger.Logger) Middleware {
 	}
 }
 
+func AuthMiddleware(token string) Middleware {
+	return func(next http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			authHeader := r.Header.Get("Authorization")
+			if authHeader == "" {
+				http.Error(w, "Unauthorized: Missing Authorization header", http.StatusUnauthorized)
+				return
+			}
+
+			parts := strings.Split(authHeader, " ")
+			if len(parts) != 2 || parts[0] != "Bearer" {
+				http.Error(w, "Unauthorized: Invalid header format", http.StatusUnauthorized)
+				return
+			}
+
+			if parts[1] != token {
+				http.Error(w, "Unauthorized: Invalid token", http.StatusUnauthorized)
+				return
+			}
+
+			next(w, r)
+		}
+	}
+}
+
 func EnableCORS(allowedOrigins []string) Middleware {
 	return func(next http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			origin := r.Header.Get("Origin")
-
-			// If no origins configured, default to strictly local or none (dev mode usually needs *)
-			// Better safe default: if empty, only allow same-origin (no headers sent)
 			allow := false
 
 			if len(allowedOrigins) > 0 {
@@ -63,8 +80,8 @@ func EnableCORS(allowedOrigins []string) Middleware {
 			}
 
 			if allow {
-				w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, DELETE")
-				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+				w.Header().Set("Access-Control-Allow-Methods", "POST, GET, DELETE, OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Request-ID")
 			}
 
 			if r.Method == "OPTIONS" {
@@ -80,7 +97,9 @@ func EnableCORS(allowedOrigins []string) Middleware {
 func BodyLimitMiddleware(maxBytes int64) Middleware {
 	return func(next http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
-			r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+			if r.Body != nil {
+				r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+			}
 			next(w, r)
 		}
 	}
@@ -92,6 +111,9 @@ func RecoveryMiddleware(log logger.Logger) Middleware {
 			defer func() {
 				if err := recover(); err != nil {
 					log.Error(fmt.Sprintf("PANIC RECOVERED: %v", err))
+					if os.Getenv("CODEPICKER_DEBUG") == "true" {
+						fmt.Printf("Trace: %v\n", err)
+					}
 					http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 				}
 			}()
