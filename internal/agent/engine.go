@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"time"
 
 	"github.com/david22573/codepicker/internal/config"
 	"github.com/david22573/codepicker/internal/database"
@@ -160,9 +162,17 @@ func (e *Engine) SetPolicy(p policy.ExecutionPolicy) {
 	e.rebuildTools(toolSet)
 }
 
+// cleanMemory removes internal reasoning tags (e.g., <think>) to save context.
+func cleanMemory(content string) string {
+	re := regexp.MustCompile(`(?s)<think>.*?</think>`)
+	cleaned := re.ReplaceAllString(content, "")
+	return cleaned
+}
+
 func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openrouter.ChatMessage)) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, e.Limits.AgentTimeout)
-	defer cancel()
+	// CRITICAL FIX: Do NOT wrap the entire session in a timeout.
+	// Instead, we track total runtime manually and give each step a fresh timeout.
+	startTime := time.Now()
 
 	if len(task) > e.Limits.MaxQueryLength {
 		e.Logger.Warn(fmt.Sprintf("Task description truncated from %d to %d chars", len(task), e.Limits.MaxQueryLength))
@@ -186,6 +196,11 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 			return "", fmt.Errorf("agent hit HARD safety limit (%d turns) despite making progress", hardLimit)
 		}
 
+		// Manual Session Timeout Check
+		if time.Since(startTime) > e.Limits.AgentTimeout {
+			return "", fmt.Errorf("agent exceeded global session timeout of %v", e.Limits.AgentTimeout)
+		}
+
 		cost, _ := e.CostTracker.GetStats()
 		if cost >= e.Limits.DailyCostLimit {
 			return "", fmt.Errorf("daily cost limit exceeded ($%.2f). Stopping execution to prevent billing overrun", e.Limits.DailyCostLimit)
@@ -201,7 +216,12 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 			MaxTokens: e.Limits.MaxStepTokens,
 		}
 
-		resp, err := e.Client.CreateChatCompletion(ctx, req)
+		// CRITICAL FIX: Per-step timeout. Gives the model a fair chance to "think" every turn.
+		// Multiplied by 5 to allow deep reasoning models ample time for first-token latency.
+		stepCtx, stepCancel := context.WithTimeout(ctx, e.Limits.CommandTimeout*5)
+		resp, err := e.Client.CreateChatCompletion(stepCtx, req)
+		stepCancel() // Clean up resources immediately
+
 		if err != nil {
 			return "", fmt.Errorf("LLM error: %w", err)
 		}
@@ -211,21 +231,22 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 		}
 
 		msg := resp.Choices[0].Message
-		messages = append(messages, *msg)
 
-		// Phase 2: Gate chain-of-thought output.
-		// We only report back to the UI if:
-		// 1. A tool is being called (Action)
-		// 2. OR explicit debug/trace mode is enabled (Thought)
-		// This keeps the user view clean.
+		// CRITICAL FIX: Clean memory before adding to history
+		// We keep the "thought" for the user (updateHistory) but strip it for the agent's context (messages)
 		shouldReport := len(msg.ToolCalls) > 0 || e.Debug.Tools
-
 		if updateHistory != nil && shouldReport {
 			updateHistory(*msg)
 		}
 
+		memoryMsg := *msg
+		if memoryMsg.Content != nil {
+			text := fmt.Sprintf("%v", memoryMsg.Content)
+			memoryMsg.Content = cleanMemory(text)
+		}
+		messages = append(messages, memoryMsg)
+
 		if len(msg.ToolCalls) == 0 {
-			// This is the final answer or a pure thought block (if no tools called).
 			return fmt.Sprintf("%v", msg.Content), nil
 		}
 
@@ -240,6 +261,8 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 				isProgressMade = true
 			}
 
+			// Execute tool using the parent context (so user can cancel via Ctrl+C)
+			// But note: tool execution usually has its own internal timeouts via Sentinel
 			resultStr := e.Executor.Execute(ctx, tool)
 
 			if len(resultStr) > e.Limits.MaxToolOutput {

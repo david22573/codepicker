@@ -16,6 +16,10 @@ import (
 	_ "modernc.org/sqlite" // Pure Go SQLite driver
 )
 
+// Safety cap to prevent blowing up the context window (100k tokens)
+// If you use smaller models, you might want to lower this.
+const MaxContextTokens = 100000
+
 type Store struct {
 	db *sql.DB
 }
@@ -44,7 +48,12 @@ func New(storageDir string) (*Store, error) {
 	}
 
 	dbPath := filepath.Join(storageDir, "codepicker.db")
-	db, err := sql.Open("sqlite", dbPath)
+
+	// CRITICAL FIX: Enable WAL mode for concurrency and set a busy timeout.
+	// This allows readers (Agent) and writers (Workers) to coexist without locking.
+	dsn := fmt.Sprintf("%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)", dbPath)
+
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -128,7 +137,7 @@ func (s *Store) UpdateWorkingMemory(path string, content string) error {
 	err := s.db.QueryRow("SELECT content_hash FROM memory_files WHERE path = ?", path).Scan(&currentHash)
 
 	if err == nil && currentHash == newHash {
-		// Content hasn't changed, just update last_accessed
+		// Just update the timestamp to keep it "fresh" in the context
 		_, err := s.db.Exec("UPDATE memory_files SET last_accessed = ? WHERE path = ?", time.Now(), path)
 		return err
 	}
@@ -147,17 +156,25 @@ func (s *Store) UpdateWorkingMemory(path string, content string) error {
 }
 
 func (s *Store) GetWorkingMemory() (string, int, error) {
-	rows, err := s.db.Query("SELECT path, content, token_count FROM memory_files ORDER BY path ASC")
+	// CRITICAL FIX: Order by last_accessed DESC.
+	// We want the files we touched MOST RECENTLY to be guaranteed in the context.
+	rows, err := s.db.Query("SELECT path, content, token_count FROM memory_files ORDER BY last_accessed DESC")
 	if err != nil {
 		return "", 0, err
 	}
 	defer rows.Close()
 
-	var sb strings.Builder
-	totalTokens := 0
-	count := 0
+	// We'll collect files, but we need to reverse them at the end so the prompt flows naturally
+	// (usually prompt engineering prefers file A, file B, file C...)
+	// But for filtering, we process mostly-recently-used first.
+	type fileEntry struct {
+		path    string
+		content string
+	}
 
-	sb.WriteString("\n### ACTIVE WORKING MEMORY (Files you have read):\n")
+	var keptFiles []fileEntry
+	totalTokens := 0
+	droppedCount := 0
 
 	for rows.Next() {
 		var path, content string
@@ -166,18 +183,36 @@ func (s *Store) GetWorkingMemory() (string, int, error) {
 			continue
 		}
 
-		sb.WriteString(fmt.Sprintf("--- BEGIN FILE: %s ---\n%s\n--- END FILE: %s ---\n\n", path, content, path))
+		// Circuit Breaker: If adding this file exceeds our safety cap, skip it (effectively dropping old files)
+		if totalTokens+tokens > MaxContextTokens {
+			droppedCount++
+			continue
+		}
+
+		keptFiles = append(keptFiles, fileEntry{path, content})
 		totalTokens += tokens
-		count++
 	}
 
-	if count == 0 {
+	if len(keptFiles) == 0 {
 		return "", 0, nil
 	}
+
+	var sb strings.Builder
+	sb.WriteString("\n### ACTIVE WORKING MEMORY (Files you have read):\n")
+
+	// Write them out. (Order: newest accessed first in the list, which is fine,
+	// or you can reverse iterate if you prefer specific ordering).
+	for _, f := range keptFiles {
+		sb.WriteString(fmt.Sprintf("--- BEGIN FILE: %s ---\n%s\n--- END FILE: %s ---\n\n", f.path, f.content, f.path))
+	}
+
+	if droppedCount > 0 {
+		sb.WriteString(fmt.Sprintf("\n[System Note: %d older files were dropped from context to save space]\n", droppedCount))
+	}
+
 	return sb.String(), totalTokens, nil
 }
 
-// ClearWorkingMemory removes all files from the active context
 func (s *Store) ClearWorkingMemory() error {
 	_, err := s.db.Exec("DELETE FROM memory_files")
 	return err

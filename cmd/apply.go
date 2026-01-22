@@ -153,5 +153,5 @@ func init() {
 	applyCmd.Flags().BoolVarP(&autoApprove, "yes", "y", false, "Automatically apply all changes without prompting")
 	applyCmd.Flags().StringVar(&acceptPattern, "accept", "", "Glob pattern to auto-accept (e.g. '*.go') - acts as a whitelist")
 	applyCmd.Flags().StringVar(&rejectPattern, "reject", "", "Glob pattern to auto-reject (e.g. '*.md') - takes precedence")
-	applyCmd.Flags().BoolVarP(&interactive, "interactive", "i", false, "Use interactive TUI for review")
+	applyCmd.Flags().BoolVarP(&interactive, "interactive", "t", false, "Use interactive TUI for review")
 }

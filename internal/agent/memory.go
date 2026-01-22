@@ -44,6 +44,8 @@ func (m *WorkingMemory) List() []string {
 }
 
 func (m *WorkingMemory) FormatContext() string {
+	// Calls Store.GetWorkingMemory, which now has the "Smart Context" sorting
+	// and the 100k token safety cap.
 	ctxStr, tokens, err := m.Store.GetWorkingMemory()
 	if err != nil {
 		return "Error retrieving memory: " + err.Error()
@@ -58,7 +60,6 @@ func (m *WorkingMemory) AddNote(content string) error {
 	return m.Store.AddMessage("system", content)
 }
 
-// [Fixed] Signature matches tools.MemoryManager interface (interface{})
 func (m *WorkingMemory) Snapshot() (interface{}, error) {
 	if m.Trace {
 		fmt.Println("[MEMORY] 📸 Snapshotting...")
@@ -66,7 +67,6 @@ func (m *WorkingMemory) Snapshot() (interface{}, error) {
 	return m.Store.CreateSnapshot()
 }
 
-// [Fixed] Signature matches tools.MemoryManager interface (interface{})
 func (m *WorkingMemory) Restore(snap interface{}) error {
 	if m.Trace {
 		fmt.Println("[MEMORY] ⏪ Restoring...")

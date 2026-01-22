@@ -26,7 +26,7 @@ var (
 )
 
 var contextCmd = &cobra.Command{
-	Use:   "context",
+	Use:   "ctx",
 	Short: "Manage and generate code contexts",
 	Long:  `Commands for scanning, filtering, and exporting your codebase structure and content.`,
 }

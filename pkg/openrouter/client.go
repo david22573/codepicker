@@ -68,11 +68,13 @@ func NewClient(apiKey string, opts ...Option) *Client {
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          100,
-		IdleConnTimeout:       90 * time.Second,
+		ForceAttemptHTTP2: true,
+		MaxIdleConns:      100,
+		// CRITICAL FIX: Increased timeouts for reasoning models
+		IdleConnTimeout:       5 * time.Minute,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
+		ResponseHeaderTimeout: 5 * time.Minute,
 	}
 
 	c := &Client{
@@ -120,9 +122,6 @@ func (c *Client) CreateChatCompletion(
 	req ChatCompletionRequest,
 ) (*ChatCompletionResponse, error) {
 
-	// PREFILL INJECTION:
-	// If a prefill is defined, we append it as the last message with role "assistant".
-	// This forces the model to continue from this point.
 	if req.Prefill != "" {
 		req.Messages = append(req.Messages, ChatMessage{
 			Role:    "assistant",
@@ -138,9 +137,6 @@ func (c *Client) CreateChatCompletion(
 	}
 	defer stream.Close()
 
-	// Initialize the response with the prefill content already present.
-	// The API will only return the *continuation*, so we must prepend
-	// the prefill to ensure the caller gets the full valid text/JSON.
 	fullResp := &ChatCompletionResponse{
 		Choices: []Choice{{
 			Message: &ChatMessage{
@@ -153,7 +149,6 @@ func (c *Client) CreateChatCompletion(
 	var toolCalls []ToolCall
 	var contentBuilder strings.Builder
 
-	// Start builder with prefill so we append subsequent chunks correctly
 	contentBuilder.WriteString(req.Prefill)
 
 	for {
@@ -223,6 +218,13 @@ func (c *Client) CreateChatCompletionStream(
 	var lastErr error
 
 	for attempt := 0; attempt < constants.MaxRetries; attempt++ {
+		// CRITICAL FIX: Stop retrying if user cancelled context
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("context cancelled: %w", ctx.Err())
+		default:
+		}
+
 		if attempt > 0 {
 			delay := constants.RetryDelay * time.Duration(1<<attempt)
 			jitter := time.Duration(float64(delay) * (rand.Float64() * 0.2))
@@ -237,6 +239,7 @@ func (c *Client) CreateChatCompletionStream(
 		resp, err := c.httpClient.Do(httpReq)
 		if err != nil {
 			lastErr = err
+			// Check if context killed the request
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
@@ -317,9 +320,7 @@ func (c *Client) sendRequest(req *http.Request, v any) error {
 	for attempt := 0; attempt <= maxAttempts; attempt++ {
 
 		if attempt > 0 {
-
 			delay := time.Duration(math.Pow(2, float64(attempt))) * time.Second
-
 			jitter := time.Duration(rand.Int63n(int64(1000 * time.Millisecond)))
 			sleepTime := delay + jitter
 
