@@ -10,21 +10,21 @@
 
 ### Race Conditions & Concurrency
 
-- [x] **[P0] Add mutex protection to shadow.Manager**
+- [ ] **[P0] Add mutex protection to shadow.Manager**
   - **File**: `internal/shadow/fs.go`
   - **Issue**: Concurrent writes to `Manifest.Changes` map cause data races
   - **Solution**: Add `sync.RWMutex` to Manager struct, lock all map operations
   - **Test**: Create `internal/shadow/fs_test.go` with concurrent write tests
   - **Estimated Impact**: Prevents data corruption in parallel agent execution
 
-- [x] **[P0] Fix memory leak in Engine.Run() message accumulation**
+- [ ] **[P0] Fix memory leak in Engine.Run() message accumulation**
   - **File**: `internal/agent/engine.go`
   - **Issue**: `messages` slice grows unbounded in turn loop (can reach 1000+ messages)
   - **Solution**: Keep system message + last 50 messages, prune when len > 100
   - **Code Change**: Add `pruneMessages()` helper function in Run() loop
   - **Estimated Impact**: Reduces memory usage by 70-90% in long sessions
 
-- [x] **[P0] Thread-safe database operations**
+- [ ] **[P0] Thread-safe database operations**
   - **File**: `internal/database/store.go`
   - **Issue**: Concurrent reads/writes to working memory without proper locking
   - **Solution**: Use `sync.RWMutex` for all memory operations, SQLite connection pooling
@@ -33,7 +33,7 @@
 
 ### Context Window Management
 
-- [x] **[P0] Implement intelligent context eviction with relevance scoring**
+- [ ] **[P0] Implement intelligent context eviction with relevance scoring**
   - **File**: `internal/database/store.go` (modify `GetWorkingMemory()`)
   - **Issue**: Simple LRU eviction loses critical context, agent forgets recent work
   - **Solution**: Score files by: (1) keyword match to current task, (2) recently modified in shadow, (3) explicitly read by agent
@@ -50,7 +50,7 @@
 
 ### Reliability & Recovery
 
-- [x] **[P1] Implement checkpoint system for resumable agent sessions**
+- [ ] **[P1] Implement checkpoint system for resumable agent sessions**
   - **Files**: 
     - `internal/agent/checkpoint.go` (NEW)
     - `internal/database/schema.go` (add migration for checkpoints table)
@@ -71,7 +71,7 @@
   - **Usage**: `codepicker agent run "task" --resume` auto-detects incomplete sessions
   - **Estimated Impact**: Saves hours of wasted work on crashes
 
-- [x] **[P1] Enhanced error recovery system**
+- [ ] **[P1] Enhanced error recovery system**
   - **File**: `internal/agent/recovery.go` (extend `CommonFailures`)
   - **Issue**: Only handles 3 Go-specific errors, many common failures unhandled
   - **Solution**: Add recovery strategies for:
@@ -93,7 +93,7 @@
 
 ### Testing & Quality
 
-- [x] **[P1] Add critical test coverage for concurrency scenarios**
+- [ ] **[P1] Add critical test coverage for concurrency scenarios**
   - **Files to Create**:
     - `internal/shadow/fs_test.go` - Concurrent WriteFile + ApplyAtomic tests
     - `internal/database/store_test.go` - Parallel UpdateWorkingMemory tests
@@ -108,7 +108,7 @@
 
 ### Progress & Visibility
 
-- [x] **[P2] Add progress indicators to plan execution**
+- [ ] **[P2] Add progress indicators to plan execution**
   - **Files**:
     - `internal/ui/progress.go` (NEW) - Create ProgressBar component
     - `internal/agent/plan_executor.go` - Integrate progress updates
@@ -130,7 +130,7 @@
     ```
   - **Estimated Impact**: Better user confidence, fewer "is it frozen?" questions
 
-- [x] **[P2] Cost estimation and warnings**
+- [ ] **[P2] Cost estimation and warnings**
   - **Files**:
     - `internal/agent/planner.go` - Add `EstimatePlanCost(plan, contextSize)` method
     - `cmd/agent.go` - Prompt before expensive operations
@@ -152,7 +152,7 @@
 
 ### Developer Experience
 
-- [x] **[P2] Improve error messages with actionable guidance**
+- [ ] **[P2] Improve error messages with actionable guidance**
   - **Files**: All tool executors in `internal/tools/*.go`
   - **Issue**: Generic "operation failed" errors don't help users fix problems
   - **Solution**: Replace all `fmt.Errorf("failed: %w", err)` with contextual help
@@ -170,7 +170,7 @@
     ```
   - **Estimated Impact**: Reduces support requests by 30%
 
-- [x] **[P2] Enhanced diff viewer in TUI**
+- [ ] **[P2] Enhanced diff viewer in TUI**
   - **File**: `internal/tui/review.go`
   - **Issue**: Basic diff display, hard to read large changes
   - **Solution**: 
@@ -187,7 +187,7 @@
 
 ### Performance Optimizations
 
-- [x] **[P3] Implement streaming context updates (delta-based)**
+- [ ] **[P3] Implement streaming context updates (delta-based)**
   - **Files**: 
     - `internal/agent/memory.go` - Track deltas
     - `internal/agent/engine.go` - Build incremental context
@@ -205,7 +205,7 @@
     ```
   - **Estimated Impact**: 40% token reduction = 40% cost savings
 
-- [x] **[P3] Parallel file processing in context generation**
+- [ ] **[P3] Parallel file processing in context generation**
   - **File**: `internal/contextgen/generator.go`
   - **Issue**: Sequential processing slow for large codebases (5+ seconds for 1000 files)
   - **Solution**: Worker pool pattern
@@ -224,7 +224,7 @@
     ```
   - **Estimated Impact**: 3-5x faster context generation
 
-- [x] **[P3] Cache scan_package results**
+- [ ] **[P3] Cache scan_package results**
   - **File**: `internal/tools/scan.go`
   - **Issue**: Re-scanning unchanged directories wastes time
   - **Solution**: Hash directory contents, cache results for 5 minutes
@@ -239,13 +239,13 @@
 
 ### Feature Additions
 
-- [x] **[P3] Add --estimate flag to preview cost without executing**
+- [ ] **[P3] Add --estimate flag to preview cost without executing**
   - **File**: `cmd/agent.go`
   - **Usage**: `codepicker agent run --estimate "complex task"`
   - **Output**: Show plan + estimated cost, exit without execution
   - **Estimated Impact**: Helps users budget expensive operations
 
-- [x] **[P3] Implement codepicker undo command**
+- [ ] **[P3] Implement codepicker undo command**
   - **Files**:
     - `cmd/undo.go` (NEW)
     - `internal/shadow/fs.go` - Track last N applies
@@ -253,13 +253,13 @@
   - **Solution**: Keep backup history, restore from latest
   - **Estimated Impact**: Faster experimentation, less fear
 
-- [x] **[P3] Add shell completion (bash/zsh/fish)**
+- [ ] **[P3] Add shell completion (bash/zsh/fish)**
   - **File**: `cmd/completion.go` (NEW)
   - **Generate with**: `cobra.GenBashCompletion()`, etc.
   - **Install**: `codepicker completion bash > /etc/bash_completion.d/codepicker`
   - **Estimated Impact**: Better CLI discoverability
 
-- [x] **[P3] Create .codepickerignore templates**
+- [ ] **[P3] Create .codepickerignore templates**
   - **File**: `templates/` directory (NEW)
   - **Templates**: golang, nodejs, python, rust, generic
   - **Usage**: `codepicker init --template golang` copies template

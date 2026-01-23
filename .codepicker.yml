@@ -2,7 +2,7 @@
 src: .
 output: codepicker_context.md
 ai:
-  model: deepseek/deepseek-v3.2
+  model: anthropic/claude-sonnet-4.5
   temperature: 0.0
 
 include:
