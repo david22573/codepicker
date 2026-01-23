@@ -245,7 +245,7 @@
   - **Output**: Show plan + estimated cost, exit without execution
   - **Estimated Impact**: Helps users budget expensive operations
 
-- [ ] **[P3] Implement codepicker undo command**
+- [x] **[P3] Implement codepicker undo command**
   - **Files**:
     - `cmd/undo.go` (NEW)
     - `internal/shadow/fs.go` - Track last N applies
@@ -253,13 +253,13 @@
   - **Solution**: Keep backup history, restore from latest
   - **Estimated Impact**: Faster experimentation, less fear
 
-- [ ] **[P3] Add shell completion (bash/zsh/fish)**
+- [x] **[P3] Add shell completion (bash/zsh/fish)**
   - **File**: `cmd/completion.go` (NEW)
   - **Generate with**: `cobra.GenBashCompletion()`, etc.
   - **Install**: `codepicker completion bash > /etc/bash_completion.d/codepicker`
   - **Estimated Impact**: Better CLI discoverability
 
-- [ ] **[P3] Create .codepickerignore templates**
+- [x] **[P3] Create .codepickerignore templates**
   - **File**: `templates/` directory (NEW)
   - **Templates**: golang, nodejs, python, rust, generic
   - **Usage**: `codepicker init --template golang` copies template
