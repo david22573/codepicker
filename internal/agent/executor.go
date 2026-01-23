@@ -55,20 +55,14 @@ func (e *ToolExecutor) AddMiddleware(m ToolMiddleware) {
 }
 
 func (e *ToolExecutor) Execute(ctx context.Context, call openrouter.ToolCall) string {
-
-	// 1. SANITIZE NAME (Strict Allowlist: a-z, A-Z, 0-9, _)
 	cleanName := sanitizeToolName(call.Function.Name)
-
-	// 2. SANITIZE ARGS (Extract { ... })
 	cleanArgs := sanitizeJSON(call.Function.Arguments)
 
-	// If the tool name was purely garbage (became empty), ignore it safely
 	if cleanName == "" {
-		// Log it for debug, but return a gentle error to the model
 		if e.Trace {
 			fmt.Printf("[Executor] Ignored garbage tool call: '%s'\n", call.Function.Name)
 		}
-		return e.formatError("error", "Invalid tool name received (parsing error). Please try again.")
+		return e.formatError("error", "Invalid tool name received. Please try again.")
 	}
 
 	req := ApprovalRequest{
@@ -82,7 +76,7 @@ func (e *ToolExecutor) Execute(ctx context.Context, call openrouter.ToolCall) st
 
 	tool, exists := e.Tools[cleanName]
 	if !exists {
-		// SMART RECOVERY: Help the model if it hallucinates or makes a typo
+		// Friendly suggestions for common hallucinations
 		suggestion := ""
 		if strings.Contains(cleanName, "replace") || strings.Contains(cleanName, "edit") {
 			suggestion = " Hint: You do not have a patch/replace tool. You must use 'write_shadow_file' to overwrite the file completely."
@@ -103,7 +97,7 @@ func (e *ToolExecutor) Execute(ctx context.Context, call openrouter.ToolCall) st
 	}
 
 	if e.Trace {
-		fmt.Printf("\n[TRACE] >>> EXECUTE %s\nRAW ARGS: %s\nCLEAN ARGS: %s\n", cleanName, call.Function.Arguments, cleanArgs)
+		fmt.Printf("\n[TRACE] >>> EXECUTE %s\nRAW ARGS: %s\n", cleanName, call.Function.Arguments)
 	}
 
 	result, err := tool.Execute(ctx, cleanArgs, e.RuntimeContext)
@@ -147,39 +141,30 @@ func (e *ToolExecutor) formatError(status, msg string) string {
 	return string(b)
 }
 
-// -------------------------------------------------------------------------
-// SANITIZATION HELPERS
-// -------------------------------------------------------------------------
-
-// sanitizeToolName strips everything except alphanumeric chars and underscores.
-// This removes '[[tool_call_end]]', '}', ']', etc.
 func sanitizeToolName(s string) string {
-	// 1. Remove specific known hallucinated tokens
+	// FIX: Remove DeepSeek/LLM specific hallucinated tokens
 	s = strings.ReplaceAll(s, "tool_call_begin", "")
 	s = strings.ReplaceAll(s, "tool_call_end", "")
-	s = strings.ReplaceAll(s, "func_call_begin", "") // Catch other variants
+	s = strings.ReplaceAll(s, "func_call_begin", "")
 
-	// 2. Remove any remaining non-alphanumeric characters (existing logic)
 	re := regexp.MustCompile(`[^a-zA-Z0-9_]`)
 	cleaned := re.ReplaceAllString(s, "")
-
 	return cleaned
 }
 
-// sanitizeJSON extracts the substring between the first '{' and the last '}'.
-// It ignores conversational text that some models append (e.g., "Here is the code...").
 func sanitizeJSON(s string) string {
 	s = strings.TrimSpace(s)
+	// Simple repair for cut-off JSON (common with token limits)
+	if !strings.HasSuffix(s, "}") && strings.HasPrefix(s, "{") {
+		s += "}"
+	}
 
 	start := strings.Index(s, "{")
 	end := strings.LastIndex(s, "}")
 
-	// If we found a valid JSON object structure
 	if start != -1 && end != -1 && end > start {
 		return s[start : end+1]
 	}
 
-	// If no braces found, return original string (it will likely fail unmarshal,
-	// but that error will be handled by the specific tool).
 	return s
 }

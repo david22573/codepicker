@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/david22573/codepicker/internal/agent"
@@ -52,6 +54,13 @@ func runArchitectAudit(cmd *cobra.Command) error {
 	}
 	defer agentCtx.Close()
 
+	// FIX 1: Use absolute path (agentCtx.SrcDir) instead of relative flag to avoid OS ambiguity
+	shadowGoalsPath := filepath.Join(agentCtx.SrcDir, ".codepicker", "shadow", "ARCHITECTURE_GOALS.md")
+
+	if err := os.Remove(shadowGoalsPath); err != nil && !os.IsNotExist(err) {
+		agentCtx.Logger.Warn(fmt.Sprintf("Could not clean up old goals file: %v", err))
+	}
+
 	agentCtx.Logger.Info("🏗️  Starting Architecture Audit...")
 
 	tree, err := contextgen.GenerateTree(agentCtx.SrcDir)
@@ -65,7 +74,6 @@ func runArchitectAudit(cmd *cobra.Command) error {
 	goalsFileWritten := false
 	turnCount := 0
 
-	// UPDATED: Use the dynamic limit from config (default 30) instead of hardcoded 12
 	maxTurns := agentCtx.Limits.AgentMaxTurns
 
 	printUpdate := func(msg openrouter.ChatMessage) {
@@ -84,7 +92,10 @@ func runArchitectAudit(cmd *cobra.Command) error {
 
 		if msg.Role == "tool" {
 			toolContent := fmt.Sprintf("%v", msg.Content)
-			if strings.Contains(toolContent, "ARCHITECTURE_GOALS.md") {
+
+			// Simple heuristic to detect if agent claims it wrote the file
+			if strings.Contains(toolContent, "Changes written to shadow file") &&
+				strings.Contains(toolContent, "ARCHITECTURE_GOALS.md") {
 				goalsFileWritten = true
 				fmt.Println("📝 Goals file written to shadow workspace")
 			}
@@ -126,8 +137,27 @@ func runArchitectAudit(cmd *cobra.Command) error {
 		}
 	}
 
-	if !goalsFileWritten {
-		return fmt.Errorf("audit failed: ARCHITECTURE_GOALS.md was never created (used %d turns)", turnCount)
+	// FIX 2: Enhanced file detection and recovery logic
+	if _, err := os.Stat(shadowGoalsPath); os.IsNotExist(err) {
+
+		// RECOVERY: Check if agent double-nested the file (e.g. .codepicker/shadow/.codepicker/shadow/...)
+		// This happens if the agent puts the directory path in the filename argument.
+		nestedPath := filepath.Join(agentCtx.SrcDir, ".codepicker", "shadow", ".codepicker", "shadow", "ARCHITECTURE_GOALS.md")
+
+		if _, err := os.Stat(nestedPath); err == nil {
+			agentCtx.Logger.Warn("⚠️  Agent wrote file to nested path. Auto-fixing...")
+
+			// Move it to the correct location
+			if err := os.Rename(nestedPath, shadowGoalsPath); err != nil {
+				return fmt.Errorf("found nested file but failed to move it: %w", err)
+			}
+			goalsFileWritten = true
+			agentCtx.Logger.Info("✅ Fixed file location.")
+		} else {
+			return fmt.Errorf("audit failed: ARCHITECTURE_GOALS.md was not found in shadow dir (used %d turns)", turnCount)
+		}
+	} else {
+		goalsFileWritten = true
 	}
 
 	if !auditComplete && turnCount >= maxTurns {

@@ -52,7 +52,7 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, argsJSON string, rt *Run
 		return "", fmt.Errorf("invalid arguments: %w", err)
 	}
 
-	// Sanitize inputs: models often use newlines or tabs instead of commas
+	// Sanitize: models often use newlines or tabs instead of commas
 	cleanFiles := strings.ReplaceAll(args.ContextFiles, "\n", ",")
 	cleanFiles = strings.ReplaceAll(cleanFiles, "\r", "")
 	cleanFiles = strings.ReplaceAll(cleanFiles, "\t", ",")

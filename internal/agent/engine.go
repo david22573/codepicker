@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/david22573/codepicker/internal/config"
@@ -64,8 +66,6 @@ func NewEngine(
 	sentinel := NewSentinel(limits)
 	costTracker := tracking.NewCostTracker(limits.DailyCostLimit)
 
-	// --- MODEL SELECTION LOGIC ---
-	// 1. Determine Primary Model (The Brain)
 	primaryModel := model
 	if cfg != nil && cfg.AI.Model != "" {
 		if primaryModel == "" || primaryModel == "default" {
@@ -73,18 +73,16 @@ func NewEngine(
 		}
 	}
 	if primaryModel == "" {
-		primaryModel = "deepseek/deepseek-chat" // Fallback default
+		primaryModel = "deepseek/deepseek-chat"
 	}
 
-	// 2. Determine Worker Model (The Hands)
-	workerModel := primaryModel // Default to same model
+	workerModel := primaryModel
 	if cfg != nil && cfg.AI.WorkerModel != "" {
 		workerModel = cfg.AI.WorkerModel
 	} else {
-		// Auto-switch: If primary is a reasoning model, use a stable worker default
+		// Reasoning models often fail at simple code output, so we fallback to a standard model
 		if isReasoningModel(primaryModel) {
-			// Llama 3.1 70B is extremely reliable for tool use
-			fallbackWorker := "meta-llama/llama-3.1-70b-instruct"
+			fallbackWorker := "deepseek/deepseek-chat" // Or anthropic/claude-3.5-sonnet
 			log.Info(fmt.Sprintf("🧠 Reasoning model detected (%s). Auto-assigning worker to %s for stability.", primaryModel, fallbackWorker))
 			workerModel = fallbackWorker
 		}
@@ -92,7 +90,6 @@ func NewEngine(
 
 	log.Debug(fmt.Sprintf("Engine Init: Supervisor=%s, Worker=%s", primaryModel, workerModel))
 
-	// Initialize the WorkerRunner with the specific WorkerModel
 	workerRunner := NewWorkerRunner(client, workerModel, fs, log)
 
 	runtimeCtx := &tools.RuntimeContext{
@@ -193,15 +190,35 @@ func (e *Engine) SetPolicy(p policy.ExecutionPolicy) {
 }
 
 func cleanMemory(content string) string {
-	// Remove <think> tags often found in DeepSeek-R1 or similar reasoning models
+	// Removes internal "thinking" tags from reasoning models so they don't pollute context
 	re := regexp.MustCompile(`(?s)<think>.*?</think>`)
 	cleaned := re.ReplaceAllString(content, "")
 	return cleaned
 }
 
 func isReasoningModel(modelID string) bool {
-	// Regex to detect models known for reasoning/CoT that might struggle with strict JSON tools
 	return regexp.MustCompile(`(?i)(reasoner|deepseek-r1|o1-preview|nemotron)`).MatchString(modelID)
+}
+
+// getDynamicCapabilities generates a text block describing currently available tools
+func (e *Engine) getDynamicCapabilities() string {
+	var builder strings.Builder
+	builder.WriteString("\n### ACTIVE TOOLSET (You have access to these tools):\n")
+
+	// Sort tools for consistent prompt output
+	var names []string
+	for k := range e.Executor.Tools {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		tool := e.Executor.Tools[name]
+		builder.WriteString(fmt.Sprintf("- %s: %s\n", name, tool.Description()))
+	}
+
+	builder.WriteString("\nReminder: You must use the tools exactly as named above.")
+	return builder.String()
 }
 
 func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openrouter.ChatMessage)) (string, error) {
@@ -224,6 +241,9 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 	hardLimit := e.Limits.AgentMaxTurns * 3
 	totalTurns := 0
 
+	// Pre-calculate system prompt components
+	toolCapabilities := e.getDynamicCapabilities()
+
 	for i := 0; i < e.Limits.AgentMaxTurns; i++ {
 		totalTurns++
 		if totalTurns >= hardLimit {
@@ -234,7 +254,6 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 			return "", fmt.Errorf("agent exceeded global session timeout of %v", e.Limits.AgentTimeout)
 		}
 
-		// Breather to prevent rate limit bursts
 		if i > 0 {
 			time.Sleep(500 * time.Millisecond)
 		}
@@ -245,10 +264,12 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 		}
 
 		currentContext := e.Memory.FormatContext()
-		fullSystemMsg := e.SystemPrompt + "\n" + currentContext
+
+		// DYNAMIC INJECTION: Combine Base Prompt + Tool List + Context
+		fullSystemMsg := e.SystemPrompt + "\n" + toolCapabilities + "\n" + currentContext
 
 		req := openrouter.ChatCompletionRequest{
-			Model:     e.Model, // Use the Brain
+			Model:     e.Model,
 			Messages:  append([]openrouter.ChatMessage{{Role: "system", Content: fullSystemMsg}}, messages...),
 			Tools:     activeTools,
 			MaxTokens: e.Limits.MaxStepTokens,
@@ -296,7 +317,6 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 				isProgressMade = true
 			}
 
-			// Execute using the Executor (which delegates to WorkerRunner if needed)
 			resultStr := e.Executor.Execute(ctx, tool)
 
 			if len(resultStr) > e.Limits.MaxToolOutput {
@@ -343,7 +363,10 @@ func (e *Engine) RunSingleTurn(
 	}
 
 	currentContext := e.Memory.FormatContext()
-	fullSystemMsg := e.SystemPrompt + "\n" + currentContext
+
+	// DYNAMIC INJECTION here as well
+	toolCapabilities := e.getDynamicCapabilities()
+	fullSystemMsg := e.SystemPrompt + "\n" + toolCapabilities + "\n" + currentContext
 
 	var activeTools []openrouter.Tool
 	for _, t := range e.Executor.Tools {

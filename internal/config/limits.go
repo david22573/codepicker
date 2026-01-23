@@ -12,9 +12,9 @@ type Limits struct {
 	MaxBodySize    int64
 	MaxFileSize    int64
 
-	MaxCommandOutput int // Bytes
-	MaxToolOutput    int // Bytes (New: general limit for any tool)
-	MaxStepTokens    int // New: Max tokens the AI can generate per turn
+	MaxCommandOutput int
+	MaxToolOutput    int
+	MaxStepTokens    int // Max tokens the AI can generate per turn
 
 	CommandTimeout time.Duration
 	AgentMaxTurns  int
@@ -37,7 +37,7 @@ func DefaultLimits() *Limits {
 		MaxCommandOutput: getEnvInt("MAX_COMMAND_OUTPUT", 1024*50),
 		MaxToolOutput:    getEnvInt("MAX_TOOL_OUTPUT", 1024*100),
 
-		// UPDATED: Increased from 8000 to 65000 to support large file writes (DeepSeek/Claude)
+		// UPDATED: Increased to 65k to prevent JSON cut-offs with DeepSeek/Claude
 		MaxStepTokens: getEnvInt("MAX_STEP_TOKENS", 65000),
 
 		CommandTimeout: getEnvDuration("COMMAND_TIMEOUT", 5*time.Minute),
