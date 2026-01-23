@@ -73,6 +73,60 @@ var migrations = []Migration{
 		ALTER TABLE memory_files ADD COLUMN content_hash TEXT DEFAULT '';
 		`,
 	},
+	{
+		Version: 5,
+		Up: `
+		ALTER TABLE memory_files ADD COLUMN access_count INTEGER DEFAULT 1;
+		`,
+	},
+	{
+		Version: 6,
+		Up: `
+		CREATE TABLE IF NOT EXISTS checkpoints (
+			id TEXT PRIMARY KEY,
+			session_id TEXT NOT NULL,
+			plan_id TEXT,
+			task TEXT NOT NULL,
+			timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+			
+			-- Execution State
+			current_step INTEGER DEFAULT 0,
+			steps_status TEXT, -- JSON map: step_id -> status
+			step_results TEXT, -- JSON map: step_id -> result
+			turn_count INTEGER DEFAULT 0,
+			error_count INTEGER DEFAULT 0,
+			last_error TEXT,
+			last_tool_used TEXT,
+			progress REAL DEFAULT 0.0,
+			status TEXT DEFAULT 'active',
+			
+			-- Cost Tracking
+			total_cost REAL DEFAULT 0.0,
+			request_count INTEGER DEFAULT 0,
+			
+			-- Session Approvals
+			approved_write BOOLEAN DEFAULT 0,
+			approved_exec BOOLEAN DEFAULT 0,
+			
+			-- Memory State (JSON)
+			memory_snapshot TEXT,
+			
+			-- Shadow Workspace State
+			shadow_files TEXT, -- JSON map: path -> content_hash
+			shadow_manifest TEXT,
+			
+			-- Metadata
+			agent_model TEXT,
+			worker_model TEXT,
+			policy_name TEXT,
+			metadata TEXT -- JSON map for additional fields
+		);
+		
+		CREATE INDEX IF NOT EXISTS idx_checkpoints_session ON checkpoints(session_id);
+		CREATE INDEX IF NOT EXISTS idx_checkpoints_timestamp ON checkpoints(timestamp DESC);
+		CREATE INDEX IF NOT EXISTS idx_checkpoints_status ON checkpoints(status);
+		`,
+	},
 }
 
 func Migrate(db *sql.DB) error {

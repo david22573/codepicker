@@ -4,7 +4,6 @@ import (
 	"github.com/david22573/codepicker/internal/config"
 	"github.com/david22573/codepicker/internal/logger"
 	"github.com/david22573/codepicker/internal/shadow"
-	"github.com/david22573/codepicker/pkg/openrouter"
 )
 
 type ToolSet string
@@ -17,69 +16,55 @@ const (
 )
 
 type Registry struct {
-	root   string
-	config *config.ConfigFile
-	shadow *shadow.Manager
+	root      string
+	config    *config.ConfigFile
+	shadowMgr *shadow.Manager
 }
 
 func NewRegistry(root string, cfg *config.ConfigFile, sm *shadow.Manager) *Registry {
 	return &Registry{
-		root:   root,
-		config: cfg,
-		shadow: sm,
+		root:      root,
+		config:    cfg,
+		shadowMgr: sm,
 	}
-}
-
-func (r *Registry) GetDefinitions(set ToolSet) []openrouter.Tool {
-	tools := r.GetImplementation(set)
-	defs := make([]openrouter.Tool, len(tools))
-	for i, t := range tools {
-		defs[i] = t.Definition()
-	}
-	return defs
 }
 
 func (r *Registry) GetImplementation(set ToolSet) []Tool {
+	// Base tools available to almost everyone
 	read := &ReadFileTool{}
-	search := &SearchCodeTool{
-		Root:   r.root,
-		Shadow: r.shadow,
-	}
-	write := &WriteShadowFileTool{}
-	shell := &RunShellTool{}
-	delegate := &DelegateTaskTool{}
+	search := &SearchCodeTool{Root: r.root, Shadow: r.shadowMgr}
 	list := &ListFilesTool{Root: r.root}
-	skel := &SkeletonizeTool{}
 
-	// NEW: The Scanner Tool
-	scanner := &ScanPackageTool{
+	// Updated to use GenerateContextTool instead of the undefined ScanPackageTool
+	scanner := &GenerateContextTool{
 		Root:   r.root,
 		Logger: logger.NewStandardLogger(1),
 	}
 
-	var tools []Tool
-
-	// Add 'scanner' to the base set so Architect/Context agents can use it
-	base := []Tool{read, search, list, skel, scanner}
+	baseTools := []Tool{read, search, list, scanner}
 
 	switch set {
 	case SetReadOnly:
-		tools = base
+		return baseTools
+
 	case SetStandard:
-		tools = append(base, write, delegate)
+		// Standard agents can write files but not run shell
+		write := &WriteShadowFileTool{Shadow: r.shadowMgr}
+		return append(baseTools, write)
+
 	case SetAdmin:
-		tools = append(base, write, shell, delegate)
+		// Admin agents can do everything including shell
+		write := &WriteShadowFileTool{Shadow: r.shadowMgr}
+		shell := &RunShellTool{Root: r.root}
+		delegate := &DelegateTaskTool{}
+		return append(baseTools, write, shell, delegate)
+
 	case SetOrchestrator:
-		tools = base
+		// Orchestrators focus on planning and delegation
+		delegate := &DelegateTaskTool{}
+		return append(baseTools, delegate)
+
 	default:
-		tools = base
+		return baseTools
 	}
-
-	if (set == SetStandard || set == SetAdmin) && r.config != nil {
-		for _, ct := range r.config.CustomTools {
-			tools = append(tools, &CustomScriptTool{DefinitionModel: ct})
-		}
-	}
-
-	return tools
 }

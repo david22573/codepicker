@@ -2,7 +2,7 @@
 src: .
 output: codepicker_context.md
 ai:
-  model: anthropic/claude-sonnet-4.5
+  model: liquid/lfm-2.5-1.2b-thinking:free
   temperature: 0.0
 
 include:

@@ -8,7 +8,9 @@ import (
 	"github.com/david22573/codepicker/pkg/openrouter"
 )
 
-type RunShellTool struct{}
+type RunShellTool struct {
+	Root string
+}
 
 type shellArgs struct {
 	Command string `json:"command"`

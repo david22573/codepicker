@@ -1,12 +1,33 @@
 package config
 
-import "strings"
+import (
+	"fmt"
+	"os"
+	"strings"
 
-type Config struct {
-	IgnoredDirs map[string]bool
-	AllowedExts map[string]bool
+	"github.com/joho/godotenv"
+)
+
+// LLMConfig holds settings for the AI provider
+type LLMConfig struct {
+	Provider string // "openai" or "openrouter"
+	Model    string
+	APIKey   string
 }
 
+// Config is the unified configuration struct
+// It satisfies requirements for both the Scanner (file filtering) and the Engine (LLM/Agent)
+type Config struct {
+	// --- Scanner/Context Fields ---
+	IgnoredDirs map[string]bool
+	AllowedExts map[string]bool
+
+	// --- Agent/Engine Fields ---
+	ProjectRoot string
+	LLM         LLMConfig
+}
+
+// NewConfig creates a Config with default scanner settings
 func NewConfig() *Config {
 	return &Config{
 		IgnoredDirs: map[string]bool{
@@ -20,25 +41,52 @@ func NewConfig() *Config {
 			"build":          true,
 			"__pycache__":    true,
 			"codepicker_out": true,
-			"tmp":            true,
-			"coverage":       true,
-			".next":          true,
-			"target":         true,
+			".codepicker":    true,
 		},
 		AllowedExts: map[string]bool{
 			".go": true, ".js": true, ".ts": true, ".tsx": true, ".jsx": true,
 			".py": true, ".java": true, ".kt": true, ".rb": true, ".php": true,
 			".c": true, ".cpp": true, ".h": true, ".hpp": true, ".rs": true,
-			".cs": true, ".swift": true, ".scala": true, ".sh": true, ".bat": true,
-			".lua": true, ".pl": true, ".ex": true, ".exs": true,
-			".html": true, ".css": true, ".scss": true, ".sql": true, ".graphql": true,
-			".json": true, ".yaml": true, ".yml": true, ".toml": true, ".xml": true,
-			".env": false, // Explicitly false by default for security
-			".md":  true, ".txt": true, ".rst": true,
+			".md": true, ".txt": true, ".json": true, ".yaml": true, ".toml": true,
+			".sql": true, ".html": true, ".css": true,
 		},
 	}
 }
 
+// Load populates the Config with environment variables and defaults for the Agent
+func Load() (*Config, error) {
+	// Start with defaults
+	cfg := NewConfig()
+
+	_ = godotenv.Load()
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get current working directory: %w", err)
+	}
+	cfg.ProjectRoot = cwd
+
+	// Load LLM Settings
+	cfg.LLM = LLMConfig{
+		Provider: getEnvOrDefault("LLM_PROVIDER", "openrouter"),
+		Model:    getEnvOrDefault("LLM_MODEL", "openai/gpt-4o-mini"),
+		APIKey:   os.Getenv("LLM_API_KEY"),
+	}
+
+	// Fallback keys if the main one is missing
+	if cfg.LLM.APIKey == "" {
+		if cfg.LLM.Provider == "openai" {
+			cfg.LLM.APIKey = os.Getenv("OPENAI_API_KEY")
+		} else {
+			cfg.LLM.APIKey = os.Getenv("OPENROUTER_API_KEY")
+		}
+	}
+
+	return cfg, nil
+}
+
+// IsSpecialFile checks for files that should always be included regardless of extension
+// This fixes the "undefined: config.IsSpecialFile" error
 func IsSpecialFile(name string) bool {
 	special := map[string]bool{
 		"makefile":     true,
@@ -52,9 +100,10 @@ func IsSpecialFile(name string) bool {
 		"go.sum":       true,
 		"package.json": true,
 	}
-	return special[name]
+	return special[strings.ToLower(name)]
 }
 
+// Helper method for Scanner to add dynamic extensions
 func (c *Config) AddAllowedExtensions(exts []string) {
 	if c.AllowedExts == nil {
 		c.AllowedExts = make(map[string]bool)
@@ -70,6 +119,7 @@ func (c *Config) AddAllowedExtensions(exts []string) {
 	}
 }
 
+// Helper method for Scanner to add dynamic ignore dirs
 func (c *Config) AddIgnoredDirs(dirs []string) {
 	if c.IgnoredDirs == nil {
 		c.IgnoredDirs = make(map[string]bool)
@@ -80,4 +130,11 @@ func (c *Config) AddIgnoredDirs(dirs []string) {
 			c.IgnoredDirs[dir] = true
 		}
 	}
+}
+
+func getEnvOrDefault(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }

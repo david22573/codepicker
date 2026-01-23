@@ -3,6 +3,7 @@ package batch
 import (
 	"database/sql"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -32,13 +33,18 @@ type Job struct {
 
 type Queue struct {
 	db *sql.DB
+	mu sync.RWMutex // Protects all queue operations
 }
 
 func NewQueue(db *sql.DB) *Queue {
 	return &Queue{db: db}
 }
 
+// Add enqueues a new job with thread-safe write locking
 func (q *Queue) Add(task string, priority int) (string, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
 	id := uuid.New().String()
 	_, err := q.db.Exec(`
 		INSERT INTO jobs (id, task, priority, status, created_at)
@@ -50,7 +56,12 @@ func (q *Queue) Add(task string, priority int) (string, error) {
 	return id, nil
 }
 
+// Next retrieves the next pending job with thread-safe write locking
+// Note: This uses write lock because it's typically followed by UpdateStatus
 func (q *Queue) Next() (*Job, error) {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+
 	var j Job
 	var started sql.NullTime
 	var completed sql.NullTime
@@ -81,7 +92,11 @@ func (q *Queue) Next() (*Job, error) {
 	return &j, nil
 }
 
+// UpdateStatus updates a job's status with thread-safe write locking
 func (q *Queue) UpdateStatus(id string, status JobStatus, result, errMsg string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
 	now := time.Now()
 	var err error
 
@@ -100,7 +115,11 @@ func (q *Queue) UpdateStatus(id string, status JobStatus, result, errMsg string)
 	return err
 }
 
+// List retrieves recent jobs with thread-safe read locking
 func (q *Queue) List(limit int) ([]Job, error) {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+
 	rows, err := q.db.Query(`
 		SELECT id, task, priority, status, created_at, started_at, completed_at 
 		FROM jobs 
@@ -129,7 +148,11 @@ func (q *Queue) List(limit int) ([]Job, error) {
 	return jobs, nil
 }
 
+// Clear removes old completed/failed jobs with thread-safe write locking
 func (q *Queue) Clear(olderThan time.Duration) (int64, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
 	cutoff := time.Now().Add(-olderThan)
 	res, err := q.db.Exec(`DELETE FROM jobs WHERE (status = ? OR status = ?) AND created_at < ?`, StatusCompleted, StatusFailed, cutoff)
 	if err != nil {

@@ -35,15 +35,6 @@ func New(code, msg, op string, err error) *CodePickerError {
 	}
 }
 
-func NewInternalError(op string, err error) *CodePickerError {
-	return &CodePickerError{
-		Code:      "INTERNAL_ERROR",
-		Message:   "An unexpected internal error occurred",
-		Operation: op,
-		Err:       err,
-	}
-}
-
 // Domain Specific Constructors
 
 func NewValidationError(field, msg, value string) *CodePickerError {
@@ -60,15 +51,6 @@ func NewConfigError(msg string, err error) *CodePickerError {
 		Code:      "CONFIG_ERROR",
 		Message:   msg,
 		Operation: "config.Load",
-		Err:       err,
-	}
-}
-
-func NewLLMError(op string, err error) *CodePickerError {
-	return &CodePickerError{
-		Code:      "LLM_ERROR",
-		Message:   "AI Provider request failed",
-		Operation: op,
 		Err:       err,
 	}
 }

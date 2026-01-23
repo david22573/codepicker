@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/david22573/codepicker/internal/shadow"
 	"github.com/david22573/codepicker/pkg/openrouter"
 )
 
@@ -22,7 +23,6 @@ func (t *ReadFileTool) Description() string {
 	return "Read the contents of a specific file from the project."
 }
 
-// [3.3] Read Capability
 func (t *ReadFileTool) Capabilities() []Capability { return []Capability{CapRead} }
 
 func (t *ReadFileTool) Definition() openrouter.Tool {
@@ -80,7 +80,10 @@ func (t *ReadFileTool) Execute(ctx context.Context, argsJSON string, rt *Runtime
 	return fmt.Sprintf("✓ File '%s' loaded into active context", args.Path), nil
 }
 
-type WriteShadowFileTool struct{}
+// WriteShadowFileTool now includes the Shadow manager field
+type WriteShadowFileTool struct {
+	Shadow *shadow.Manager
+}
 
 type writeArgs struct {
 	Path    string `json:"path"`
@@ -92,7 +95,6 @@ func (t *WriteShadowFileTool) Description() string {
 	return "Write code to the shadow workspace."
 }
 
-// [3.3] Write Capability
 func (t *WriteShadowFileTool) Capabilities() []Capability { return []Capability{CapWrite} }
 
 func (t *WriteShadowFileTool) Definition() openrouter.Tool {
@@ -119,7 +121,19 @@ func (t *WriteShadowFileTool) Execute(ctx context.Context, argsJSON string, rt *
 		return "", fmt.Errorf("invalid arguments: %w", err)
 	}
 
-	path, err := rt.FS.WriteFile(args.Path, []byte(args.Content))
+	// Use the struct field if available (Registry uses this), fallback to RuntimeContext (Agent uses this)
+	var shadowMgr *shadow.Manager
+	if t.Shadow != nil {
+		shadowMgr = t.Shadow
+	} else if overlay, ok := rt.FS.(interface{ GetShadowManager() *shadow.Manager }); ok {
+		shadowMgr = overlay.GetShadowManager()
+	}
+
+	if shadowMgr == nil {
+		return "", fmt.Errorf("shadow manager not available")
+	}
+
+	path, err := shadowMgr.WriteFile(args.Path, []byte(args.Content))
 	if err != nil {
 		return "", fmt.Errorf("error writing shadow file: %w", err)
 	}

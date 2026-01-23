@@ -50,16 +50,12 @@ func (t *SkeletonizeTool) Execute(ctx context.Context, argsJSON string, rt *Runt
 		return "", fmt.Errorf("error reading '%s': %w", args.Path, err)
 	}
 
-	// Attempt to skeletonize
-	skel, err := code.Skeletonize(args.Path, contentBytes)
+	// Fix: Added `false` as the 3rd argument (keepDocs)
+	skel, err := code.Skeletonize(args.Path, contentBytes, false)
 	if err != nil {
-		// If it fails (e.g., syntax error or non-Go file), we warn the agent but return the original content
-		// so it isn't blocked.
 		return fmt.Sprintf("⚠️ Skeletonization failed (syntax error?); returning full content instead.\nError: %v\n\n--- FILE: %s ---\n%s", err, args.Path, string(contentBytes)), nil
 	}
 
-	// We add the path to memory tracking, but not the content, since it's incomplete.
-	// This ensures the agent knows it has "seen" the file structure.
 	_ = rt.Memory.Add(args.Path)
 
 	return fmt.Sprintf("--- SKELETON: %s ---\n%s", args.Path, string(skel)), nil

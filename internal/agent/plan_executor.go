@@ -8,17 +8,38 @@ import (
 
 	"github.com/david22573/codepicker/internal/shadow"
 	"github.com/david22573/codepicker/pkg/openrouter"
+	"github.com/google/uuid"
 )
 
 type PlanExecutor struct {
-	Engine *Engine
-	Plan   *Plan
+	Engine             *Engine
+	Plan               *Plan
+	CheckpointManager  *CheckpointManager
+	AutoCheckpoint     bool // Enable automatic checkpointing
+	CheckpointInterval int  // Checkpoint every N steps (0 = disabled)
 }
 
 func NewPlanExecutor(eng *Engine, plan *Plan) *PlanExecutor {
+	// Create a unique session ID for this execution
+	sessionID := uuid.New().String()
+
 	return &PlanExecutor{
-		Engine: eng,
-		Plan:   plan,
+		Engine:             eng,
+		Plan:               plan,
+		CheckpointManager:  NewCheckpointManager(eng.Memory.Store, sessionID, eng),
+		AutoCheckpoint:     true, // Enabled by default
+		CheckpointInterval: 1,    // Checkpoint after every step by default
+	}
+}
+
+// NewPlanExecutorWithSession creates a plan executor with a specific session ID (for resuming)
+func NewPlanExecutorWithSession(eng *Engine, plan *Plan, sessionID string) *PlanExecutor {
+	return &PlanExecutor{
+		Engine:             eng,
+		Plan:               plan,
+		CheckpointManager:  NewCheckpointManager(eng.Memory.Store, sessionID, eng),
+		AutoCheckpoint:     true,
+		CheckpointInterval: 1,
 	}
 }
 
@@ -29,8 +50,16 @@ func (pe *PlanExecutor) Execute(ctx context.Context) error {
 	}
 
 	pe.Engine.Logger.Info(fmt.Sprintf("🚀 Starting Plan Execution: %s (%d steps)", pe.Plan.ID, len(pe.Plan.Steps)))
+	pe.Engine.Logger.Info(fmt.Sprintf("📍 Session ID: %s", pe.CheckpointManager.SessionID))
 
 	pe.Engine.Memory.Store.UpdatePlanStatus(pe.Plan.ID, "running")
+
+	// Create initial checkpoint
+	if pe.AutoCheckpoint {
+		if err := pe.CheckpointManager.AutoCheckpoint(ctx, pe.Plan, 0, "execution_start"); err != nil {
+			pe.Engine.Logger.Warn(fmt.Sprintf("Failed to create initial checkpoint: %v", err))
+		}
+	}
 
 	var shadowMgr *shadow.Manager
 	if overlay, ok := pe.Engine.Memory.FS.(interface{ GetShadowManager() *shadow.Manager }); ok {
@@ -106,6 +135,13 @@ func (pe *PlanExecutor) Execute(ctx context.Context) error {
 		}
 
 		if err != nil {
+			// Create error checkpoint before failing
+			if pe.AutoCheckpoint {
+				step.Status = "failed"
+				step.Result = err.Error()
+				pe.CheckpointManager.AutoCheckpoint(ctx, pe.Plan, i, "step_error")
+			}
+
 			pe.handleStepFailure(step, err)
 			return fmt.Errorf("step %d failed after retries: %w", step.ID, err)
 		}
@@ -115,20 +151,69 @@ func (pe *PlanExecutor) Execute(ctx context.Context) error {
 		pe.savePlanState()
 		pe.Engine.Logger.Info(fmt.Sprintf("✅ Step %d Complete", step.ID))
 
+		// Create checkpoint after successful step
+		if pe.AutoCheckpoint && pe.shouldCheckpoint(i) {
+			if err := pe.CheckpointManager.AutoCheckpoint(ctx, pe.Plan, i+1, "step_complete"); err != nil {
+				pe.Engine.Logger.Warn(fmt.Sprintf("Failed to create checkpoint: %v", err))
+			}
+		}
+
 		startTime = time.Now() // Reset timer for next step
 		time.Sleep(1 * time.Second)
 	}
 
 	pe.Engine.Memory.Store.UpdatePlanStatus(pe.Plan.ID, "completed")
+
+	// Create final checkpoint
+	if pe.AutoCheckpoint {
+		if err := pe.CheckpointManager.AutoCheckpoint(ctx, pe.Plan, len(pe.Plan.Steps), "execution_complete"); err != nil {
+			pe.Engine.Logger.Warn(fmt.Sprintf("Failed to create final checkpoint: %v", err))
+		}
+	}
+
 	pe.Engine.Logger.Info("\n✨ Plan Execution Finished Successfully.")
 	return nil
 }
 
+// Resume resumes execution from a checkpoint
+func (pe *PlanExecutor) Resume(ctx context.Context, checkpointID string) error {
+	pe.Engine.Logger.Info(fmt.Sprintf("🔄 Resuming from checkpoint: %s", checkpointID))
+
+	// Restore state from checkpoint
+	restoredPlan, currentStep, err := pe.CheckpointManager.RestoreCheckpoint(ctx, checkpointID)
+	if err != nil {
+		return fmt.Errorf("failed to restore checkpoint: %w", err)
+	}
+
+	// Update plan with restored state
+	if restoredPlan != nil {
+		pe.Plan = restoredPlan
+	}
+
+	pe.Engine.Logger.Info(fmt.Sprintf("📍 Resuming from step %d/%d", currentStep+1, len(pe.Plan.Steps)))
+
+	// Continue execution from the current step
+	return pe.Execute(ctx)
+}
+
+// shouldCheckpoint determines if a checkpoint should be created based on the interval
+func (pe *PlanExecutor) shouldCheckpoint(stepIndex int) bool {
+	if pe.CheckpointInterval <= 0 {
+		return false
+	}
+	return (stepIndex+1)%pe.CheckpointInterval == 0
+}
+
 func (pe *PlanExecutor) checkProgress(sm *shadow.Manager, since time.Time) []string {
 	var recentFiles []string
-	sm.LoadManifest() // Reload from disk to see latest changes
 
-	for file, meta := range sm.Manifest.Changes {
+	// Reload manifest from disk to see latest changes
+	sm.LoadManifest()
+
+	// Use the thread-safe method to get manifest changes
+	changes := sm.GetManifestChanges()
+
+	for file, meta := range changes {
 		if meta.Timestamp.After(since) {
 			recentFiles = append(recentFiles, file)
 		}

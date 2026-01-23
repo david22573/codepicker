@@ -5,68 +5,54 @@ import (
 	"os"
 
 	"github.com/david22573/codepicker/internal/logger"
-	"github.com/david22573/codepicker/internal/ui"
-	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
 )
 
 var (
+	// Global flags
+	verbose     bool
 	srcDir      string
+	minify      bool
 	includeExts string
 	ignoreDirs  string
-	configFile  string
-	verbose     bool
-	minify      bool
 
-	// Debug Flags
-	debugPolicy bool
-	traceTools  bool
-	traceMemory bool
+	// Global Logger (Must use the interface type to be compatible with internal packages)
+	appLogger logger.Logger
 )
-
-var appLogger logger.Logger
-var userUI ui.UI
 
 var rootCmd = &cobra.Command{
 	Use:   "codepicker",
-	Short: "AI Codebase Agent & Context Generator",
-	Long:  `Codepicker is a developer tool that turns your codebase into AI-ready context and provides autonomous agents to work on it.`,
+	Short: "AI-powered code harvester and modifier",
+	Long: `CodePicker is a CLI tool that helps AI agents understand and modify codebases.
+It maintains a 'shadow' copy of your project to safely stage changes before applying them.`,
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
-		level := 1
-		if verbose {
-			level = 2
-		}
-		appLogger = logger.NewStandardLogger(level)
-	},
-	// Phase 0 Fix: Default to help
-	Run: func(cmd *cobra.Command, args []string) {
-		cmd.Help()
-		fmt.Println("\n💡 Hint: Run 'codepicker context gen' to generate context, or 'codepicker agent' to start the AI.")
+		setupLogger()
 	},
 }
 
 func Execute() {
-	appLogger = logger.NewStandardLogger(1)
-	userUI = ui.NewConsoleUI()
 	if err := rootCmd.Execute(); err != nil {
-		appLogger.Error(fmt.Sprintf("Fatal error: %v", err))
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
 func init() {
-	_ = godotenv.Load()
-
-	rootCmd.PersistentFlags().StringVarP(&srcDir, "src", "s", ".", "Source directory")
-	rootCmd.PersistentFlags().StringVarP(&configFile, "config", "c", "", "Config file path")
-
-	rootCmd.PersistentFlags().StringVarP(&includeExts, "include", "i", "", "Extensions to include (comma-separated)")
-	rootCmd.PersistentFlags().StringVarP(&ignoreDirs, "exclude", "e", "", "Directories to exclude (comma-separated)")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose logging")
 
-	rootCmd.PersistentFlags().BoolVarP(&minify, "minify", "m", true, "Minify output (global default)")
+	// Global flags used by subcommands
+	rootCmd.PersistentFlags().StringVarP(&srcDir, "src", "s", ".", "Source directory root")
+	rootCmd.PersistentFlags().BoolVarP(&minify, "minify", "m", false, "Minify output")
+	rootCmd.PersistentFlags().StringVar(&includeExts, "include", "", "Comma-separated extensions to include")
+	rootCmd.PersistentFlags().StringVar(&ignoreDirs, "ignore", "", "Comma-separated directories to ignore")
+}
 
-	rootCmd.PersistentFlags().BoolVar(&debugPolicy, "debug-policy", false, "Log detailed policy decisions")
-	rootCmd.PersistentFlags().BoolVar(&traceTools, "trace-tools", false, "Log full tool arguments and outputs")
-	rootCmd.PersistentFlags().BoolVar(&traceMemory, "trace-memory", false, "Log memory snapshot/restore operations")
+func setupLogger() {
+	level := 1 // Info
+	if verbose {
+		level = 2 // Debug
+	}
+
+	// Use the internal logger factory to ensure interface compatibility
+	appLogger = logger.NewStandardLogger(level)
 }

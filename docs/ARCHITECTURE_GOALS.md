@@ -10,21 +10,21 @@
 
 ### Race Conditions & Concurrency
 
-- [ ] **[P0] Add mutex protection to shadow.Manager**
+- [x] **[P0] Add mutex protection to shadow.Manager**
   - **File**: `internal/shadow/fs.go`
   - **Issue**: Concurrent writes to `Manifest.Changes` map cause data races
   - **Solution**: Add `sync.RWMutex` to Manager struct, lock all map operations
   - **Test**: Create `internal/shadow/fs_test.go` with concurrent write tests
   - **Estimated Impact**: Prevents data corruption in parallel agent execution
 
-- [ ] **[P0] Fix memory leak in Engine.Run() message accumulation**
+- [x] **[P0] Fix memory leak in Engine.Run() message accumulation**
   - **File**: `internal/agent/engine.go`
   - **Issue**: `messages` slice grows unbounded in turn loop (can reach 1000+ messages)
   - **Solution**: Keep system message + last 50 messages, prune when len > 100
   - **Code Change**: Add `pruneMessages()` helper function in Run() loop
   - **Estimated Impact**: Reduces memory usage by 70-90% in long sessions
 
-- [ ] **[P0] Thread-safe database operations**
+- [x] **[P0] Thread-safe database operations**
   - **File**: `internal/database/store.go`
   - **Issue**: Concurrent reads/writes to working memory without proper locking
   - **Solution**: Use `sync.RWMutex` for all memory operations, SQLite connection pooling
@@ -33,7 +33,7 @@
 
 ### Context Window Management
 
-- [ ] **[P0] Implement intelligent context eviction with relevance scoring**
+- [x] **[P0] Implement intelligent context eviction with relevance scoring**
   - **File**: `internal/database/store.go` (modify `GetWorkingMemory()`)
   - **Issue**: Simple LRU eviction loses critical context, agent forgets recent work
   - **Solution**: Score files by: (1) keyword match to current task, (2) recently modified in shadow, (3) explicitly read by agent
@@ -50,7 +50,7 @@
 
 ### Reliability & Recovery
 
-- [ ] **[P1] Implement checkpoint system for resumable agent sessions**
+- [x] **[P1] Implement checkpoint system for resumable agent sessions**
   - **Files**: 
     - `internal/agent/checkpoint.go` (NEW)
     - `internal/database/schema.go` (add migration for checkpoints table)
@@ -71,7 +71,7 @@
   - **Usage**: `codepicker agent run "task" --resume` auto-detects incomplete sessions
   - **Estimated Impact**: Saves hours of wasted work on crashes
 
-- [ ] **[P1] Enhanced error recovery system**
+- [x] **[P1] Enhanced error recovery system**
   - **File**: `internal/agent/recovery.go` (extend `CommonFailures`)
   - **Issue**: Only handles 3 Go-specific errors, many common failures unhandled
   - **Solution**: Add recovery strategies for:
@@ -93,7 +93,7 @@
 
 ### Testing & Quality
 
-- [ ] **[P1] Add critical test coverage for concurrency scenarios**
+- [x] **[P1] Add critical test coverage for concurrency scenarios**
   - **Files to Create**:
     - `internal/shadow/fs_test.go` - Concurrent WriteFile + ApplyAtomic tests
     - `internal/database/store_test.go` - Parallel UpdateWorkingMemory tests

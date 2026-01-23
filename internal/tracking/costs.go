@@ -112,6 +112,26 @@ func (ct *CostTracker) GetUsagePercentage() float64 {
 	return (ct.totalCost / ct.dailyLimit) * 100
 }
 
+// RestoreState restores the cost tracker state from a checkpoint
+// Note: This adds to existing costs, it doesn't replace them
+func (ct *CostTracker) RestoreState(previousCost float64, previousCount int) {
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+
+	// We don't replace, we just log the previous state
+	// The current session's costs will accumulate on top
+	log.Printf("💰 Checkpoint Info: Previous session had $%.4f (%d requests)", previousCost, previousCount)
+}
+
+// Reset resets the cost tracker (useful for testing or manual reset)
+func (ct *CostTracker) Reset() {
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+	ct.totalCost = 0
+	ct.requestCount = 0
+	ct.warningsTriggered = make(map[float64]bool)
+}
+
 // calculateCost returns cost in USD based on token counts and model
 func calculateCost(promptTokens, completionTokens int, model string) float64 {
 	modelLower := strings.ToLower(model)

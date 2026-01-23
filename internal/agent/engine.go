@@ -80,9 +80,9 @@ func NewEngine(
 	if cfg != nil && cfg.AI.WorkerModel != "" {
 		workerModel = cfg.AI.WorkerModel
 	} else {
-		// Reasoning models often fail at simple code output, so we fallback to a standard model
+		// Auto-downgrade worker for reasoning models to save cost/time
 		if isReasoningModel(primaryModel) {
-			fallbackWorker := "deepseek/deepseek-chat" // Or anthropic/claude-3.5-sonnet
+			fallbackWorker := "deepseek/deepseek-chat"
 			log.Info(fmt.Sprintf("🧠 Reasoning model detected (%s). Auto-assigning worker to %s for stability.", primaryModel, fallbackWorker))
 			workerModel = fallbackWorker
 		}
@@ -107,6 +107,8 @@ func NewEngine(
 		go mcpMgr.StartServers(context.Background(), cfg.MCPServers)
 	}
 
+	// Fix: Pass correct arguments to NewToolExecutor
+	// We pass nil for 'availableTools' initially; they are populated in rebuildTools
 	executor := NewToolExecutor(nil, runtimeCtx, enforcer, debug.Tools)
 
 	executor.AddMiddleware(NewSafetyLogMiddleware(log))
@@ -143,8 +145,8 @@ func (e *Engine) rebuildTools(toolSet tools.ToolSet) {
 		shadowMgr = overlay.GetShadowManager()
 	}
 
+	// Initialize the registry to get tool implementations
 	registry := tools.NewRegistry(srcRoot, e.Config, shadowMgr)
-
 	newTools := registry.GetImplementation(toolSet)
 
 	if e.MCPManager != nil {
@@ -190,7 +192,7 @@ func (e *Engine) SetPolicy(p policy.ExecutionPolicy) {
 }
 
 func cleanMemory(content string) string {
-	// Removes internal "thinking" tags from reasoning models so they don't pollute context
+	// Remove <think> blocks from reasoning models to keep context clean
 	re := regexp.MustCompile(`(?s)<think>.*?</think>`)
 	cleaned := re.ReplaceAllString(content, "")
 	return cleaned
@@ -200,12 +202,10 @@ func isReasoningModel(modelID string) bool {
 	return regexp.MustCompile(`(?i)(reasoner|deepseek-r1|o1-preview|nemotron)`).MatchString(modelID)
 }
 
-// getDynamicCapabilities generates a text block describing currently available tools
 func (e *Engine) getDynamicCapabilities() string {
 	var builder strings.Builder
 	builder.WriteString("\n### ACTIVE TOOLSET (You have access to these tools):\n")
 
-	// Sort tools for consistent prompt output
 	var names []string
 	for k := range e.Executor.Tools {
 		names = append(names, k)
@@ -219,6 +219,21 @@ func (e *Engine) getDynamicCapabilities() string {
 
 	builder.WriteString("\nReminder: You must use the tools exactly as named above.")
 	return builder.String()
+}
+
+func trimMessageHistory(messages []openrouter.ChatMessage, maxRecent int) []openrouter.ChatMessage {
+	if len(messages) <= maxRecent+1 {
+		return messages
+	}
+
+	// Keep system prompt (index 0) and the most recent N messages
+	trimmed := make([]openrouter.ChatMessage, 0, maxRecent+1)
+	trimmed = append(trimmed, messages[0])
+
+	startIdx := len(messages) - maxRecent
+	trimmed = append(trimmed, messages[startIdx:]...)
+
+	return trimmed
 }
 
 func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openrouter.ChatMessage)) (string, error) {
@@ -241,8 +256,9 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 	hardLimit := e.Limits.AgentMaxTurns * 3
 	totalTurns := 0
 
-	// Pre-calculate system prompt components
 	toolCapabilities := e.getDynamicCapabilities()
+
+	const maxRecentMessages = 20
 
 	for i := 0; i < e.Limits.AgentMaxTurns; i++ {
 		totalTurns++
@@ -265,12 +281,13 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 
 		currentContext := e.Memory.FormatContext()
 
-		// DYNAMIC INJECTION: Combine Base Prompt + Tool List + Context
 		fullSystemMsg := e.SystemPrompt + "\n" + toolCapabilities + "\n" + currentContext
+
+		trimmedMessages := trimMessageHistory(messages, maxRecentMessages)
 
 		req := openrouter.ChatCompletionRequest{
 			Model:     e.Model,
-			Messages:  append([]openrouter.ChatMessage{{Role: "system", Content: fullSystemMsg}}, messages...),
+			Messages:  append([]openrouter.ChatMessage{{Role: "system", Content: fullSystemMsg}}, trimmedMessages...),
 			Tools:     activeTools,
 			MaxTokens: e.Limits.MaxStepTokens,
 		}
@@ -311,6 +328,7 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 		for _, tool := range msg.ToolCalls {
 			e.Logger.Debug(fmt.Sprintf("🔨 Executing Tool: %s", tool.Function.Name))
 
+			// Deduplication logic
 			actionSig := fmt.Sprintf("%s:%s", tool.Function.Name, tool.Function.Arguments)
 			if !seenActions[actionSig] {
 				seenActions[actionSig] = true
@@ -337,7 +355,7 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 
 		if isProgressMade {
 			if i > 0 {
-				i--
+				i-- // Reward progress by not counting this turn against the limit
 				e.Logger.Debug("🔄 Progress detected (unique tool usage). Turn budget extended.")
 			}
 		} else {
@@ -345,6 +363,11 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 				Role:    "user",
 				Content: "System Warning: You are repeating the exact same tool call. Stop and reflect. Try a different approach.",
 			})
+		}
+
+		if len(messages) > maxRecentMessages*2 {
+			messages = trimMessageHistory(messages, maxRecentMessages)
+			e.Logger.Debug(fmt.Sprintf("🧹 Trimmed message history to %d messages to prevent memory leak", len(messages)))
 		}
 	}
 
@@ -364,7 +387,6 @@ func (e *Engine) RunSingleTurn(
 
 	currentContext := e.Memory.FormatContext()
 
-	// DYNAMIC INJECTION here as well
 	toolCapabilities := e.getDynamicCapabilities()
 	fullSystemMsg := e.SystemPrompt + "\n" + toolCapabilities + "\n" + currentContext
 

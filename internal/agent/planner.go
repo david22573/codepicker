@@ -41,7 +41,7 @@ func (p *Planner) CreatePlan(ctx context.Context, task string, projectTree strin
 			{Role: "user", Content: userMsg},
 		},
 		ResponseFormat: &openrouter.ResponseFormat{Type: "json_object"},
-		// Use Phase 1 Prefill to ensure valid JSON start
+		// Prompt engineering: Force JSON mode with a prefill
 		Prefill: "{\n  \"reasoning\": \"",
 	}
 
@@ -81,8 +81,6 @@ func (p *Planner) CreatePlan(ctx context.Context, task string, projectTree strin
 	return plan, nil
 }
 
-// GenerateContextSummary creates a compressed view of the codebase using Skeletonization
-// This can be used if we want to give the Planner more than just a file tree.
 func (p *Planner) GenerateContextSummary(root string, files []string) string {
 	var sb strings.Builder
 	sb.WriteString("### SELECTED FILE SKELETONS:\n")
@@ -94,16 +92,16 @@ func (p *Planner) GenerateContextSummary(root string, files []string) string {
 			continue
 		}
 
-		// If it's a Go file, skeletonize it
 		if strings.HasSuffix(path, ".go") {
-			skel, err := code.Skeletonize(path, content)
+			// Fix: Added 'true' (keepDocs) so the planner can see function comments
+			// This matches the updated signature: func Skeletonize(filename string, src []byte, keepDocs bool)
+			skel, err := code.Skeletonize(path, content, true)
 			if err == nil {
 				sb.WriteString(fmt.Sprintf("\n--- FILE: %s ---\n%s\n", path, string(skel)))
 				continue
 			}
 		}
 
-		// Fallback: Just first 10 lines for other files
 		lines := strings.Split(string(content), "\n")
 		if len(lines) > 10 {
 			lines = lines[:10]
