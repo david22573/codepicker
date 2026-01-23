@@ -22,7 +22,6 @@ import (
 const (
 	defaultBaseURL = "https://openrouter.ai/api/v1"
 	contentType    = "application/json"
-	// Keep timeout high for reasoning models like DeepSeek
 	defaultTimeout = 30 * time.Minute
 )
 
@@ -61,16 +60,14 @@ func WithTitle(title string) Option {
 }
 
 func NewClient(apiKey string, opts ...Option) *Client {
-
 	transport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
-		ForceAttemptHTTP2: true,
-		MaxIdleConns:      100,
-		// CRITICAL FIX: Increased timeouts for reasoning models
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
 		IdleConnTimeout:       5 * time.Minute,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
@@ -169,17 +166,19 @@ func (c *Client) CreateChatCompletion(
 
 			if len(delta.ToolCalls) > 0 {
 				for _, tc := range delta.ToolCalls {
-
 					if tc.Index >= len(toolCalls) {
 						newCalls := make([]ToolCall, tc.Index+1)
 						copy(newCalls, toolCalls)
 						toolCalls = newCalls
 					}
-
 					current := &toolCalls[tc.Index]
+
+					// Robust update logic: Independent fields
 					if tc.ID != "" {
 						current.ID = tc.ID
 						current.Type = tc.Type
+					}
+					if tc.Function.Name != "" {
 						current.Function.Name = tc.Function.Name
 					}
 					current.Function.Arguments += tc.Function.Arguments
@@ -198,7 +197,16 @@ func (c *Client) CreateChatCompletion(
 	}
 
 	fullResp.Choices[0].Message.Content = contentBuilder.String()
-	fullResp.Choices[0].Message.ToolCalls = toolCalls
+
+	// SAFETY FILTER: Remove "ghost" tools with empty names
+	// This fixes the infinite loop seen in screenshot 2
+	var validTools []ToolCall
+	for _, tc := range toolCalls {
+		if strings.TrimSpace(tc.Function.Name) != "" {
+			validTools = append(validTools, tc)
+		}
+	}
+	fullResp.Choices[0].Message.ToolCalls = validTools
 
 	return fullResp, nil
 }
@@ -209,7 +217,6 @@ func (c *Client) CreateChatCompletionStream(
 ) (*ChatCompletionStream, error) {
 
 	req.Stream = true
-
 	reqBytes, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
@@ -218,7 +225,7 @@ func (c *Client) CreateChatCompletionStream(
 	var lastErr error
 
 	for attempt := 0; attempt < constants.MaxRetries; attempt++ {
-		// CRITICAL FIX: Stop retrying if user cancelled context
+
 		select {
 		case <-ctx.Done():
 			return nil, fmt.Errorf("context cancelled: %w", ctx.Err())
@@ -239,7 +246,6 @@ func (c *Client) CreateChatCompletionStream(
 		resp, err := c.httpClient.Do(httpReq)
 		if err != nil {
 			lastErr = err
-			// Check if context killed the request
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
@@ -248,6 +254,21 @@ func (c *Client) CreateChatCompletionStream(
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			defer resp.Body.Close()
+
+			if resp.StatusCode == 429 {
+				retryAfter := resp.Header.Get("Retry-After")
+				if retryAfter != "" {
+					if seconds, err := strconv.Atoi(retryAfter); err == nil {
+						waitDur := time.Duration(seconds) * time.Second
+						if waitDur > 60*time.Second {
+							waitDur = 60 * time.Second
+						}
+						time.Sleep(waitDur)
+						continue
+					}
+				}
+			}
+
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 			lastErr = errors.NewInternalError(
 				"openrouter.stream",
@@ -314,21 +335,13 @@ func (c *Client) newRequest(
 
 func (c *Client) sendRequest(req *http.Request, v any) error {
 	var lastErr error
-
 	maxAttempts := constants.MaxRetries + 2
 
 	for attempt := 0; attempt <= maxAttempts; attempt++ {
-
 		if attempt > 0 {
 			delay := time.Duration(math.Pow(2, float64(attempt))) * time.Second
 			jitter := time.Duration(rand.Int63n(int64(1000 * time.Millisecond)))
-			sleepTime := delay + jitter
-
-			if ctxErr := req.Context().Err(); ctxErr != nil {
-				return ctxErr
-			}
-
-			time.Sleep(sleepTime)
+			time.Sleep(delay + jitter)
 		}
 
 		if attempt > 0 && req.GetBody != nil {
@@ -350,14 +363,12 @@ func (c *Client) sendRequest(req *http.Request, v any) error {
 
 		if res.StatusCode == 429 || (res.StatusCode >= 500 && res.StatusCode != 501) {
 			res.Body.Close()
-
 			if retryAfter := res.Header.Get("Retry-After"); retryAfter != "" {
 				if seconds, err := strconv.Atoi(retryAfter); err == nil {
 					time.Sleep(time.Duration(seconds) * time.Second)
 					continue
 				}
 			}
-
 			lastErr = fmt.Errorf("server error %d", res.StatusCode)
 			continue
 		}
@@ -378,7 +389,6 @@ func (c *Client) sendRequest(req *http.Request, v any) error {
 		if err := json.NewDecoder(res.Body).Decode(v); err != nil {
 			return fmt.Errorf("failed to decode response: %w", err)
 		}
-
 		return nil
 	}
 

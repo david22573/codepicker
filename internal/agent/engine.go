@@ -27,7 +27,8 @@ type DebugConfig struct {
 
 type Engine struct {
 	Client       *openrouter.Client
-	Model        string
+	Model        string // The "Brain" (Supervisor/Reasoning Model)
+	WorkerModel  string // The "Hands" (Delegated Execution Model)
 	SystemPrompt string
 
 	Enforcer    *PolicyEnforcer
@@ -63,10 +64,35 @@ func NewEngine(
 	sentinel := NewSentinel(limits)
 	costTracker := tracking.NewCostTracker(limits.DailyCostLimit)
 
-	workerModel := "deepseek/deepseek-chat"
+	// --- MODEL SELECTION LOGIC ---
+	// 1. Determine Primary Model (The Brain)
+	primaryModel := model
+	if cfg != nil && cfg.AI.Model != "" {
+		if primaryModel == "" || primaryModel == "default" {
+			primaryModel = cfg.AI.Model
+		}
+	}
+	if primaryModel == "" {
+		primaryModel = "deepseek/deepseek-chat" // Fallback default
+	}
+
+	// 2. Determine Worker Model (The Hands)
+	workerModel := primaryModel // Default to same model
 	if cfg != nil && cfg.AI.WorkerModel != "" {
 		workerModel = cfg.AI.WorkerModel
+	} else {
+		// Auto-switch: If primary is a reasoning model, use a stable worker default
+		if isReasoningModel(primaryModel) {
+			// Llama 3.1 70B is extremely reliable for tool use
+			fallbackWorker := "meta-llama/llama-3.1-70b-instruct"
+			log.Info(fmt.Sprintf("🧠 Reasoning model detected (%s). Auto-assigning worker to %s for stability.", primaryModel, fallbackWorker))
+			workerModel = fallbackWorker
+		}
 	}
+
+	log.Debug(fmt.Sprintf("Engine Init: Supervisor=%s, Worker=%s", primaryModel, workerModel))
+
+	// Initialize the WorkerRunner with the specific WorkerModel
 	workerRunner := NewWorkerRunner(client, workerModel, fs, log)
 
 	runtimeCtx := &tools.RuntimeContext{
@@ -91,7 +117,8 @@ func NewEngine(
 
 	e := &Engine{
 		Client:       client,
-		Model:        model,
+		Model:        primaryModel,
+		WorkerModel:  workerModel,
 		SystemPrompt: prompts.Supervisor,
 		Enforcer:     enforcer,
 		Executor:     executor,
@@ -112,11 +139,14 @@ func NewEngine(
 
 func (e *Engine) rebuildTools(toolSet tools.ToolSet) {
 	srcRoot := "."
+	var shadowMgr *shadow.Manager
+
 	if overlay, ok := e.Executor.RuntimeContext.FS.(*vfs.OverlayFS); ok {
 		srcRoot = overlay.SrcRoot
+		shadowMgr = overlay.GetShadowManager()
 	}
 
-	registry := tools.NewRegistry(srcRoot, e.Config)
+	registry := tools.NewRegistry(srcRoot, e.Config, shadowMgr)
 
 	newTools := registry.GetImplementation(toolSet)
 
@@ -162,16 +192,20 @@ func (e *Engine) SetPolicy(p policy.ExecutionPolicy) {
 	e.rebuildTools(toolSet)
 }
 
-// cleanMemory removes internal reasoning tags (e.g., <think>) to save context.
 func cleanMemory(content string) string {
+	// Remove <think> tags often found in DeepSeek-R1 or similar reasoning models
 	re := regexp.MustCompile(`(?s)<think>.*?</think>`)
 	cleaned := re.ReplaceAllString(content, "")
 	return cleaned
 }
 
+func isReasoningModel(modelID string) bool {
+	// Regex to detect models known for reasoning/CoT that might struggle with strict JSON tools
+	return regexp.MustCompile(`(?i)(reasoner|deepseek-r1|o1-preview|nemotron)`).MatchString(modelID)
+}
+
 func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openrouter.ChatMessage)) (string, error) {
-	// CRITICAL FIX: Do NOT wrap the entire session in a timeout.
-	// Instead, we track total runtime manually and give each step a fresh timeout.
+
 	startTime := time.Now()
 
 	if len(task) > e.Limits.MaxQueryLength {
@@ -196,9 +230,13 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 			return "", fmt.Errorf("agent hit HARD safety limit (%d turns) despite making progress", hardLimit)
 		}
 
-		// Manual Session Timeout Check
 		if time.Since(startTime) > e.Limits.AgentTimeout {
 			return "", fmt.Errorf("agent exceeded global session timeout of %v", e.Limits.AgentTimeout)
+		}
+
+		// Breather to prevent rate limit bursts
+		if i > 0 {
+			time.Sleep(500 * time.Millisecond)
 		}
 
 		cost, _ := e.CostTracker.GetStats()
@@ -210,20 +248,18 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 		fullSystemMsg := e.SystemPrompt + "\n" + currentContext
 
 		req := openrouter.ChatCompletionRequest{
-			Model:     e.Model,
+			Model:     e.Model, // Use the Brain
 			Messages:  append([]openrouter.ChatMessage{{Role: "system", Content: fullSystemMsg}}, messages...),
 			Tools:     activeTools,
 			MaxTokens: e.Limits.MaxStepTokens,
 		}
 
-		// CRITICAL FIX: Per-step timeout. Gives the model a fair chance to "think" every turn.
-		// Multiplied by 5 to allow deep reasoning models ample time for first-token latency.
 		stepCtx, stepCancel := context.WithTimeout(ctx, e.Limits.CommandTimeout*5)
 		resp, err := e.Client.CreateChatCompletion(stepCtx, req)
-		stepCancel() // Clean up resources immediately
+		stepCancel()
 
 		if err != nil {
-			return "", fmt.Errorf("LLM error: %w", err)
+			return "", fmt.Errorf("LLM error (Model: %s): %w", e.Model, err)
 		}
 
 		if resp.Usage != nil {
@@ -232,8 +268,6 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 
 		msg := resp.Choices[0].Message
 
-		// CRITICAL FIX: Clean memory before adding to history
-		// We keep the "thought" for the user (updateHistory) but strip it for the agent's context (messages)
 		shouldReport := len(msg.ToolCalls) > 0 || e.Debug.Tools
 		if updateHistory != nil && shouldReport {
 			updateHistory(*msg)
@@ -247,7 +281,8 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 		messages = append(messages, memoryMsg)
 
 		if len(msg.ToolCalls) == 0 {
-			return fmt.Sprintf("%v", msg.Content), nil
+			content := fmt.Sprintf("%v", msg.Content)
+			return content, nil
 		}
 
 		isProgressMade := false
@@ -261,8 +296,7 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 				isProgressMade = true
 			}
 
-			// Execute tool using the parent context (so user can cancel via Ctrl+C)
-			// But note: tool execution usually has its own internal timeouts via Sentinel
+			// Execute using the Executor (which delegates to WorkerRunner if needed)
 			resultStr := e.Executor.Execute(ctx, tool)
 
 			if len(resultStr) > e.Limits.MaxToolOutput {
@@ -286,6 +320,11 @@ func (e *Engine) Run(ctx context.Context, task string, updateHistory func(openro
 				i--
 				e.Logger.Debug("🔄 Progress detected (unique tool usage). Turn budget extended.")
 			}
+		} else {
+			messages = append(messages, openrouter.ChatMessage{
+				Role:    "user",
+				Content: "System Warning: You are repeating the exact same tool call. Stop and reflect. Try a different approach.",
+			})
 		}
 	}
 

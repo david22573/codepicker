@@ -9,12 +9,14 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/david22573/codepicker/internal/shadow"
 	"github.com/david22573/codepicker/pkg/openrouter"
 	ignore "github.com/sabhiram/go-gitignore"
 )
 
 type SearchCodeTool struct {
-	Root string
+	Root   string
+	Shadow *shadow.Manager
 }
 
 type searchArgs struct {
@@ -24,10 +26,9 @@ type searchArgs struct {
 func (t *SearchCodeTool) Name() string { return "search_code" }
 
 func (t *SearchCodeTool) Description() string {
-	return "Search for a keyword or string across all files in the codebase."
+	return "Search for a keyword or string across all files in the codebase (includes pending changes)."
 }
 
-// [Fixed] Added Capabilities
 func (t *SearchCodeTool) Capabilities() []Capability {
 	return []Capability{CapRead}
 }
@@ -59,8 +60,77 @@ func (t *SearchCodeTool) Execute(ctx context.Context, argsJSON string, rt *Runti
 
 func (t *SearchCodeTool) performSearch(query string, cfg ConfigProvider) (string, error) {
 	var results []string
-	var ign *ignore.GitIgnore
+	shadowedPaths := make(map[string]bool)
 
+	// Shared logic for processing a file match
+	processFile := func(path, rel string) error {
+		file, err := os.Open(path)
+		if err != nil {
+			return nil
+		}
+		defer file.Close()
+
+		scanner := bufio.NewScanner(file)
+		lineNum := 1
+		foundInFile := false
+
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.Contains(line, query) {
+				if len(line) > 200 {
+					line = line[:200] + "..."
+				}
+
+				// Tag shadow results so the agent knows this is a pending change
+				prefix := ""
+				if t.Shadow != nil && strings.HasPrefix(path, t.Shadow.ShadowRoot) {
+					prefix = "[PENDING] "
+				}
+
+				results = append(results, fmt.Sprintf("%s%s:%d: %s", prefix, rel, lineNum, strings.TrimSpace(line)))
+				foundInFile = true
+
+				if len(results) > 50 {
+					return fmt.Errorf("too_many_results")
+				}
+			}
+			lineNum++
+		}
+
+		_ = foundInFile
+		return nil
+	}
+
+	// 1. Search Shadow Directory First (if available)
+	if t.Shadow != nil {
+		_ = filepath.WalkDir(t.Shadow.ShadowRoot, func(path string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return nil
+			}
+			if d.Name() == "manifest.json" {
+				return nil
+			}
+
+			rel, _ := filepath.Rel(t.Shadow.ShadowRoot, path)
+			shadowedPaths[rel] = true // Mark this path as shadowed
+
+			// Apply standard extension filtering even to shadow files
+			ext := strings.ToLower(filepath.Ext(path))
+			isAllowed := cfg == nil || cfg.IsExtensionAllowed(ext)
+			if !isAllowed && !isSpecialFile(d.Name()) {
+				return nil
+			}
+
+			return processFile(path, rel)
+		})
+	}
+
+	if len(results) > 50 {
+		return strings.Join(results, "\n") + "\n... (search truncated)", nil
+	}
+
+	// 2. Search Source Directory (skipping shadowed files)
+	var ign *ignore.GitIgnore
 	if _, err := os.Stat(filepath.Join(t.Root, ".gitignore")); err == nil {
 		ign, _ = ignore.CompileIgnoreFile(filepath.Join(t.Root, ".gitignore"))
 	}
@@ -71,6 +141,14 @@ func (t *SearchCodeTool) performSearch(query string, cfg ConfigProvider) (string
 		}
 		rel, _ := filepath.Rel(t.Root, path)
 		if rel == "." {
+			return nil
+		}
+
+		// Skip if this file was already searched in the shadow pass
+		if shadowedPaths[rel] {
+			if d.IsDir() {
+				return filepath.SkipDir // Don't traverse shadowed directories if they exist
+			}
 			return nil
 		}
 
@@ -94,28 +172,7 @@ func (t *SearchCodeTool) performSearch(query string, cfg ConfigProvider) (string
 			return nil
 		}
 
-		file, err := os.Open(path)
-		if err != nil {
-			return nil
-		}
-		defer file.Close()
-
-		scanner := bufio.NewScanner(file)
-		lineNum := 1
-		for scanner.Scan() {
-			line := scanner.Text()
-			if strings.Contains(line, query) {
-				if len(line) > 200 {
-					line = line[:200] + "..."
-				}
-				results = append(results, fmt.Sprintf("%s:%d: %s", rel, lineNum, strings.TrimSpace(line)))
-				if len(results) > 50 {
-					return fmt.Errorf("too_many_results")
-				}
-			}
-			lineNum++
-		}
-		return nil
+		return processFile(path, rel)
 	})
 
 	truncated := ""

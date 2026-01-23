@@ -2,6 +2,7 @@ package tools
 
 import (
 	"github.com/david22573/codepicker/internal/config"
+	"github.com/david22573/codepicker/internal/shadow"
 	"github.com/david22573/codepicker/pkg/openrouter"
 )
 
@@ -17,12 +18,14 @@ const (
 type Registry struct {
 	root   string
 	config *config.ConfigFile
+	shadow *shadow.Manager
 }
 
-func NewRegistry(root string, cfg *config.ConfigFile) *Registry {
+func NewRegistry(root string, cfg *config.ConfigFile, sm *shadow.Manager) *Registry {
 	return &Registry{
 		root:   root,
 		config: cfg,
+		shadow: sm,
 	}
 }
 
@@ -37,16 +40,19 @@ func (r *Registry) GetDefinitions(set ToolSet) []openrouter.Tool {
 
 func (r *Registry) GetImplementation(set ToolSet) []Tool {
 	read := &ReadFileTool{}
-	search := &SearchCodeTool{Root: r.root}
+	// Inject the shadow manager into the search tool
+	search := &SearchCodeTool{
+		Root:   r.root,
+		Shadow: r.shadow,
+	}
 	write := &WriteShadowFileTool{}
 	shell := &RunShellTool{}
 	delegate := &DelegateTaskTool{}
 	list := &ListFilesTool{Root: r.root}
-	skel := &SkeletonizeTool{} // NEW: Added SkeletonizeTool
+	skel := &SkeletonizeTool{}
 
 	var tools []Tool
 
-	// Add skel to base tools so it's available in read-only modes too
 	base := []Tool{read, search, list, skel}
 
 	switch set {
