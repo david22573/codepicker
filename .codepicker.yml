@@ -2,7 +2,7 @@
 src: .
 output: codepicker_context.md
 ai:
-  model: deepseek/deepseek-chat
+  model: deepseek/deepseek-v3.2
   temperature: 0.0
 
 include:

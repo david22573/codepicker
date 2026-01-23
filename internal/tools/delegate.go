@@ -18,10 +18,9 @@ type delegateArgs struct {
 
 func (t *DelegateTaskTool) Name() string { return "delegate_task" }
 func (t *DelegateTaskTool) Description() string {
-	return "Delegate a sub-task to a worker agent."
+	return "Delegate a sub-task to a worker agent. Use this for implementation, reading large files, or executing repetitive tasks."
 }
 
-// [Fixed] Added Capabilities
 func (t *DelegateTaskTool) Capabilities() []Capability {
 	return []Capability{CapRead, CapWrite}
 }
@@ -35,8 +34,8 @@ func (t *DelegateTaskTool) Definition() openrouter.Tool {
 			Parameters: json.RawMessage(`{
 				"type": "object",
 				"properties": {
-					"instruction": { "type": "string" },
-					"context_files": { "type": "string" }
+					"instruction": { "type": "string", "description": "Specific instructions for the worker" },
+					"context_files": { "type": "string", "description": "Comma-separated list of files the worker needs to read" }
 				},
 				"required": ["instruction"]
 			}`),
@@ -52,12 +51,23 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, argsJSON string, rt *Run
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return "", fmt.Errorf("invalid arguments: %w", err)
 	}
-	files := strings.Split(args.ContextFiles, ",")
-	for i := range files {
-		files[i] = strings.TrimSpace(files[i])
+
+	// Sanitize inputs: models often use newlines or tabs instead of commas
+	cleanFiles := strings.ReplaceAll(args.ContextFiles, "\n", ",")
+	cleanFiles = strings.ReplaceAll(cleanFiles, "\r", "")
+	cleanFiles = strings.ReplaceAll(cleanFiles, "\t", ",")
+
+	rawFiles := strings.Split(cleanFiles, ",")
+	var validFiles []string
+
+	for _, f := range rawFiles {
+		cleaned := strings.TrimSpace(f)
+		if cleaned != "" {
+			validFiles = append(validFiles, cleaned)
+		}
 	}
 
-	result, err := rt.Worker.Run(ctx, args.Instruction, files)
+	result, err := rt.Worker.Run(ctx, args.Instruction, validFiles)
 	if err != nil {
 		return fmt.Sprintf("Worker failed: %v", err), nil
 	}

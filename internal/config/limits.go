@@ -37,18 +37,15 @@ func DefaultLimits() *Limits {
 		MaxCommandOutput: getEnvInt("MAX_COMMAND_OUTPUT", 1024*50),
 		MaxToolOutput:    getEnvInt("MAX_TOOL_OUTPUT", 1024*100),
 
-		// Increased for Reasoning Models (e.g. DeepSeek R1) that output long thought chains
-		MaxStepTokens: getEnvInt("MAX_STEP_TOKENS", 8000),
+		// UPDATED: Increased from 8000 to 65000 to support large file writes (DeepSeek/Claude)
+		MaxStepTokens: getEnvInt("MAX_STEP_TOKENS", 65000),
 
-		// CRITICAL UPDATE: Increased defaults for stability
-		// CommandTimeout is now the base unit.
-		// Shell commands get 5m. LLM calls get 5m * 5 = 25m.
 		CommandTimeout: getEnvDuration("COMMAND_TIMEOUT", 5*time.Minute),
 		AgentMaxTurns:  getEnvInt("AGENT_MAX_TURNS", 30),
 		AgentTimeout:   getEnvDuration("AGENT_TIMEOUT", 30*time.Minute),
 
 		DailyCostLimit:     getEnvFloat("DAILY_COST_LIMIT", 5.0),
-		RateLimitPerMinute: getEnvFloat("RATE_LIMIT_PER_MIN", 60.0), // Relaxed for batch mode
+		RateLimitPerMinute: getEnvFloat("RATE_LIMIT_PER_MIN", 60.0),
 		RateLimitBurst:     getEnvInt("RATE_LIMIT_BURST", 20),
 
 		MaxRecoveryAttempts: getEnvInt("MAX_RECOVERY_ATTEMPTS", 3),
