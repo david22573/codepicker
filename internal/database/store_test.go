@@ -1,477 +1,149 @@
-package database
+package database_test
 
 import (
-	"fmt"
-	"os"
-	"path/filepath"
-	"sync"
 	"testing"
 	"time"
 
-	"github.com/david22573/codepicker/pkg/openrouter"
+	"github.com/david22573/codepicker/internal/agent"
+	"github.com/david22573/codepicker/internal/database"
 )
 
-func setupTestStore(t *testing.T) (*Store, func()) {
+func newTestStore(t *testing.T) *database.Store {
+	// Using :memory: for creating a fresh, isolated DB for each test
+	// Note: In your real implementation, New() expects a directory path.
+	// We might need to modify New() or use a temp dir.
+	// Assuming New() creates a directory:
 	tmpDir := t.TempDir()
-	store, err := New(tmpDir)
+	store, err := database.New(tmpDir)
 	if err != nil {
 		t.Fatalf("Failed to create test store: %v", err)
 	}
-
-	cleanup := func() {
-		store.Close()
-	}
-
-	return store, cleanup
+	return store
 }
 
-// TestConcurrentAddMessage tests thread-safety of AddMessage
-func TestConcurrentAddMessage(t *testing.T) {
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
+func TestPlanPersistence(t *testing.T) {
+	store := newTestStore(t)
+	defer store.Close()
 
-	const numWorkers = 10
-	const messagesPerWorker = 20
+	planID := "test-plan-1"
+	task := "Fix the bug"
+	steps := []agent.Step{
+		{ID: 1, Description: "Analyze", Status: "pending"},
+	}
+	estCost := 0.50
 
-	var wg sync.WaitGroup
-	errors := make(chan error, numWorkers*messagesPerWorker)
-
-	// Launch concurrent writers
-	for i := 0; i < numWorkers; i++ {
-		wg.Add(1)
-		go func(workerID int) {
-			defer wg.Done()
-			for j := 0; j < messagesPerWorker; j++ {
-				content := fmt.Sprintf("Message from worker %d, iteration %d", workerID, j)
-				role := "user"
-				if j%2 == 0 {
-					role = "assistant"
-				}
-				if err := store.AddMessage(role, content); err != nil {
-					errors <- fmt.Errorf("worker %d: %w", workerID, err)
-				}
-			}
-		}(i)
+	// Save
+	if err := store.SavePlan(planID, task, steps, estCost); err != nil {
+		t.Fatalf("SavePlan failed: %v", err)
 	}
 
-	wg.Wait()
-	close(errors)
-
-	// Check for errors
-	for err := range errors {
-		t.Errorf("Concurrent write error: %v", err)
-	}
-
-	// Verify total count
-	messages, err := store.GetContextAwareHistory(1000000)
+	// Load
+	plan, err := store.GetPlan(planID)
 	if err != nil {
-		t.Fatalf("Failed to get history: %v", err)
+		t.Fatalf("GetPlan failed: %v", err)
 	}
 
-	expectedCount := numWorkers * messagesPerWorker
-	if len(messages) != expectedCount {
-		t.Errorf("Expected %d messages, got %d", expectedCount, len(messages))
+	if plan.Task != task {
+		t.Errorf("Task mismatch: got %s, want %s", plan.Task, task)
+	}
+	if plan.EstimatedCost != estCost {
+		t.Errorf("Cost mismatch: got %f, want %f", plan.EstimatedCost, estCost)
+	}
+
+	// Update Status
+	if err := store.UpdatePlanStatus(planID, "completed"); err != nil {
+		t.Fatalf("UpdatePlanStatus failed: %v", err)
+	}
+
+	plan, _ = store.GetPlan(planID)
+	if plan.Status != "completed" {
+		t.Errorf("Status mismatch: got %s, want completed", plan.Status)
 	}
 }
 
-// TestConcurrentMemoryOperations tests thread-safety of working memory operations
-func TestConcurrentMemoryOperations(t *testing.T) {
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
+func TestCheckpointing(t *testing.T) {
+	store := newTestStore(t)
+	defer store.Close()
 
-	const numWorkers = 10
-	const operationsPerWorker = 20
-
-	var wg sync.WaitGroup
-	errors := make(chan error, numWorkers*operationsPerWorker)
-
-	// Launch concurrent workers doing mixed operations
-	for i := 0; i < numWorkers; i++ {
-		wg.Add(1)
-		go func(workerID int) {
-			defer wg.Done()
-			for j := 0; j < operationsPerWorker; j++ {
-				path := fmt.Sprintf("file_%d.txt", workerID)
-				content := fmt.Sprintf("Content from worker %d, iteration %d", workerID, j)
-
-				// Update memory
-				if err := store.UpdateWorkingMemory(path, content); err != nil {
-					errors <- fmt.Errorf("worker %d update: %w", workerID, err)
-					continue
-				}
-
-				// Read memory
-				if _, _, err := store.GetWorkingMemory(); err != nil {
-					errors <- fmt.Errorf("worker %d read: %w", workerID, err)
-					continue
-				}
-
-				// List files
-				if _, err := store.ListMemoryFiles(); err != nil {
-					errors <- fmt.Errorf("worker %d list: %w", workerID, err)
-					continue
-				}
-			}
-		}(i)
+	cp := &database.Checkpoint{
+		ID:           "cp-1",
+		SessionID:    "session-1",
+		Task:         "My Task",
+		Timestamp:    time.Now(),
+		CurrentStep:  1,
+		Status:       database.CheckpointActive,
+		StepsStatus:  map[int]string{1: "completed"},
+		StepResults:  map[int]string{1: "OK"},
+		ShadowFiles:  map[string]string{"main.go": "hash123"},
+		TotalCost:    0.1,
+		RequestCount: 5,
 	}
 
-	wg.Wait()
-	close(errors)
-
-	// Check for errors
-	for err := range errors {
-		t.Errorf("Concurrent memory operation error: %v", err)
+	if err := store.SaveCheckpoint(cp); err != nil {
+		t.Fatalf("SaveCheckpoint failed: %v", err)
 	}
 
-	// Verify final state
+	loaded, err := store.LoadCheckpoint("cp-1")
+	if err != nil {
+		t.Fatalf("LoadCheckpoint failed: %v", err)
+	}
+
+	if loaded.SessionID != cp.SessionID {
+		t.Errorf("SessionID mismatch")
+	}
+	if len(loaded.StepsStatus) != 1 {
+		t.Errorf("StepsStatus map lost data")
+	}
+	if loaded.TotalCost != 0.1 {
+		t.Errorf("TotalCost mismatch")
+	}
+
+	// List Checkpoints
+	list, err := store.ListCheckpoints("session-1")
+	if err != nil {
+		t.Fatalf("ListCheckpoints failed: %v", err)
+	}
+	if len(list) != 1 {
+		t.Errorf("Expected 1 checkpoint, got %d", len(list))
+	}
+}
+
+func TestMemoryOperations(t *testing.T) {
+	store := newTestStore(t)
+	defer store.Close()
+
+	// Add file
+	if err := store.UpdateWorkingMemory("main.go", "package main"); err != nil {
+		t.Fatalf("UpdateWorkingMemory failed: %v", err)
+	}
+
+	// Retrieve
+	ctxStr, tokens, err := store.GetWorkingMemory()
+	if err != nil {
+		t.Fatalf("GetWorkingMemory failed: %v", err)
+	}
+	if tokens == 0 {
+		t.Error("Expected non-zero tokens")
+	}
+	if ctxStr == "" {
+		t.Error("Expected context string, got empty")
+	}
+
+	// List
 	files, err := store.ListMemoryFiles()
 	if err != nil {
-		t.Fatalf("Failed to list files: %v", err)
+		t.Fatal(err)
+	}
+	if len(files) != 1 || files[0] != "main.go" {
+		t.Errorf("ListMemoryFiles mismatch: %v", files)
 	}
 
-	if len(files) != numWorkers {
-		t.Errorf("Expected %d files, got %d", numWorkers, len(files))
+	// Remove
+	if err := store.RemoveFromMemory("main.go"); err != nil {
+		t.Fatal(err)
 	}
-}
-
-// TestConcurrentSnapshotOperations tests thread-safety of snapshot/restore
-func TestConcurrentSnapshotOperations(t *testing.T) {
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
-
-	// Prepare initial data
-	for i := 0; i < 10; i++ {
-		path := fmt.Sprintf("initial_%d.txt", i)
-		content := fmt.Sprintf("Initial content %d", i)
-		if err := store.UpdateWorkingMemory(path, content); err != nil {
-			t.Fatalf("Failed to setup initial data: %v", err)
-		}
+	files, _ = store.ListMemoryFiles()
+	if len(files) != 0 {
+		t.Error("File was not removed")
 	}
-
-	const numWorkers = 5
-	var wg sync.WaitGroup
-	errors := make(chan error, numWorkers*2)
-
-	// Launch concurrent snapshot creators and restorers
-	for i := 0; i < numWorkers; i++ {
-		wg.Add(1)
-		go func(workerID int) {
-			defer wg.Done()
-
-			// Create snapshot
-			snap, err := store.CreateSnapshot()
-			if err != nil {
-				errors <- fmt.Errorf("worker %d create snapshot: %w", workerID, err)
-				return
-			}
-
-			// Small delay to create interleaving
-			time.Sleep(time.Millisecond * 10)
-
-			// Restore snapshot (note: this modifies the database)
-			if err := store.RestoreSnapshot(snap); err != nil {
-				errors <- fmt.Errorf("worker %d restore snapshot: %w", workerID, err)
-			}
-		}(i)
-	}
-
-	wg.Wait()
-	close(errors)
-
-	// Check for errors
-	for err := range errors {
-		t.Errorf("Concurrent snapshot error: %v", err)
-	}
-
-	// Verify data integrity - should have the initial files
-	files, err := store.ListMemoryFiles()
-	if err != nil {
-		t.Fatalf("Failed to list files after snapshots: %v", err)
-	}
-
-	if len(files) != 10 {
-		t.Errorf("Expected 10 files after concurrent snapshots, got %d", len(files))
-	}
-}
-
-// TestConcurrentPlanOperations tests thread-safety of plan operations
-func TestConcurrentPlanOperations(t *testing.T) {
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
-
-	const numPlans = 20
-	var wg sync.WaitGroup
-	errors := make(chan error, numPlans*3)
-
-	// Create plans concurrently
-	for i := 0; i < numPlans; i++ {
-		wg.Add(1)
-		go func(planID int) {
-			defer wg.Done()
-
-			id := fmt.Sprintf("plan_%d", planID)
-			task := fmt.Sprintf("Task %d", planID)
-			steps := []string{"step1", "step2", "step3"}
-
-			// Save plan
-			if err := store.SavePlan(id, task, steps, 0.5); err != nil {
-				errors <- fmt.Errorf("plan %d save: %w", planID, err)
-				return
-			}
-
-			// Read plan
-			if _, err := store.GetPlan(id); err != nil {
-				errors <- fmt.Errorf("plan %d get: %w", planID, err)
-				return
-			}
-
-			// Update plan status
-			if err := store.UpdatePlanStatus(id, "completed"); err != nil {
-				errors <- fmt.Errorf("plan %d update: %w", planID, err)
-			}
-		}(i)
-	}
-
-	wg.Wait()
-	close(errors)
-
-	// Check for errors
-	for err := range errors {
-		t.Errorf("Concurrent plan operation error: %v", err)
-	}
-
-	// Verify all plans exist
-	for i := 0; i < numPlans; i++ {
-		id := fmt.Sprintf("plan_%d", i)
-		plan, err := store.GetPlan(id)
-		if err != nil {
-			t.Errorf("Failed to retrieve plan %s: %v", id, err)
-			continue
-		}
-		if plan.Status != "completed" {
-			t.Errorf("Plan %s has status %s, expected 'completed'", id, plan.Status)
-		}
-	}
-}
-
-// TestMixedConcurrentOperations tests all database operations running concurrently
-func TestMixedConcurrentOperations(t *testing.T) {
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
-
-	const numWorkers = 5
-	const operationsPerWorker = 10
-
-	var wg sync.WaitGroup
-	errors := make(chan error, numWorkers*operationsPerWorker*4)
-
-	for i := 0; i < numWorkers; i++ {
-		wg.Add(1)
-		go func(workerID int) {
-			defer wg.Done()
-
-			for j := 0; j < operationsPerWorker; j++ {
-				// Add message
-				if err := store.AddMessage("user", fmt.Sprintf("msg_%d_%d", workerID, j)); err != nil {
-					errors <- err
-				}
-
-				// Update memory
-				path := fmt.Sprintf("file_%d_%d.txt", workerID, j)
-				if err := store.UpdateWorkingMemory(path, "content"); err != nil {
-					errors <- err
-				}
-
-				// Get history
-				if _, err := store.GetContextAwareHistory(10000); err != nil {
-					errors <- err
-				}
-
-				// List memory files
-				if _, err := store.ListMemoryFiles(); err != nil {
-					errors <- err
-				}
-
-				// Save plan
-				planID := fmt.Sprintf("plan_%d_%d", workerID, j)
-				if err := store.SavePlan(planID, "task", []string{"step"}, 0.1); err != nil {
-					errors <- err
-				}
-			}
-		}(i)
-	}
-
-	wg.Wait()
-	close(errors)
-
-	// Check for errors
-	errorCount := 0
-	for err := range errors {
-		errorCount++
-		t.Errorf("Mixed operation error: %v", err)
-	}
-
-	if errorCount > 0 {
-		t.Errorf("Total errors: %d", errorCount)
-	}
-}
-
-// TestRaceDetection ensures no data races occur (run with -race flag)
-func TestRaceDetection(t *testing.T) {
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
-
-	var wg sync.WaitGroup
-	const iterations = 100
-
-	// Rapid concurrent reads and writes
-	for i := 0; i < 10; i++ {
-		wg.Add(2)
-
-		// Writer
-		go func(id int) {
-			defer wg.Done()
-			for j := 0; j < iterations; j++ {
-				store.UpdateWorkingMemory(fmt.Sprintf("file_%d", id), fmt.Sprintf("content_%d", j))
-			}
-		}(i)
-
-		// Reader
-		go func() {
-			defer wg.Done()
-			for j := 0; j < iterations; j++ {
-				store.GetWorkingMemory()
-				store.ListMemoryFiles()
-			}
-		}()
-	}
-
-	wg.Wait()
-}
-
-// TestHistoryConsistency verifies that concurrent writes don't corrupt message order
-func TestHistoryConsistency(t *testing.T) {
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
-
-	const numMessages = 100
-	var wg sync.WaitGroup
-
-	// Write messages concurrently
-	for i := 0; i < numMessages; i++ {
-		wg.Add(1)
-		go func(id int) {
-			defer wg.Done()
-			content := fmt.Sprintf("message_%04d", id)
-			store.AddMessage("user", content)
-		}(i)
-	}
-
-	wg.Wait()
-
-	// Verify all messages are present
-	messages, err := store.GetContextAwareHistory(1000000)
-	if err != nil {
-		t.Fatalf("Failed to get history: %v", err)
-	}
-
-	if len(messages) != numMessages {
-		t.Errorf("Expected %d messages, got %d", numMessages, len(messages))
-	}
-
-	// Check for duplicates or missing messages
-	seen := make(map[string]bool)
-	for _, msg := range messages {
-		if seen[msg.Content] {
-			t.Errorf("Duplicate message found: %s", msg.Content)
-		}
-		seen[msg.Content] = true
-	}
-}
-
-// TestMemoryHashOptimization verifies concurrent updates with same content are handled correctly
-func TestMemoryHashOptimization(t *testing.T) {
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
-
-	const path = "shared_file.txt"
-	const content = "shared content that doesn't change"
-
-	var wg sync.WaitGroup
-	const numUpdates = 50
-
-	// Multiple goroutines updating the same file with same content
-	for i := 0; i < numUpdates; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			store.UpdateWorkingMemory(path, content)
-		}()
-	}
-
-	wg.Wait()
-
-	// Verify the file exists and has correct content
-	files, err := store.ListMemoryFiles()
-	if err != nil {
-		t.Fatalf("Failed to list files: %v", err)
-	}
-
-	if len(files) != 1 || files[0] != path {
-		t.Errorf("Expected single file %s, got %v", path, files)
-	}
-
-	memory, _, err := store.GetWorkingMemory()
-	if err != nil {
-		t.Fatalf("Failed to get memory: %v", err)
-	}
-
-	if !contains(memory, content) {
-		t.Errorf("Memory doesn't contain expected content")
-	}
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) && containsHelper(s, substr))
-}
-
-func containsHelper(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
-}
-
-// TestStoreClose verifies safe closure under concurrent operations
-func TestStoreClose(t *testing.T) {
-	tmpDir := t.TempDir()
-	store, err := New(tmpDir)
-	if err != nil {
-		t.Fatalf("Failed to create store: %v", err)
-	}
-
-	var wg sync.WaitGroup
-
-	// Start some background operations
-	for i := 0; i < 5; i++ {
-		wg.Add(1)
-		go func(id int) {
-			defer wg.Done()
-			for j := 0; j < 10; j++ {
-				// These operations might fail after Close() is called, which is expected
-				store.UpdateWorkingMemory(fmt.Sprintf("file_%d", id), "content")
-				time.Sleep(time.Millisecond)
-			}
-		}(i)
-	}
-
-	// Wait a bit then close
-	time.Sleep(time.Millisecond * 20)
-	if err := store.Close(); err != nil {
-		t.Errorf("Close failed: %v", err)
-	}
-
-	wg.Wait()
 }

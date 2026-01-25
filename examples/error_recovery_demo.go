@@ -2,113 +2,49 @@ package main
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/david22573/codepicker/internal/agent"
-	"github.com/david22573/codepicker/internal/config"
-	"github.com/david22573/codepicker/internal/database"
-	"github.com/david22573/codepicker/internal/logger"
-	"github.com/david22573/codepicker/pkg/openrouter"
 )
 
 func main() {
-	log := logger.NewSimpleLogger(true)
-	limits := config.DefaultLimits()
+	fmt.Println("🚑 Agent Self-Healing / Error Recovery Demo")
+	fmt.Println("-------------------------------------------")
 
-	// FIX: Use database.New() which matches the current internal/database API
-	store, err := database.New(":memory:")
-	if err != nil {
-		log.Error(fmt.Sprintf("Failed to create store: %v", err))
-		return
-	}
-	defer store.Close()
-
-	apiKey := os.Getenv("OPENROUTER_API_KEY")
-	if apiKey == "" {
-		log.Warn("OPENROUTER_API_KEY not set, using placeholder")
-		apiKey = "placeholder"
-	}
-	client := openrouter.NewClient(apiKey)
-
-	cfg := &config.ConfigFile{}
-
-	// Create the engine with the standard configuration
-	engine, err := agent.NewEngine(
-		client,
-		"deepseek/deepseek-chat",
-		".",
-		log,
-		limits,
-		store,
-		cfg,
-		agent.DebugConfig{Tools: true},
-	)
-	if err != nil {
-		log.Error(fmt.Sprintf("Failed to create engine: %v", err))
-		return
+	// A list of simulated errors that might occur during execution
+	simulatedErrors := []string{
+		"go: go.mod file not found in current directory or any parent directory",
+		"npm: command not found",
+		"ModuleNotFoundError: No module named 'requests'",
+		"dial tcp: i/o timeout",
+		"unknown error: something exploded",
 	}
 
-	fmt.Println("=== Example 1: Python Module Missing ===")
-	demoModuleMissing(engine)
-
-	fmt.Println("\n=== Example 2: Go Module Missing ===")
-	demoGoModMissing(engine)
-
-	fmt.Println("\n=== Example 3: Pattern Testing ===")
-	demoPatternTesting()
-
-	fmt.Println("\n=== Example 4: Available Recovery Strategies ===")
-	demoListStrategies()
-}
-
-func demoModuleMissing(engine *agent.Engine) {
-	// Execute a command we expect to fail to demonstrate recovery
-	result := engine.ExecuteWithRecovery("python3", []string{"-c", "import requests"}, 3)
-
-	if result.Success {
-		fmt.Println("✅ Command succeeded!")
-	} else if result.Attempted {
-		fmt.Printf("🚑 Recovery attempted using strategy: %s\n", result.StrategyUsed)
-		fmt.Printf("📋 Actions taken: %v\n", result.ActionsTaken)
-		if result.FinalError != nil {
-			fmt.Printf("❌ Final error: %v\n", result.FinalError)
-		}
-	} else {
-		fmt.Println("❌ No recovery strategy matched or recovery failed.")
-	}
-}
-
-func demoGoModMissing(engine *agent.Engine) {
-	// Execute a Go command that might trigger a missing module error
-	result := engine.ExecuteWithRecovery("go", []string{"list", "./..."}, 3)
-
-	if result.Success {
-		fmt.Println("✅ Command succeeded!")
-	} else if result.Attempted {
-		fmt.Printf("🚑 Recovery attempted using strategy: %s\n", result.StrategyUsed)
-		fmt.Printf("📋 Actions taken: %v\n", result.ActionsTaken)
-	}
-}
-
-func demoPatternTesting() {
-	testCases := []string{
-		"ModuleNotFoundError: No module named 'numpy'",
-		"Cannot find module 'express'",
-		"permission denied: ./script.sh",
-		"CONFLICT (content): Merge conflict in main.go",
-		"database is locked",
-	}
-
-	for _, errorText := range testCases {
-		matches := agent.TestPattern(errorText)
-		if len(matches) > 0 {
-			fmt.Printf("Error: %s\n", errorText)
-			fmt.Printf("  Matches: %v\n", matches)
-		}
-	}
-}
-
-func demoListStrategies() {
 	strategies := agent.GetRecoveryStrategies()
-	fmt.Printf("Found %d strategies\n", len(strategies))
+
+	for _, errStr := range simulatedErrors {
+		fmt.Printf("\n❌ Simulated Error: %q\n", errStr)
+
+		matched := false
+		for _, strategy := range strategies {
+			if strategy.Pattern.MatchString(errStr) {
+				fmt.Printf("   ✅ MATCHED STRATEGY: %s\n", strategy.Name)
+				fmt.Printf("   🔍 Diagnosis: %s\n", strategy.Diagnosis)
+
+				if len(strategy.FixCommands) > 0 {
+					fmt.Println("   🛠️  Proposed Fixes:")
+					for _, cmd := range strategy.FixCommands {
+						fmt.Printf("      $ %s %v\n", cmd.Binary, cmd.Args)
+					}
+				} else {
+					fmt.Println("   ⚠️  No auto-fix available (Manual intervention required)")
+				}
+				matched = true
+				break
+			}
+		}
+
+		if !matched {
+			fmt.Println("   🤷 No known recovery strategy found.")
+		}
+	}
 }

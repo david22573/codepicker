@@ -2,7 +2,7 @@
 src: .
 output: codepicker_context.md
 ai:
-  model: liquid/lfm-2.5-1.2b-thinking:free
+  model: xiaomi/mimo-v2-flash:free
   temperature: 0.0
 
 include:
