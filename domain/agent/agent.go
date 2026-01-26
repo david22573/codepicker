@@ -4,28 +4,39 @@ import (
 	"context"
 )
 
-// Agent represents an autonomous entity capable of performing a task
+// Agent represents the high-level autonomous entity
 type Agent interface {
 	Name() string
+	// Run executes a task and returns the final summary/result
 	Run(ctx context.Context, input string) (string, error)
 }
 
 // Tool represents a capability the agent can use
-// Note: We return interface{} or specific value objects to avoid coupling to external JSON/HTTP libs
 type Tool interface {
 	Name() string
 	Description() string
+	// Execute runs the tool logic.
+	// We use string for input/output to keep the domain generic (JSON agnostic)
 	Execute(ctx context.Context, args string) (string, error)
 }
 
-// Policy defines the rules of engagement
+// Policy defines the security rules
 type Policy interface {
-	CanExecute(toolName string) bool
-	CanWrite(path string) bool
-	MaxSteps() int
+	// CanExecute checks if a specific tool execution is allowed
+	CanExecute(toolName string, args string) (bool, string)
+	// Mode returns the current strictness level (e.g. "interactive", "batch")
+	Mode() string
 }
 
-// LLMClient is a port for the AI provider (implemented by infra/llm)
+// LLMClient abstracts the AI provider (OpenRouter, OpenAI, etc.)
+// It simplifies the interaction to just "System + User -> Text Response"
+// Complex history management is handled by the application layer, not the domain interface.
 type LLMClient interface {
 	Chat(ctx context.Context, systemPrompt string, userMessage string) (string, error)
+}
+
+// Repository defines how we save/load executions (Port)
+type Repository interface {
+	SaveExecution(ctx context.Context, exec *Execution) error
+	GetExecution(ctx context.Context, id string) (*Execution, error)
 }

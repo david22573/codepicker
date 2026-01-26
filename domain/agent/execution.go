@@ -6,40 +6,41 @@ import (
 	"github.com/david22573/codepicker/domain/task"
 )
 
-// Execution represents a single run of an agent working on a plan
+// Execution represents a running session of an agent
 type Execution struct {
 	ID        string
 	PlanID    string
-	Status    string
+	Status    task.Status
 	History   []Interaction
-	Variables map[string]string
 	StartTime time.Time
 	EndTime   time.Time
 }
 
-// Interaction records a single turn (Thought -> Tool -> Result)
+// Interaction records a single "turn" in the agent loop
 type Interaction struct {
-	StepID    int
-	Thought   string
-	ToolName  string
-	ToolArgs  string
-	ToolOut   string
+	TurnID    int
+	Thought   string // The reasoning provided by the LLM
+	ToolName  string // The tool the LLM chose
+	ToolArgs  string // The arguments passed
+	ToolOut   string // The result from the tool execution
 	Timestamp time.Time
 }
 
+// NewExecution creates a new execution context
 func NewExecution(id, planID string) *Execution {
 	return &Execution{
 		ID:        id,
 		PlanID:    planID,
 		Status:    task.StatusRunning,
-		Variables: make(map[string]string),
 		StartTime: time.Now(),
+		History:   make([]Interaction, 0),
 	}
 }
 
-func (e *Execution) RecordTurn(stepID int, thought, tool, args, output string) {
+// RecordTurn adds an interaction to the history
+func (e *Execution) RecordTurn(thought, tool, args, output string) {
 	e.History = append(e.History, Interaction{
-		StepID:    stepID,
+		TurnID:    len(e.History) + 1,
 		Thought:   thought,
 		ToolName:  tool,
 		ToolArgs:  args,
@@ -48,7 +49,7 @@ func (e *Execution) RecordTurn(stepID int, thought, tool, args, output string) {
 	})
 }
 
-func (e *Execution) Complete() {
+func (e *Execution) Finish() {
 	e.Status = task.StatusCompleted
 	e.EndTime = time.Now()
 }
