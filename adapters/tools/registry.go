@@ -16,6 +16,7 @@ func DefaultSet(
 		NewReadFileTool(fsTools),
 		NewWriteFileTool(fsTools),
 		NewListFilesTool(root),
+		NewSearchTool(root),
 		NewShellTool(shellExec),
 	}
 }

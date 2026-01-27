@@ -18,31 +18,31 @@ const (
 
 // Step represents a single unit of work in a plan
 type Step struct {
-	ID          int
-	Description string   // Human-readable goal
-	Instruction string   // Prompt for the worker agent
-	Files       []string // Context files needed
-	Status      Status
-	Result      string // Output from the worker
-	Error       error
+	ID          int      `json:"id"`
+	Description string   `json:"description"` // Human-readable goal
+	Instruction string   `json:"instruction"` // Prompt for the worker agent
+	Files       []string `json:"files"`       // Context files needed
+	Status      Status   `json:"status"`
+	Result      string   `json:"result,omitempty"`
+	Error       error    `json:"-"`
 }
 
 // Plan represents a sequence of steps to achieve a goal
 type Plan struct {
-	ID            string
-	OriginalTask  string
-	Reasoning     string
-	Steps         []Step
-	EstimatedCost float64
-	Status        Status
-	CreatedAt     time.Time
+	ID            string    `json:"id"`
+	OriginalTask  string    `json:"original_task"`
+	Reasoning     string    `json:"reasoning"`
+	Steps         []Step    `json:"steps"`
+	EstimatedCost float64   `json:"estimated_cost"`
+	Status        Status    `json:"status"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 // NewPlan creates a fresh plan
-func NewPlan(id, task, reasoning string) *Plan {
+func NewPlan(id, taskStr, reasoning string) *Plan {
 	return &Plan{
 		ID:           id,
-		OriginalTask: task,
+		OriginalTask: taskStr,
 		Reasoning:    reasoning,
 		Status:       StatusPending,
 		CreatedAt:    time.Now(),

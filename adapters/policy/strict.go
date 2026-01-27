@@ -6,10 +6,15 @@ import (
 
 type StrictPolicy struct {
 	blockedCmds []string
+	readOnly    bool
+	ciMode      bool
 }
 
-func NewStrictPolicy() *StrictPolicy {
+// NewStrictPolicy creates a policy instance.
+func NewStrictPolicy(readOnly, ciMode bool) *StrictPolicy {
 	return &StrictPolicy{
+		readOnly: readOnly,
+		ciMode:   ciMode,
 		blockedCmds: []string{
 			"rm -rf /", "rm -rf ~", "sudo", "su ", ":(){ :|:& };:", // Fork bomb
 			"mkfs", "dd if=/dev",
@@ -18,13 +23,29 @@ func NewStrictPolicy() *StrictPolicy {
 }
 
 func (p *StrictPolicy) Mode() string {
+	if p.ciMode {
+		return "ci-hardened"
+	}
+	if p.readOnly {
+		return "strict-readonly"
+	}
 	return "strict"
 }
 
 func (p *StrictPolicy) CanExecute(toolName string, args string) (bool, string) {
+	// 0. Global CI / Read-Only Check
+	if p.ciMode || p.readOnly {
+		// Strictly block side effects
+		if toolName == "write_file" {
+			return false, "BLOCKED (CI/Read-Only): File writes are disabled in this mode."
+		}
+		if toolName == "run_cmd" {
+			return false, "BLOCKED (CI/Read-Only): Shell commands are disabled in this mode."
+		}
+	}
+
 	// 1. Policy on Shell Commands
 	if toolName == "run_cmd" {
-		// Simple string check; a production version might parse the AST of the shell command
 		for _, blocked := range p.blockedCmds {
 			if strings.Contains(args, blocked) {
 				return false, "Command contains blocked pattern: " + blocked
@@ -42,6 +63,5 @@ func (p *StrictPolicy) CanExecute(toolName string, args string) (bool, string) {
 		}
 	}
 
-	// Default allow
 	return true, ""
 }

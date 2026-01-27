@@ -1,7 +1,3 @@
-docs/
-cmd/doc.go
-scripts/
-roadmaps/
 go.mod
 LICENSE
 README.md
@@ -14,5 +10,4 @@ codepicker_out
 Dockerfile
 *_test.go
 ./../*_test.go
-examples/
 

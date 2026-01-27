@@ -45,6 +45,34 @@ func migrate(db *sql.DB) error {
 	return err
 }
 
+func (r *SQLiteRepository) ListExecutions(ctx context.Context, limit int) ([]agent.ExecutionSummary, error) {
+	query := `
+	SELECT id, plan_id, status, start_time 
+	FROM executions 
+	ORDER BY start_time DESC 
+	LIMIT ?
+	`
+
+	rows, err := r.db.QueryContext(ctx, query, limit)
+	if err != nil {
+		return nil, errors.NewSystem("repo.ListExecutions", "query failed", err)
+	}
+	defer rows.Close()
+
+	var summaries []agent.ExecutionSummary
+	for rows.Next() {
+		var s agent.ExecutionSummary
+		var statusStr string
+		if err := rows.Scan(&s.ID, &s.PlanID, &statusStr, &s.StartTime); err != nil {
+			return nil, errors.NewSystem("repo.ListExecutions", "scan failed", err)
+		}
+		s.Status = task.Status(statusStr)
+		summaries = append(summaries, s)
+	}
+
+	return summaries, nil
+}
+
 func (r *SQLiteRepository) SaveExecution(ctx context.Context, exec *agent.Execution) error {
 	historyBytes, err := json.Marshal(exec.History)
 	if err != nil {
