@@ -20,37 +20,41 @@ func NewPlanExecutor(worker agent.Agent, repo agent.Repository) *PlanExecutor {
 	}
 }
 
-// Execute iterates through the plan steps and runs the worker for each
 func (e *PlanExecutor) Execute(ctx context.Context, plan *task.Plan) error {
 	plan.Status = task.StatusRunning
-	// In a real app, we'd save the plan state to DB here
+	_ = e.repo.SavePlan(ctx, plan)
 
-	fmt.Printf("\n📋 Plan Generated: %s\n", plan.Reasoning)
-	fmt.Printf("steps: %d\n", len(plan.Steps))
+	fmt.Println("\n---------------------------------------------------")
+	fmt.Printf("📋 [PLANNER] Plan ID: %s (%d steps)\n", plan.ID, len(plan.Steps))
+	fmt.Printf("🎯 [PLANNER] Goal: %s\n", plan.OriginalTask)
+	fmt.Println("---------------------------------------------------")
 
 	for _, step := range plan.Steps {
-		fmt.Printf("\n▶️  Step %d: %s\n", step.ID, step.Description)
+		if step.Status == task.StatusCompleted {
+			fmt.Printf("⏭️  [PLANNER] Skipping completed step %d\n", step.ID)
+			continue
+		}
 
-		// 1. Prepare Worker Context
-		// We augment the instruction with the file context to ensure the worker focuses
+		fmt.Printf("\n🔹 [PLANNER] STEP %d/%d: %s\n", step.ID, len(plan.Steps), step.Description)
+
 		workerInput := fmt.Sprintf("%s\n\nFocus on these files: %v", step.Instruction, step.Files)
 
-		// 2. Execute Worker
-		// The worker (ReActAgent) runs its own loop here
+		// The worker now handles its own verbose logging (Agent/System output)
 		result, err := e.worker.Run(ctx, workerInput)
 
 		if err != nil {
-			fmt.Printf("❌ Step %d Failed: %v\n", step.ID, err)
+			fmt.Printf("\n❌ [PLANNER] Step %d Failed.\n", step.ID)
 			plan.MarkStepFailed(step.ID, err)
 			plan.Status = task.StatusFailed
+			_ = e.repo.SavePlan(ctx, plan)
 			return err
 		}
 
-		// 3. Record Success
-		fmt.Printf("✅ Step %d Complete.\n", step.ID)
+		fmt.Printf("\n✨ [PLANNER] Step %d Complete.\n", step.ID)
 		plan.MarkStepComplete(step.ID, result)
+		_ = e.repo.SavePlan(ctx, plan)
 	}
 
 	plan.Status = task.StatusCompleted
-	return nil
+	return e.repo.SavePlan(ctx, plan)
 }

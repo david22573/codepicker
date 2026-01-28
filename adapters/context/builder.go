@@ -56,21 +56,31 @@ func (b *Builder) Build(cfg Config) (string, error) {
 
 	for _, relPath := range candidates {
 		fullPath := filepath.Join(cfg.ProjectRoot, relPath)
-		content, err := os.ReadFile(fullPath)
+
+		// OPTIMIZATION: Check file metadata before reading content
+		info, err := os.Stat(fullPath)
 		if err != nil {
-			continue // Skip unreadable
+			continue // Skip if file is gone or unreadable
 		}
 
-		// Improved Heuristic: Code usually averages 3.5 chars/token
-		estTokens := len(content) / 3
+		// Heuristic: Code usually averages 3.5 chars/token.
+		// We use size/3 to be safe on the upper bound.
+		estTokens := int(info.Size()) / 3
 
 		// Add header tokens overhead
 		estTokens += 20
 
-		if currentTokens+estTokens > cfg.MaxTokens {
+		// Stop if this file would exceed the limit
+		if cfg.MaxTokens > 0 && currentTokens+estTokens > cfg.MaxTokens {
 			sb.WriteString(fmt.Sprintf("\n> ⚠️ Context limit reached (%d/%d tokens). Skipping remaining %d files.\n",
 				currentTokens, cfg.MaxTokens, len(candidates)-filesProcessed))
 			break
+		}
+
+		// Only NOW do we pay the cost of reading the file into memory
+		content, err := os.ReadFile(fullPath)
+		if err != nil {
+			continue
 		}
 
 		// Determine language for syntax highlighting
@@ -99,7 +109,7 @@ func (b *Builder) scanProject(cfg Config) ([]string, error) {
 			return nil
 		}
 		if info.IsDir() {
-			// Always exclude hidden dirs and vendor/node_modules
+			// Always exclude hidden dirs and known huge vendor folders
 			if strings.HasPrefix(info.Name(), ".") && info.Name() != "." {
 				return filepath.SkipDir
 			}
@@ -120,7 +130,13 @@ func (b *Builder) scanProject(cfg Config) ([]string, error) {
 			// 2. Check filename match (e.g. "*.log" or "go.sum")
 			matchedName, _ := filepath.Match(pat, filename)
 
-			if matchedPath || matchedName {
+			// 3. FIX: Check directory prefix match
+			// If pat is "tmp", this ensures we match "tmp/file.go"
+			// We add PathSeparator to ensure "temp" doesn't match "templates/file.go"
+			dirPrefix := pat + string(os.PathSeparator)
+			matchedDir := strings.HasPrefix(relPath, dirPrefix)
+
+			if matchedPath || matchedName || matchedDir {
 				return nil // Skip this file
 			}
 		}

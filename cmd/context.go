@@ -4,9 +4,10 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
-	"github.com/david22573/codepicker/adapters/context"
+	"github.com/david22573/codepicker/adapters/context" // Ensure this matches your folder structure
 	"github.com/spf13/cobra"
 )
 
@@ -14,10 +15,10 @@ var (
 	ctxMaxTokens int
 	ctxInclude   []string
 	ctxExclude   []string
+	skeletonMode bool // Defined for future use, but currently unused in Config
 )
 
-var skeletonMode bool
-
+// contextCmd represents the context command namespace
 var contextCmd = &cobra.Command{
 	Use:   "context",
 	Short: "Manage execution context",
@@ -27,7 +28,10 @@ var contextBuildCmd = &cobra.Command{
 	Use:   "build",
 	Short: "Generate a deterministic context file for the agent",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cwd, _ := os.Getwd()
+		cwd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("could not determine current working directory: %w", err)
+		}
 
 		// 1. Initialize Excludes with reasonable defaults
 		// We always want to ignore .git and the context file itself
@@ -51,22 +55,36 @@ var contextBuildCmd = &cobra.Command{
 
 		builder := context.NewBuilder()
 
+		// Construct the config
+		// Note: We are passing ctxMaxTokens directly.
+		// If it is 0, the builder must handle it as "Unlimited".
 		config := context.Config{
 			ProjectRoot:     cwd,
 			MaxTokens:       ctxMaxTokens,
 			IncludePatterns: ctxInclude,
-			ExcludePatterns: finalExcludes, // Pass the merged list
+			ExcludePatterns: finalExcludes,
+			// Skeleton: skeletonMode, // TODO: Add this field to context.Config if you implement skeleton logic later
 		}
 
-		fmt.Printf("📦 Building context (Limit: %d tokens)...\n", ctxMaxTokens)
+		// UX: nice output message
+		limitMsg := fmt.Sprintf("%d tokens", ctxMaxTokens)
+		if ctxMaxTokens == 0 {
+			limitMsg = "Unlimited"
+		}
+		fmt.Printf("📦 Building context (Limit: %s)...\n", limitMsg)
 
+		// 5. Build
 		output, err := builder.Build(config)
 		if err != nil {
 			return fmt.Errorf("failed to build context: %w", err)
 		}
 
+		// 6. Write Output
 		outFile := "codepicker_context.md"
-		if err := os.WriteFile(outFile, []byte(output), 0644); err != nil {
+		// Ensure we write to the root we scanned, or use a flag for output path if desired
+		outPath := filepath.Join(cwd, outFile)
+
+		if err := os.WriteFile(outPath, []byte(output), 0644); err != nil {
 			return fmt.Errorf("failed to write output file: %w", err)
 		}
 
@@ -79,6 +97,7 @@ var contextBuildCmd = &cobra.Command{
 func readIgnoreFile(filename string) ([]string, error) {
 	file, err := os.Open(filename)
 	if err != nil {
+		// It's okay if the file doesn't exist
 		return nil, err
 	}
 	defer file.Close()
@@ -101,13 +120,16 @@ func readIgnoreFile(filename string) ([]string, error) {
 }
 
 func init() {
+	// Flags
 	contextBuildCmd.Flags().BoolVar(&skeletonMode, "skeleton", false, "Generate skeleton (signatures only) context")
-	contextBuildCmd.Flags().IntVar(&ctxMaxTokens, "max-tokens", 8000, "Maximum estimated tokens to include")
-	contextBuildCmd.Flags().StringSliceVar(&ctxInclude, "include", []string{}, "Glob patterns to include (e.g. '*.go')")
 
-	// We default to empty here because we load defaults in the function now
+	// Default is 8000. To use unlimited, user must run: --max-tokens 0
+	contextBuildCmd.Flags().IntVar(&ctxMaxTokens, "max-tokens", 8000, "Maximum estimated tokens to include (set 0 for unlimited)")
+
+	contextBuildCmd.Flags().StringSliceVar(&ctxInclude, "include", []string{}, "Glob patterns to include (e.g. '*.go')")
 	contextBuildCmd.Flags().StringSliceVar(&ctxExclude, "exclude", []string{}, "Additional glob patterns to exclude")
 
+	// Register commands
 	contextCmd.AddCommand(contextBuildCmd)
 	rootCmd.AddCommand(contextCmd)
 }

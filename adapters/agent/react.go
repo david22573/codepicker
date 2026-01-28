@@ -20,14 +20,12 @@ type ReActAgent struct {
 	maxTurn int
 }
 
-// NewReActAgent constructs the agent with all dependencies injected
 func NewReActAgent(
 	model agent.LLMClient,
 	tools []agent.Tool,
 	policy agent.Policy,
 	repo agent.Repository,
 ) *ReActAgent {
-	// Index tools for O(1) lookup
 	toolMap := make(map[string]agent.Tool)
 	var toolDescs strings.Builder
 
@@ -36,7 +34,11 @@ func NewReActAgent(
 		toolDescs.WriteString(fmt.Sprintf("- %s: %s\n", t.Name(), t.Description()))
 	}
 
-	// The System Prompt defines the Agent's personality and protocols
+	// --- UNIVERSAL PROMPT ENGINEERING ---
+	// 1. Persona & Safety
+	// 2. Tools
+	// 3. Format Guidelines
+	// 4. ONE-SHOT EXAMPLE (Critical for weak models)
 	systemPrompt := fmt.Sprintf(`You are CodePicker, an autonomous coding agent.
 You verify every step. You never hallucinate filenames.
 You operate in a loop: THOUGHT -> ACTION -> OBSERVATION.
@@ -44,13 +46,15 @@ You operate in a loop: THOUGHT -> ACTION -> OBSERVATION.
 AVAILABLE TOOLS:
 %s
 
-FORMAT:
-Thought: <your reasoning>
-Action: <tool_name>
-Input: <json_arguments>
+FORMAT RULES:
+1. Output "Thought:", then "Action:", then "Input:".
+2. "Action" must be a single tool name.
+3. "Input" must be valid JSON.
+4. Do NOT output Markdown code blocks for the whole response.
+5. Wait for the [SYSTEM] Observation before proceeding.
 
-Example:
-Thought: I need to read the main file to understand the entrypoint.
+EXAMPLE INTERACTION (Follow this format):
+Thought: I need to read the main file to understand the entry point.
 Action: read_file
 Input: {"path": "main.go"}
 
@@ -62,7 +66,7 @@ Begin.`, toolDescs.String())
 		policy:  policy,
 		repo:    repo,
 		sysMsg:  systemPrompt,
-		maxTurn: 15, // Safety limit
+		maxTurn: 15,
 	}
 }
 
@@ -70,9 +74,7 @@ func (a *ReActAgent) Name() string {
 	return "CodePicker-ReAct"
 }
 
-// Run executes the main ReAct loop
 func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) {
-	// 1. Setup Execution State
 	execID := fmt.Sprintf("exec-%d", time.Now().Unix())
 	execution := agent.NewExecution(execID, "adhoc-plan")
 
@@ -80,10 +82,8 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 		return "", err
 	}
 
-	// 2. Initialize Context
 	currentContext := fmt.Sprintf("TASK: %s\n", taskInput)
 
-	// 3. The ReAct Loop
 	for i := 0; i < a.maxTurn; i++ {
 		// A. Get LLM Response
 		response, err := a.model.Chat(ctx, a.sysMsg, currentContext)
@@ -94,17 +94,30 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 		// B. Parse Response
 		thought, toolName, toolArgs := parseReActResponse(response)
 
-		// If no tool action is detected, we assume the agent is providing the final answer
+		// --- UX HARDENING: Distinct Agent Output ---
+		fmt.Printf("\n🤖 [AGENT] Thought: %s\n", thought)
+		// -------------------------------------------
+
 		if toolName == "" {
+			fmt.Printf("🏁 [AGENT] Final Answer: %s\n", response)
 			execution.Finish()
 			_ = a.repo.SaveExecution(ctx, execution)
 			return response, nil
 		}
 
-		// C. Policy Check (Security Firewall)
+		// --- UX HARDENING: Request Visualization ---
+		fmt.Printf("⚡ [AGENT] Request: %s %s\n", toolName, toolArgs)
+		// -------------------------------------------
+
+		// C. Policy Check
 		allowed, reason := a.policy.CanExecute(toolName, toolArgs)
 		if !allowed {
 			toolOut := fmt.Sprintf("Error: Policy Violation: %s", reason)
+
+			// --- UX HARDENING: Security Alert ---
+			fmt.Printf("🛡️  [GUARDRAIL] BLOCKED: %s\n", reason)
+			// ------------------------------------
+
 			currentContext += fmt.Sprintf("\nThought: %s\nAction: %s\nInput: %s\nObservation: %s\n", thought, toolName, toolArgs, toolOut)
 			continue
 		}
@@ -114,20 +127,25 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 		var toolOut string
 
 		if !exists {
-			toolOut = fmt.Sprintf("Error: Tool '%s' not found. Check available tools list.", toolName)
+			toolOut = fmt.Sprintf("Error: Tool '%s' not found.", toolName)
 		} else {
-			// Actually run the code
+			// --- UX HARDENING: System Action Label ---
+			fmt.Printf("⚙️  [SYSTEM] Executing %s...\n", toolName)
+			// -----------------------------------------
+
 			toolOut, err = tool.Execute(ctx, toolArgs)
 			if err != nil {
 				toolOut = fmt.Sprintf("Error: %v", err)
+				fmt.Printf("❌ [SYSTEM] Error: %v\n", err)
+			} else {
+				fmt.Printf("✅ [SYSTEM] OK.\n")
 			}
 		}
 
-		// E. Update History & State
+		// E. Update History
 		execution.RecordTurn(thought, toolName, toolArgs, toolOut)
 		_ = a.repo.SaveExecution(ctx, execution)
 
-		// Append Observation to context so LLM sees the result in the next turn
 		currentContext += fmt.Sprintf("\nThought: %s\nAction: %s\nInput: %s\nObservation: %s\n", thought, toolName, toolArgs, toolOut)
 	}
 

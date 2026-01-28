@@ -4,34 +4,53 @@ import (
 	"strings"
 )
 
-// parseReActResponse extracts the structured ReAct components from a raw string.
-// It looks for "Thought:", "Action:", and "Input:" keywords.
+// parseReActResponse extracts the structured ReAct components.
+// It is robust against multi-line JSON and markdown artifacts.
 func parseReActResponse(resp string) (thought, tool, args string) {
 	lines := strings.Split(resp, "\n")
 
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
+	// State flags
+	inInput := false
+	var inputBuilder strings.Builder
 
-		if strings.HasPrefix(line, "Thought:") {
-			// Extract everything after "Thought:"
-			val := strings.TrimPrefix(line, "Thought:")
-			thought = strings.TrimSpace(val)
+	for _, line := range lines {
+		cleanLine := strings.TrimSpace(line)
+
+		// 1. Capture Input (Multi-line handling)
+		if inInput {
+			inputBuilder.WriteString(line + "\n")
+			continue
 		}
 
-		if strings.HasPrefix(line, "Action:") {
-			val := strings.TrimPrefix(line, "Action:")
-			// Remove any markdown backticks if the LLM adds them
+		// 2. Detect Keywords
+		if strings.HasPrefix(cleanLine, "Thought:") {
+			val := strings.TrimPrefix(cleanLine, "Thought:")
+			thought = strings.TrimSpace(val)
+		} else if strings.HasPrefix(cleanLine, "Action:") {
+			val := strings.TrimPrefix(cleanLine, "Action:")
+			// Remove backticks if model adds them (e.g. `read_file`)
 			val = strings.Trim(val, "` ")
 			tool = strings.TrimSpace(val)
-		}
-
-		if strings.HasPrefix(line, "Input:") {
-			val := strings.TrimPrefix(line, "Input:")
-			// Remove any markdown backticks
-			val = strings.Trim(val, "`")
-			args = strings.TrimSpace(val)
+		} else if strings.HasPrefix(cleanLine, "Input:") {
+			val := strings.TrimPrefix(cleanLine, "Input:")
+			inInput = true
+			inputBuilder.WriteString(val + "\n")
+		} else if !inInput && thought == "" && tool == "" {
+			// If model forgets "Thought:", treat early text as thought
+			thought = cleanLine
 		}
 	}
 
+	args = cleanInput(inputBuilder.String())
 	return
+}
+
+// cleanInput removes markdown code blocks and extra whitespace
+func cleanInput(raw string) string {
+	raw = strings.TrimSpace(raw)
+	// Strip markdown code blocks ```json ... ```
+	raw = strings.TrimPrefix(raw, "```json")
+	raw = strings.TrimPrefix(raw, "```")
+	raw = strings.TrimSuffix(raw, "```")
+	return strings.TrimSpace(raw)
 }

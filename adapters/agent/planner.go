@@ -14,47 +14,51 @@ import (
 
 type Planner struct {
 	model agent.LLMClient
+	repo  agent.Repository
 }
 
-func NewPlanner(model agent.LLMClient) *Planner {
-	return &Planner{model: model}
+func NewPlanner(model agent.LLMClient, repo agent.Repository) *Planner {
+	return &Planner{
+		model: model,
+		repo:  repo,
+	}
 }
 
-func (p *Planner) CreatePlan(ctx context.Context, taskInput string) (*task.Plan, error) {
-	systemPrompt := `You are the Lead Architect for a software project.
-Your goal is to break down a complex coding task into a series of strictly sequential, atomic steps.
-
-GUIDELINES:
-1. Each step must be self-contained.
-2. Explicitly list the files involved in each step.
-3. The "Instruction" must be a direct command to a coding agent (e.g., "Read file X and update function Y...").
-4. Do not perform the work. Plan the work.
+// CreatePlan generates a new plan based on the task and file context
+func (p *Planner) CreatePlan(ctx context.Context, taskInput, fileContext string) (*task.Plan, error) {
+	systemPrompt := `You are the Lead Architect.
+Break down the task into sequential steps.
+STRICTLY only reference files that exist in the PROJECT CONTEXT.
 
 OUTPUT FORMAT:
-Return ONLY valid JSON matching this structure:
+Return ONLY raw JSON. Do not include markdown formatting.
+
+EXAMPLE:
 {
-  "reasoning": "High-level thought process...",
+  "reasoning": "I need to read X to understand Y...",
   "steps": [
     {
       "id": 1,
-      "description": "Short summary",
-      "instruction": "Detailed prompt for the worker",
-      "files": ["main.go", "utils.go"]
+      "description": "Analyze main.go",
+      "instruction": "Read main.go and check imports",
+      "files": ["main.go"]
     }
   ],
-  "estimated_cost": 0.0
+  "estimated_cost": 0.1
 }`
 
-	resp, err := p.model.Chat(ctx, systemPrompt, fmt.Sprintf("TASK: %s", taskInput))
+	userMessage := fmt.Sprintf("PROJECT CONTEXT:\n%s\n\nTASK: %s", fileContext, taskInput)
+
+	resp, err := p.model.Chat(ctx, systemPrompt, userMessage)
 	if err != nil {
 		return nil, errors.NewLLM("planner.CreatePlan", err)
 	}
 
-	// Clean up potential markdown formatting from LLM
-	cleanResp := strings.Trim(resp, "`")
-	if strings.HasPrefix(cleanResp, "json") {
-		cleanResp = strings.TrimPrefix(cleanResp, "json")
-	}
+	// Clean up potential markdown wrapping from weak models
+	cleanResp := strings.TrimSpace(resp)
+	cleanResp = strings.TrimPrefix(cleanResp, "```json")
+	cleanResp = strings.TrimPrefix(cleanResp, "```")
+	cleanResp = strings.TrimSuffix(cleanResp, "```")
 
 	var planData struct {
 		Reasoning string      `json:"reasoning"`
@@ -62,18 +66,68 @@ Return ONLY valid JSON matching this structure:
 	}
 
 	if err := json.Unmarshal([]byte(cleanResp), &planData); err != nil {
-		return nil, errors.NewSystem("planner.CreatePlan", "failed to parse plan JSON", err)
+		return nil, errors.NewSystem("planner.CreatePlan", "failed to parse plan JSON: "+cleanResp, err)
 	}
 
-	// Hydrate the Domain Entity
-	planID := fmt.Sprintf("plan-%d", time.Now().Unix())
+	// Hydrate Domain Entity
+	planID := fmt.Sprintf("plan-%d", time.Now().UnixNano())
 	domainPlan := task.NewPlan(planID, taskInput, planData.Reasoning)
 	domainPlan.Steps = planData.Steps
 
-	// Ensure statuses are initialized
 	for i := range domainPlan.Steps {
 		domainPlan.Steps[i].Status = task.StatusPending
 	}
 
+	if err := p.repo.SavePlan(ctx, domainPlan); err != nil {
+		return nil, fmt.Errorf("failed to persist plan: %w", err)
+	}
+
 	return domainPlan, nil
+}
+
+// OptimizePlan uses AI to refine an existing plan based on feedback
+func (p *Planner) OptimizePlan(ctx context.Context, plan *task.Plan, feedback string) (*task.Plan, error) {
+	systemPrompt := `You are the Lead Architect. Refine the plan based on feedback.
+OUTPUT FORMAT: Return ONLY raw JSON matching the original structure.`
+
+	// Serialize current plan to JSON for the LLM to read
+	planBytes, _ := json.Marshal(plan)
+
+	userMessage := fmt.Sprintf("CURRENT PLAN:\n%s\n\nUSER FEEDBACK: %s\n\nRefine the plan.", string(planBytes), feedback)
+
+	resp, err := p.model.Chat(ctx, systemPrompt, userMessage)
+	if err != nil {
+		return nil, errors.NewLLM("planner.OptimizePlan", err)
+	}
+
+	cleanResp := strings.TrimSpace(resp)
+	cleanResp = strings.TrimPrefix(cleanResp, "```json")
+	cleanResp = strings.TrimPrefix(cleanResp, "```")
+	cleanResp = strings.TrimSuffix(cleanResp, "```")
+
+	var planData struct {
+		Reasoning string      `json:"reasoning"`
+		Steps     []task.Step `json:"steps"`
+	}
+
+	if err := json.Unmarshal([]byte(cleanResp), &planData); err != nil {
+		return nil, errors.NewSystem("planner.OptimizePlan", "failed to parse optimized plan", err)
+	}
+
+	// Update the existing plan in place
+	plan.Reasoning = planData.Reasoning
+	plan.Steps = planData.Steps
+
+	// Reset status of modified steps if needed, or just reset whole plan
+	plan.Status = task.StatusPending
+	for i := range plan.Steps {
+		plan.Steps[i].Status = task.StatusPending
+	}
+
+	// Persist changes
+	if err := p.repo.SavePlan(ctx, plan); err != nil {
+		return nil, err
+	}
+
+	return plan, nil
 }
