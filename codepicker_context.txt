@@ -1,6 +1,6 @@
-Project Context Dump (06 Feb 26 01:29 PST)
+Project Context Dump (06 Feb 26 10:34 UTC)
 Format: xml
-Total Files: 74
+Total Files: 75
 
 # Project Structure
 <file_tree>
@@ -17,6 +17,7 @@ Total Files: 74
 - adapters/context/builder.go
 - adapters/context/builder_test.go
 - adapters/context/config.go
+- adapters/context/primer.go
 - adapters/policy/config.go
 - adapters/policy/enforcer.go
 - adapters/policy/strict.go
@@ -193,26 +194,40 @@ import (
 
 	"github.com/david22573/codepicker/domain/agent"
 	"github.com/david22573/codepicker/domain/audit"
+	"github.com/david22573/codepicker/infra/llm"
+	"github.com/david22573/codepicker/infra/logging"
 )
 
 type Auditor struct {
-	model  agent.LLMClient
-	repo   agent.Repository
-	tools  []agent.Tool
-	policy agent.Policy
+	model       agent.LLMClient
+	repo        agent.Repository
+	tools       []agent.Tool
+	policy      agent.Policy
+	logger      *logging.Logger
+	costTracker *llm.CostTracker
 }
 
-func NewAuditor(model agent.LLMClient, repo agent.Repository, tools []agent.Tool, policy agent.Policy) *Auditor {
+func NewAuditor(
+	model agent.LLMClient,
+	repo agent.Repository,
+	tools []agent.Tool,
+	policy agent.Policy,
+	logger *logging.Logger,
+	costTracker *llm.CostTracker,
+) *Auditor {
 	return &Auditor{
-		model:  model,
-		repo:   repo,
-		tools:  tools,
-		policy: policy,
+		model:       model,
+		repo:        repo,
+		tools:       tools,
+		policy:      policy,
+		logger:      logger,
+		costTracker: costTracker,
 	}
 }
 
 // SuggestImprovements scans the codebase and returns a list of actionable tasks.
-func (a *Auditor) SuggestImprovements(ctx context.Context) ([]string, error) {
+// UPDATED: Now accepts a 'primer' string to give the agent immediate context.
+func (a *Auditor) SuggestImprovements(ctx context.Context, primer string) ([]string, error) {
 	// 1. Construct Read-Only Tools
 	toolDescs := ""
 	toolMap := make(map[string]agent.Tool)
@@ -221,8 +236,10 @@ func (a *Auditor) SuggestImprovements(ctx context.Context) ([]string, error) {
 		toolDescs += fmt.Sprintf("- %s: %s\n", t.Name(), t.Description())
 	}
 
-	// 2. Strict System Prompt (FIXED: Added strict One-Shot Example)
-	systemPrompt := fmt.Sprintf(`You are the CodePicker Scout.
+	// 2. Strict System Prompt with Primer
+	systemPrompt := fmt.Sprintf(`%s
+
+You are the CodePicker Scout.
 Your goal is to scan the codebase and identify 3 SAFE, ISOLATED improvements.
 Focus on: Error handling, unused variables, simple refactors, or documentation.
 
@@ -247,16 +264,18 @@ Final Answer:
 TASK: Fix unhandled error in main.go
 TASK: Remove unused import in adapters/parser.go
 
-Begin.`, toolDescs)
+Begin.`, primer, toolDescs)
 
 	// 3. Run the Agent
 	scout := &ReActAgent{
-		model:   a.model,
-		tools:   toolMap,
-		policy:  a.policy, // Strict Read-Only
-		repo:    a.repo,
-		sysMsg:  systemPrompt,
-		maxTurn: 8,
+		model:       a.model,
+		tools:       toolMap,
+		policy:      a.policy, // Strict Read-Only
+		repo:        a.repo,
+		sysMsg:      systemPrompt,
+		maxTurn:     8,
+		logger:      a.logger,      // FIX: Injected Logger
+		costTracker: a.costTracker, // FIX: Injected CostTracker
 	}
 
 	fmt.Println("📡 [SCOUT] Scanning for improvements...")
@@ -314,12 +333,14 @@ Begin.`, toolDescs)
 
 	// 2. Create an Ephemeral Agent for this Audit
 	auditAgent := &ReActAgent{
-		model:   a.model,
-		tools:   toolMap,
-		policy:  a.policy, // This must be the ReadOnly policy
-		repo:    a.repo,
-		sysMsg:  systemPrompt,
-		maxTurn: 10,
+		model:       a.model,
+		tools:       toolMap,
+		policy:      a.policy, // This must be the ReadOnly policy
+		repo:        a.repo,
+		sysMsg:      systemPrompt,
+		maxTurn:     10,
+		logger:      a.logger,      // FIX: Injected Logger
+		costTracker: a.costTracker, // FIX: Injected CostTracker
 	}
 
 	// 3. Run the Agent
@@ -509,8 +530,32 @@ import (
 var xmlToolRegex = regexp.MustCompile(`<invoke name="(.*?)">(.*?)</invoke>`)
 var xmlArgRegex = regexp.MustCompile(`<parameter name="(.*?)">(.*?)</parameter>`)
 
+// Strategy 3: Moonshot/Kimi Special Tokens
+// Matches: <|tool_call_begin|> functions.list_files:0 <|tool_call_argument_begin|> {"path": "."} <|tool_call_end|>
+var kimiToolRegex = regexp.MustCompile(`<\|tool_call_begin\|>\s*(?:functions\.)?([\w_]+)(?::\d+)?\s*<\|tool_call_argument_begin\|>\s*(\{.*?\})\s*<\|tool_call_end\|>`)
+
 // parseReActResponse extracts structured components from various LLM output formats.
 func parseReActResponse(resp string) (thought, tool, args string) {
+	// STRATEGY 3: Check for Kimi/Moonshot Special Tokens
+	// We check this first as it is the most specific and rigid format.
+	if kimiToolRegex.MatchString(resp) {
+		matches := kimiToolRegex.FindStringSubmatch(resp)
+		if len(matches) > 2 {
+			tool = matches[1] // The function name (e.g. list_files)
+			args = matches[2] // The JSON arguments
+
+			// Attempt to capture thought (text before the tool call)
+			loc := kimiToolRegex.FindStringIndex(resp)
+			if loc != nil {
+				thought = strings.TrimSpace(resp[:loc[0]])
+				// Clean up the "section begin" token if present in thought
+				thought = strings.ReplaceAll(thought, "<|tool_calls_section_begin|>", "")
+				thought = strings.TrimSpace(thought)
+			}
+			return
+		}
+	}
+
 	// STRATEGY 1: Check for XML format
 	// This takes priority if the model has drifted into XML mode.
 	if xmlToolRegex.MatchString(resp) {
@@ -626,15 +671,13 @@ func NewPlanner(model agent.LLMClient, repo agent.Repository) *Planner {
 }
 
 // CreatePlan generates a new plan based on the task and file context
-// FIX: Updated signature to accept 'fileContext string' instead of '*domain.LLMContext'
-func (p *Planner) CreatePlan(ctx context.Context, taskInput, fileContext string) (*task.Plan, error) {
+// UPDATED: Added 'primer string' to signature
+func (p *Planner) CreatePlan(ctx context.Context, taskInput, fileContext, primer string) (*task.Plan, error) {
 	systemPrompt := `You are the Lead Architect.
 Break down the task into sequential steps.
 STRICTLY only reference files that exist in the PROJECT CONTEXT.
-
 OUTPUT FORMAT:
 Return ONLY raw JSON. Do not include markdown formatting.
-
 EXAMPLE:
 {
   "reasoning": "I need to read X to understand Y...",
@@ -649,8 +692,8 @@ EXAMPLE:
   "estimated_cost": 0.1
 }`
 
-	// Combine the markdown context and the user task into a single string prompt
-	userMessage := fmt.Sprintf("PROJECT CONTEXT:\n%s\n\nTASK: %s", fileContext, taskInput)
+	// Combine the Primer, File Context, and Task into the prompt
+	userMessage := fmt.Sprintf("PROJECT STARTER INFO:\n%s\n\nRELEVANT CODE SNIPPETS:\n%s\n\nTASK: %s", primer, fileContext, taskInput)
 
 	resp, err := p.model.Chat(ctx, systemPrompt, userMessage)
 	if err != nil {
@@ -688,7 +731,8 @@ EXAMPLE:
 
 // OptimizePlan uses AI to refine an existing plan based on feedback
 func (p *Planner) OptimizePlan(ctx context.Context, plan *task.Plan, feedback string) (*task.Plan, error) {
-	systemPrompt := `You are the Lead Architect. Refine the plan based on feedback.
+	systemPrompt := `You are the Lead Architect.
+Refine the plan based on feedback.
 OUTPUT FORMAT: Return ONLY raw JSON matching the original structure.`
 
 	planBytes, _ := json.Marshal(plan)
@@ -959,27 +1003,40 @@ import (
 
 	"github.com/david22573/codepicker/domain/agent"
 	"github.com/david22573/codepicker/domain/interaction"
+	"github.com/david22573/codepicker/infra/llm"
+	"github.com/david22573/codepicker/infra/logging"
 )
 
 type TwoPassEngine struct {
-	model  agent.LLMClient
-	repo   agent.Repository
-	tools  []agent.Tool
-	policy agent.Policy
+	model       agent.LLMClient
+	repo        agent.Repository
+	tools       []agent.Tool
+	policy      agent.Policy
+	logger      *logging.Logger
+	costTracker *llm.CostTracker
 }
 
-func NewTwoPassEngine(model agent.LLMClient, repo agent.Repository, tools []agent.Tool, policy agent.Policy) *TwoPassEngine {
+func NewTwoPassEngine(
+	model agent.LLMClient,
+	repo agent.Repository,
+	tools []agent.Tool,
+	policy agent.Policy,
+	logger *logging.Logger,
+	costTracker *llm.CostTracker,
+) *TwoPassEngine {
 	return &TwoPassEngine{
-		model:  model,
-		repo:   repo,
-		tools:  tools,
-		policy: policy,
+		model:       model,
+		repo:        repo,
+		tools:       tools,
+		policy:      policy,
+		logger:      logger,
+		costTracker: costTracker,
 	}
 }
 
 // RunAnalysis performs Phase 2.1: The Analyst (Read-Only)
-// FIX: Signature now accepts (task, contextFile string) to match cmd/fix.go usage
-func (e *TwoPassEngine) RunAnalysis(ctx context.Context, task, contextFile string) (*interaction.Analysis, error) {
+// UPDATED: Now accepts 'primer string'
+func (e *TwoPassEngine) RunAnalysis(ctx context.Context, task, contextFile, primer string) (*interaction.Analysis, error) {
 	readMap := make(map[string]agent.Tool)
 	var toolDescs strings.Builder
 
@@ -991,7 +1048,10 @@ func (e *TwoPassEngine) RunAnalysis(ctx context.Context, task, contextFile strin
 		}
 	}
 
-	systemPrompt := fmt.Sprintf(`You are the CodePicker Analyst.
+	// Inject Primer into System Prompt
+	systemPrompt := fmt.Sprintf(`%s
+
+You are the CodePicker Analyst.
 Your goal is to diagnose the issue described in the TASK.
 You have READ-ONLY access.
 Locate the specific lines of code that need changing.
@@ -1004,15 +1064,17 @@ Thought: ...
 Action: ...
 Input: ...
 
-When you have found the issue, output your findings as the Final Answer.`, toolDescs.String())
+When you have found the issue, output your findings as the Final Answer.`, primer, toolDescs.String())
 
 	analyst := &ReActAgent{
-		model:   e.model,
-		tools:   readMap,
-		policy:  e.policy,
-		repo:    e.repo,
-		sysMsg:  systemPrompt,
-		maxTurn: 8,
+		model:       e.model,
+		tools:       readMap,
+		policy:      e.policy,
+		repo:        e.repo,
+		sysMsg:      systemPrompt,
+		maxTurn:     8,
+		logger:      e.logger,      // FIX: Injected Logger
+		costTracker: e.costTracker, // FIX: Injected CostTracker
 	}
 
 	input := fmt.Sprintf("TASK: %s\n\nStart by reading: %s", task, contextFile)
@@ -1033,14 +1095,12 @@ When you have found the issue, output your findings as the Final Answer.`, toolD
 func (e *TwoPassEngine) GeneratePatch(ctx context.Context, task string, analysis *interaction.Analysis) (*interaction.Patch, error) {
 	systemPrompt := `You are the CodePicker Engineer.
 Your goal is to write a Git Unified Diff to fix the issue described.
-
 RULES FOR DIFF GENERATION:
 1. Start with 'diff --git a/file b/file'.
 2. Use standard '--- a/file' and '+++ b/file' headers.
 3. INCLUDE 3 LINES OF CONTEXT around every change. Git apply will fail without context.
 4. Do not omit lines with "...".
 5. Ensure the indentation matches the original file exactly.
-
 Output ONLY the raw diff content. No markdown wrappers.`
 
 	userPrompt := fmt.Sprintf("TASK: %s\n\nANALYSIS:\n%s", task, analysis.Markdown)
@@ -1061,7 +1121,6 @@ func (e *TwoPassEngine) RefinePatch(ctx context.Context, task string, analysis *
 	systemPrompt := `You are the CodePicker Repair Engineer.
 Your previous patch failed to apply.
 Analyze the error message and correct the patch.
-
 RULES:
 1. Keep the standard Git Unified Diff format.
 2. Fix context lines or indentation based on the error.
@@ -1371,6 +1430,105 @@ type Config struct {
 	IncludePatterns []string
 	ExcludePatterns []string
 	TaskDescription string
+}
+
+</file>
+
+<file path="adapters/context/primer.go">
+package context
+
+import (
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+// ProjectPrimer generates a high-level overview of the project structure
+// to "prime" the agent before it starts working.
+type ProjectPrimer struct {
+	ProjectRoot string
+}
+
+func NewProjectPrimer(root string) *ProjectPrimer {
+	return &ProjectPrimer{ProjectRoot: root}
+}
+
+// Generate builds a prompt-ready summary of the project.
+func (p *ProjectPrimer) Generate() string {
+	var sb strings.Builder
+	sb.WriteString("## PROJECT STARTER INFO\n")
+	sb.WriteString("You are working in the following project structure:\n\n")
+
+	sb.WriteString("<file_tree>\n")
+
+	// 1. Walk and generate tree
+	maxDepth := 4 // Don't go too deep to save tokens
+	fileCount := 0
+
+	err := filepath.WalkDir(p.ProjectRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+
+		rel, _ := filepath.Rel(p.ProjectRoot, path)
+		if rel == "." {
+			return nil
+		}
+
+		// Skip hidden/vendor
+		if strings.HasPrefix(d.Name(), ".") || d.Name() == "vendor" || d.Name() == "node_modules" {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		// Check depth
+		if strings.Count(rel, string(os.PathSeparator)) > maxDepth {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		// Add to tree
+		if d.IsDir() {
+			sb.WriteString(fmt.Sprintf("- %s/\n", rel))
+		} else {
+			sb.WriteString(fmt.Sprintf("- %s\n", rel))
+			fileCount++
+		}
+
+		if fileCount > 200 {
+			sb.WriteString("... (truncated)\n")
+			return filepath.SkipAll // Stop walking if too huge
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		sb.WriteString("(Error generating tree)\n")
+	}
+	sb.WriteString("</file_tree>\n\n")
+
+	// 2. Peek at key config files for context
+	keyFiles := []string{"go.mod", "package.json", "requirements.txt", "Makefile", "Dockerfile"}
+	for _, f := range keyFiles {
+		content, err := os.ReadFile(filepath.Join(p.ProjectRoot, f))
+		if err == nil {
+			// Truncate if too long (e.g., massive package-lock)
+			str := string(content)
+			if len(str) > 500 {
+				str = str[:500] + "\n...(truncated)"
+			}
+			sb.WriteString(fmt.Sprintf("## Content of %s:\n```\n%s\n```\n\n", f, str))
+		}
+	}
+
+	return sb.String()
 }
 
 </file>
@@ -2343,7 +2501,7 @@ import (
 	"github.com/david22573/codepicker/adapters/policy"
 	"github.com/david22573/codepicker/adapters/tools"
 	"github.com/david22573/codepicker/adapters/verifier"
-	"github.com/david22573/codepicker/domain/config" // Import Config
+	"github.com/david22573/codepicker/domain/config"
 	contextDomain "github.com/david22573/codepicker/domain/context"
 	"github.com/david22573/codepicker/infra/fs"
 	"github.com/david22573/codepicker/infra/git"
@@ -2363,12 +2521,13 @@ type Container struct {
 	Verifier         *verifier.Pipeline
 	Git              *git.Client
 	ContextBuilder   *context.SliceBasedBuilder
+	ProjectPrimer    *context.ProjectPrimer
 	WorkspaceManager *fs.WorkspaceManager
 	Repository       *storage.SQLiteRepository
 	SliceStore       contextDomain.SliceStore
 	Logger           *logging.Logger
 	CostTracker      *llm.CostTracker
-	Config           *config.AppConfig // Exposed for CLI usage
+	Config           *config.AppConfig
 }
 
 func NewContainer(apiKey, projectRoot, llmModel string, isDryRun, isCI bool) (*Container, error) {
@@ -2415,7 +2574,6 @@ func NewContainer(apiKey, projectRoot, llmModel string, isDryRun, isCI bool) (*C
 	gitClient := git.NewClient(projectRoot, isDryRun)
 
 	// 3. Initialize LLM & Cost Tracker with Config
-	// Note: You'll need to update NewOpenRouterAdapter signature in infra/llm next!
 	llmClient := llm.NewOpenRouterAdapter(apiKey, cfg.LLM.Model, time.Duration(cfg.LLM.TimeoutSeconds)*time.Second)
 
 	// Initialize Cost Tracker with limits
@@ -2433,15 +2591,24 @@ func NewContainer(apiKey, projectRoot, llmModel string, isDryRun, isCI bool) (*C
 
 	ctxBuilder := context.NewSliceBasedBuilder(repo, cfg.Agent.MaxContextSize)
 
+	// --- NEW: Init Primer ---
+	primer := context.NewProjectPrimer(projectRoot)
+
 	// 6. Initialize Agents
 	// We inject costTracker into the worker so it can record usage per turn
 	worker := agent.NewReActAgent(llmClient, allTools, guardRail, repo, logger, costTracker)
 	planner := agent.NewPlanner(llmClient, repo)
 
 	executor := agent.NewPlanExecutor(worker, repo, workspaceMgr)
-	auditor := agent.NewAuditor(llmClient, repo, allTools, guardRail)
+
+	// FIX: Auditor now receives logger and costTracker (prevents nil pointer crash)
+	auditor := agent.NewAuditor(llmClient, repo, allTools, guardRail, logger, costTracker)
+
 	explainer := agent.NewExplainer(llmClient, repo)
-	twoPass := agent.NewTwoPassEngine(llmClient, repo, allTools, guardRail)
+
+	// FIX: TwoPassEngine now receives logger and costTracker
+	twoPass := agent.NewTwoPassEngine(llmClient, repo, allTools, guardRail, logger, costTracker)
+
 	verifier := verifier.NewPipeline(projectRoot)
 
 	return &Container{
@@ -2453,6 +2620,7 @@ func NewContainer(apiKey, projectRoot, llmModel string, isDryRun, isCI bool) (*C
 		Verifier:         verifier,
 		Git:              gitClient,
 		ContextBuilder:   ctxBuilder,
+		ProjectPrimer:    primer,
 		WorkspaceManager: workspaceMgr,
 		Repository:       repo,
 		SliceStore:       repo,
@@ -2478,172 +2646,110 @@ func (c *Container) Close() {
 package cmd
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/david22573/codepicker/app"
+	"github.com/david22573/codepicker/domain/task"
+	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
 
-var (
-	agentModel  string
-	executionID string
-)
+// Local flag for this command to avoid dependency on run.go's globals
+var agentDryRun bool
 
 var agentCmd = &cobra.Command{
 	Use:   "agent",
-	Short: "Interact with specific agent personas and history",
-}
+	Short: "Start an interactive session with the CodePicker agent",
+	Run: func(cmd *cobra.Command, args []string) {
+		apiKey := os.Getenv("OPENROUTER_API_KEY")
+		if apiKey == "" {
+			fmt.Println("❌ Error: OPENROUTER_API_KEY is not set.")
+			os.Exit(1)
+		}
 
-// --- Audit Command ---
-var auditCmd = &cobra.Command{
-	Use:   "audit [query]",
-	Short: "Perform a semantic read-only audit of the codebase",
-	Args:  cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return runAgentTask(func(c *app.Container) error {
-			query := args[0]
-			fmt.Printf("🛡️  Starting Audit (Model: %s)\n", getModelDisplay())
+		cwd, _ := os.Getwd()
 
-			fmt.Println("🧠 Gathering relevant code slices for audit...")
+		// FIX 1: Use local dryRun flag and hardcode ci=false (interactive mode)
+		container, err := app.NewContainer(apiKey, cwd, "", agentDryRun, false)
+		if err != nil {
+			fmt.Printf("❌ Container Init Failed: %v\n", err)
+			os.Exit(1)
+		}
+		defer container.Close()
 
-			// FIX: Use BuildForTask(query) instead of Build()
-			// This returns a markdown string we can prepend to the prompt
-			contextStr, err := c.ContextBuilder.BuildForTask(query)
-			if err != nil {
-				fmt.Printf("⚠️  Warning: Context building failed: %v\n", err)
+		fmt.Println(color.CyanString("🤖 CodePicker Agent initialized."))
+		fmt.Println(color.HiBlackString("Type 'exit' or 'quit' to stop."))
+		fmt.Println(color.HiBlackString("Type 'clear' to reset context."))
+
+		// 1. Generate the Primer
+		fmt.Print("🗺️  Loading project context... ")
+		primer := container.ProjectPrimer.Generate()
+		fmt.Println("Done.")
+
+		reader := bufio.NewReader(os.Stdin)
+		ctx := context.Background()
+
+		for {
+			fmt.Print(color.GreenString("\n> "))
+			input, _ := reader.ReadString('\n')
+			input = strings.TrimSpace(input)
+
+			if input == "exit" || input == "quit" {
+				break
+			}
+			if input == "clear" {
+				fmt.Println("Context cleared.")
+				continue
+			}
+			if input == "" {
+				continue
 			}
 
-			// Combine context and query for the Auditor
-			fullInput := fmt.Sprintf("CONTEXT:\n%s\n\nTASK: %s", contextStr, query)
+			// 2. Prepend Primer to the input
+			enhancedInput := fmt.Sprintf("PROJECT CONTEXT:\n%s\n\nUSER REQUEST:\n%s", primer, input)
+			fmt.Println(color.HiBlackString("Thinking..."))
 
-			report, err := c.Auditor.RunAudit(context.Background(), fullInput)
-			if err != nil {
-				return err
+			// FIX 2: Use 'OriginalTask' instead of 'Goal'
+			syntheticPlan := &task.Plan{
+				ID:           "interactive-chat",
+				OriginalTask: input,
+				Reasoning:    "Interactive session user request",
+				Status:       task.StatusPending,
+				Steps: []task.Step{
+					{
+						ID:          1,
+						Description: "Execute user request",
+						Instruction: enhancedInput,
+						Status:      task.StatusPending,
+					},
+				},
 			}
 
-			fmt.Println("\n================ REPORT ================")
-			fmt.Println(report.Content)
-			fmt.Println("========================================")
-			fmt.Printf("📄 Saved to: %s\n", report.Artifact)
-			return nil
-		}, dryRunFlag)
+			// FIX 3: Execute returns only error. Results are updated in the plan struct.
+			err := container.PlanExecutor.Execute(ctx, syntheticPlan)
+
+			if err != nil {
+				fmt.Printf("❌ Error: %v\n", err)
+			} else {
+				// Read the result from the step
+				for _, step := range syntheticPlan.Steps {
+					if step.Status == task.StatusFailed {
+						fmt.Printf("❌ %s\n", step.Error)
+					} else {
+						fmt.Printf("✅ %s\n", step.Result)
+					}
+				}
+			}
+		}
 	},
-}
-
-// --- Plan Command ---
-var planCmd = &cobra.Command{
-	Use:   "plan [task]",
-	Short: "Generate a plan without executing it",
-	Args:  cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return runAgentTask(func(c *app.Container) error {
-			taskInput := args[0]
-			fmt.Println("🧠 Generating Plan...")
-
-			// FIX: Use BuildForTask here too
-			contextStr, err := c.ContextBuilder.BuildForTask(taskInput)
-			if err != nil {
-				fmt.Printf("⚠️  Warning: Context building failed: %v\n", err)
-			}
-
-			plan, err := c.Planner.CreatePlan(context.Background(), taskInput, contextStr)
-			if err != nil {
-				return err
-			}
-
-			fmt.Printf("✅ Plan Created (ID: %s)\n", plan.ID)
-			fmt.Printf("   Reasoning: %s\n", plan.Reasoning)
-			for _, step := range plan.Steps {
-				fmt.Printf("   - [ ] %s\n", step.Description)
-			}
-			return nil
-		}, true) // Plan generation is always "dry run" safe
-	},
-}
-
-// --- Replay Command ---
-var replayCmd = &cobra.Command{
-	Use:   "replay",
-	Short: "Replay a past execution from the database",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return runAgentTask(func(c *app.Container) error {
-			if executionID == "" {
-				return fmt.Errorf("must specify --execution ID")
-			}
-			exec, err := c.Repository.GetExecution(context.Background(), executionID)
-			if err != nil {
-				return err
-			}
-
-			fmt.Printf("Replaying Execution: %s\n", exec.ID)
-			for _, turn := range exec.History {
-				fmt.Printf("\n--- Turn %d ---\n", turn.TurnID)
-				fmt.Printf("Thought: %s\n", turn.Thought)
-				fmt.Printf("Action: %s (%s)\n", turn.ToolName, turn.ToolArgs)
-				fmt.Printf("Result: %s\n", turn.ToolOut)
-			}
-			return nil
-		}, true)
-	},
-}
-
-// --- Explain Command ---
-var explainCmd = &cobra.Command{
-	Use:   "explain",
-	Short: "Use AI to explain a past execution",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return runAgentTask(func(c *app.Container) error {
-			if executionID == "" {
-				return fmt.Errorf("must specify --execution ID")
-			}
-
-			// FIX: c.Explainer is now valid
-			summary, err := c.Explainer.Explain(context.Background(), executionID)
-			if err != nil {
-				return err
-			}
-
-			fmt.Println("\n🤖 EXECUTION EXPLANATION:")
-			fmt.Println(summary)
-			return nil
-		}, true)
-	},
-}
-
-// --- Helpers ---
-
-func runAgentTask(action func(*app.Container) error, dryRun bool) error {
-	apiKey := os.Getenv("OPENROUTER_API_KEY")
-	if apiKey == "" {
-		return fmt.Errorf("OPENROUTER_API_KEY required")
-	}
-	cwd, _ := os.Getwd()
-	// Update NewContainer to match signature (empty model string uses default)
-	container, err := app.NewContainer(apiKey, cwd, agentModel, dryRun, false)
-	if err != nil {
-		return err
-	}
-	return action(container)
-}
-
-func getModelDisplay() string {
-	if agentModel == "" {
-		return "Default"
-	}
-	return agentModel
 }
 
 func init() {
-	agentCmd.PersistentFlags().StringVar(&agentModel, "model", "", "Override LLM model")
-	replayCmd.Flags().StringVar(&executionID, "execution", "", "Execution ID to replay")
-	explainCmd.Flags().StringVar(&executionID, "execution", "", "Execution ID to explain")
-
-	agentCmd.AddCommand(auditCmd)
-	agentCmd.AddCommand(planCmd)
-	agentCmd.AddCommand(replayCmd)
-	agentCmd.AddCommand(explainCmd)
+	agentCmd.Flags().BoolVar(&agentDryRun, "dry-run", false, "Enable read-only mode")
 	rootCmd.AddCommand(agentCmd)
 }
 
@@ -2934,7 +3040,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var fixTargetFile string
+// Local flags to ensure this file compiles independently
+var (
+	fixTargetFile string
+	fixDryRun     bool
+)
 
 var fixCmd = &cobra.Command{
 	Use:   "fix [task]",
@@ -2955,8 +3065,8 @@ Requires a task description and a target file.`,
 
 		cwd, _ := os.Getwd()
 
-		// FIX: Update NewContainer call signature
-		container, err := app.NewContainer(apiKey, cwd, "", dryRunFlag, ciFlag)
+		// FIX 1: Use local 'fixDryRun' and hardcode CI to false
+		container, err := app.NewContainer(apiKey, cwd, "", fixDryRun, false)
 		if err != nil {
 			fmt.Printf("❌ Container Init Failed: %v\n", err)
 			os.Exit(1)
@@ -2972,8 +3082,11 @@ Requires a task description and a target file.`,
 		// --- Phase 1: The Analyst ---
 		fmt.Printf("🧐 [ANALYST] Diagnosing issue in %s...\n", fixTargetFile)
 
-		// The Analyst reads the specific file to understand the context
-		analysis, err := container.TwoPassEngine.RunAnalysis(ctx, taskInput, fixTargetFile)
+		// FIX 2: Generate the Project Primer (Map)
+		primer := container.ProjectPrimer.Generate()
+
+		// FIX 3: Pass 'primer' to RunAnalysis (matches new signature)
+		analysis, err := container.TwoPassEngine.RunAnalysis(ctx, taskInput, fixTargetFile, primer)
 		if err != nil {
 			fmt.Printf("❌ Analysis Failed: %v\n", err)
 			os.Exit(1)
@@ -2996,7 +3109,7 @@ Requires a task description and a target file.`,
 		fmt.Println(patch.Diff)
 
 		// --- Phase 3: Verification (Optional) ---
-		if !dryRunFlag {
+		if !fixDryRun {
 			fmt.Println("\n🧪 [VERIFIER] Verifying patch in sandbox...")
 			result, err := container.Verifier.Verify(ctx, patch.Diff)
 			if err != nil {
@@ -3019,6 +3132,7 @@ Requires a task description and a target file.`,
 
 func init() {
 	fixCmd.Flags().StringVarP(&fixTargetFile, "file", "f", "", "Target file to analyze and fix")
+	fixCmd.Flags().BoolVar(&fixDryRun, "dry-run", false, "Enable read-only mode")
 	rootCmd.AddCommand(fixCmd)
 }
 
@@ -3175,6 +3289,9 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// Local flag to ensure this file compiles independently
+var improveDryRun bool
+
 var improveCmd = &cobra.Command{
 	Use:   "improve",
 	Short: "Automatically suggest and apply codebase improvements",
@@ -3187,19 +3304,25 @@ var improveCmd = &cobra.Command{
 
 		cwd, _ := os.Getwd()
 
-		// Initialize the container with current configuration
-		container, err := app.NewContainer(apiKey, cwd, "", dryRunFlag, ciFlag)
+		// FIX 1: Use local 'improveDryRun' and hardcode CI to false
+		container, err := app.NewContainer(apiKey, cwd, "", improveDryRun, false)
 		if err != nil {
 			fmt.Printf("❌ Container Init Failed: %v\n", err)
 			os.Exit(1)
 		}
+		// Defer close to ensure logs flush
+		defer container.Close()
 
 		ctx := context.Background()
 
+		// FIX 2: Generate the Project Primer (Map)
+		fmt.Println("🗺️  Building project map...")
+		primer := container.ProjectPrimer.Generate()
+
 		fmt.Println("📡 [SCOUT] Searching for potential improvements...")
 
-		// The Auditor uses the LLM to scan for safe refactors
-		tasks, err := container.Auditor.SuggestImprovements(ctx)
+		// FIX 3: Pass 'primer' to SuggestImprovements (matches new signature)
+		tasks, err := container.Auditor.SuggestImprovements(ctx, primer)
 		if err != nil {
 			fmt.Printf("❌ Audit Failed: %v\n", err)
 			os.Exit(1)
@@ -3220,6 +3343,7 @@ var improveCmd = &cobra.Command{
 }
 
 func init() {
+	improveCmd.Flags().BoolVar(&improveDryRun, "dry-run", false, "Enable read-only mode")
 	rootCmd.AddCommand(improveCmd)
 }
 
@@ -3582,17 +3706,20 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// Local flags to ensure self-contained compilation
 var (
-	dryRunFlag bool
-	ciFlag     bool
-	planIDFlag string
+	runDryRun  bool
+	runCI      bool
+	runPlanID  string
+	runAutoYes bool
 )
 
 var runCmd = &cobra.Command{
 	Use:   "run [task]",
 	Short: "Execute a coding task (via plan)",
 	Run: func(cmd *cobra.Command, args []string) {
-		if planIDFlag == "" && len(args) < 1 {
+		// Validation
+		if runPlanID == "" && len(args) < 1 {
 			ui.PrintError("You must provide a task string OR a --plan <id>")
 			_ = cmd.Usage()
 			os.Exit(1)
@@ -3603,8 +3730,10 @@ var runCmd = &cobra.Command{
 			taskInput = args[0]
 		}
 
-		if err := executeRun(taskInput, planIDFlag); err != nil {
-			if ciFlag {
+		// Execute
+		if err := executeRun(taskInput, runPlanID); err != nil {
+			if runCI {
+				// JSON Output for CI
 				res := task.CIResult{
 					Status: "failure",
 					Task:   taskInput,
@@ -3627,15 +3756,15 @@ func executeRun(taskInput, planID string) error {
 
 	cwd, _ := os.Getwd()
 
-	// Initialize Container
-	container, err := app.NewContainer(apiKey, cwd, "", dryRunFlag, ciFlag)
+	// Initialize Container with local flags
+	container, err := app.NewContainer(apiKey, cwd, "", runDryRun, runCI)
 	if err != nil {
 		return err
 	}
 	defer container.Close()
 
-	if !ciFlag {
-		printSafetyBanner(dryRunFlag)
+	if !runCI {
+		printSafetyBanner(runDryRun)
 	}
 
 	ctx := context.Background()
@@ -3643,7 +3772,8 @@ func executeRun(taskInput, planID string) error {
 
 	// --- Step 1: Planning ---
 	if planID != "" {
-		if !ciFlag {
+		// Load existing plan
+		if !runCI {
 			ui.PrintInfo(fmt.Sprintf("Loading Plan %s...", planID))
 		}
 		p, err := container.Repository.GetPlan(ctx, planID)
@@ -3651,18 +3781,23 @@ func executeRun(taskInput, planID string) error {
 			return fmt.Errorf("failed to load plan: %w", err)
 		}
 		plan = p
-		if plan.Status == task.StatusCompleted && !ciFlag {
+		if plan.Status == task.StatusCompleted && !runCI {
 			ui.PrintWarning("This plan is already marked as completed.")
 		}
 	} else {
-		if !ciFlag {
+		// Create new plan
+		if !runCI {
 			ui.PrintHeader("Planning Phase")
 
-			// Use Bubble Tea Spinner for the heavy lifting
 			var fileContext string
+			var primer string // New variable for the map
 
+			// Single spinner for context gathering
 			err := ui.RunSpinner("Analyzing project context...", func() error {
 				var innerErr error
+				// FIX 1: Generate Primer
+				primer = container.ProjectPrimer.Generate()
+				// Build semantic context
 				fileContext, innerErr = container.ContextBuilder.BuildForTask(taskInput)
 				return innerErr
 			})
@@ -3670,9 +3805,11 @@ func executeRun(taskInput, planID string) error {
 				ui.PrintWarning(fmt.Sprintf("Context generation partial: %v", err))
 			}
 
+			// Spinner for plan generation
 			err = ui.RunSpinner("Generating implementation plan...", func() error {
 				var innerErr error
-				plan, innerErr = container.Planner.CreatePlan(ctx, taskInput, fileContext)
+				// FIX 2: Pass 'primer' to CreatePlan (matches new signature)
+				plan, innerErr = container.Planner.CreatePlan(ctx, taskInput, fileContext, primer)
 				return innerErr
 			})
 
@@ -3682,16 +3819,19 @@ func executeRun(taskInput, planID string) error {
 
 			ui.PrintSuccess(fmt.Sprintf("Plan Generated (ID: %s)", plan.ID))
 
-			// Display Plan Summary using Lipgloss style
+			// Display Plan Summary
 			fmt.Printf("\n%s\n", ui.InfoStyle.Render("Strategy: "+plan.Reasoning))
 			for i, step := range plan.Steps {
 				fmt.Printf("   %d. %s\n", i+1, step.Description)
 			}
 			fmt.Println()
+
 		} else {
-			// CI Mode - Silent
+			// CI Mode - Silent execution
+			primer := container.ProjectPrimer.Generate()
 			fileContext, _ := container.ContextBuilder.BuildForTask(taskInput)
-			p, err := container.Planner.CreatePlan(ctx, taskInput, fileContext)
+			// Pass primer here too
+			p, err := container.Planner.CreatePlan(ctx, taskInput, fileContext, primer)
 			if err != nil {
 				return err
 			}
@@ -3700,15 +3840,15 @@ func executeRun(taskInput, planID string) error {
 	}
 
 	// --- Step 2: Execution ---
-	if !ciFlag {
+	if !runCI {
 		ui.PrintHeader("Execution Phase")
 	}
 
-	// We don't use a spinner here because the agent logs real-time steps to stdout
+	// Execute Plan
 	execErr := container.PlanExecutor.Execute(ctx, plan)
 
 	// --- Step 3: Reporting ---
-	if ciFlag {
+	if runCI {
 		return handleCIOutput(plan, execErr)
 	}
 
@@ -3724,6 +3864,8 @@ func executeRun(taskInput, planID string) error {
 	ui.PrintSuccess("Task Completed Successfully.")
 	return nil
 }
+
+// Helper functions
 
 func printSafetyBanner(isDryRun bool) {
 	if isDryRun {
@@ -3776,9 +3918,10 @@ func handleCIOutput(plan *task.Plan, execErr error) error {
 }
 
 func init() {
-	runCmd.Flags().BoolVar(&dryRunFlag, "dry-run", false, "Enable read-only mode")
-	runCmd.Flags().BoolVar(&ciFlag, "ci", false, "Enable CI mode (JSON output, no prompts, strict safety)")
-	runCmd.Flags().StringVar(&planIDFlag, "plan", "", "Execute a specific pre-generated plan ID")
+	runCmd.Flags().BoolVar(&runDryRun, "dry-run", false, "Enable read-only mode")
+	runCmd.Flags().BoolVar(&runCI, "ci", false, "Enable CI mode (JSON output, no prompts, strict safety)")
+	runCmd.Flags().StringVar(&runPlanID, "plan", "", "Execute a specific pre-generated plan ID")
+	runCmd.Flags().BoolVarP(&runAutoYes, "yes", "y", false, "Skip confirmation prompts")
 	rootCmd.AddCommand(runCmd)
 }
 
@@ -4603,6 +4746,7 @@ require (
 	github.com/charmbracelet/bubbles v0.21.1
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
+	github.com/fatih/color v1.18.0
 	github.com/spf13/cobra v1.10.2
 	go.uber.org/zap v1.27.1
 	modernc.org/sqlite v1.44.3
@@ -4622,6 +4766,7 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.3.0 // indirect
+	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mattn/go-localereader v0.0.1 // indirect
 	github.com/mattn/go-runewidth v0.0.19 // indirect
@@ -4674,6 +4819,8 @@ github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkp
 github.com/dustin/go-humanize v1.0.1/go.mod h1:Mu1zIs6XwVuF/gI1OepvI0qD18qycQx+mFykh5fBlto=
 github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f h1:Y/CXytFA4m6baUTXGLOoWe4PQhGxaX0KpnayAqC48p4=
 github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f/go.mod h1:vw97MGsxSvLiUE2X8qFplwetxpGLQrlU1Q9AUEIzCaM=
+github.com/fatih/color v1.18.0 h1:S8gINlzdQ840/4pfAwic/ZE0djQEH3wM94VfqLTZcOM=
+github.com/fatih/color v1.18.0/go.mod h1:4FelSpRwEGDpQ12mAdzqdOukCy4u8WUtOY6lkT/6HfU=
 github.com/google/pprof v0.0.0-20250317173921-a4b03ec1a45e h1:ijClszYn+mADRFY17kjQEVQ1XRhq2/JR1M3sGqeJoxs=
 github.com/google/pprof v0.0.0-20250317173921-a4b03ec1a45e/go.mod h1:boTsfXsheKC2y+lKOCMpSfarhxDeIzfZG1jqGcPl3cA=
 github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
@@ -4684,6 +4831,9 @@ github.com/inconshreveable/mousetrap v1.1.0 h1:wN+x4NVGpMsO7ErUn/mUI3vEoE6Jt13X2
 github.com/inconshreveable/mousetrap v1.1.0/go.mod h1:vpF70FUmC8bwa3OWnCshd2FqLfsEA9PFc4w1p2J65bw=
 github.com/lucasb-eyer/go-colorful v1.3.0 h1:2/yBRLdWBZKrf7gB40FoiKfAWYQ0lqNcbuQwVHXptag=
 github.com/lucasb-eyer/go-colorful v1.3.0/go.mod h1:R4dSotOR9KMtayYi1e77YzuveK+i7ruzyGqttikkLy0=
+github.com/mattn/go-colorable v0.1.13 h1:fFA4WZxdEF4tXPZVKMLwD8oUnCTTo08duU7wxecdEvA=
+github.com/mattn/go-colorable v0.1.13/go.mod h1:7S9/ev0klgBDR4GtXTXX8a3vIGJpMovkB8vQcUbaXHg=
+github.com/mattn/go-isatty v0.0.16/go.mod h1:kYGgaQfpe5nmfYZH+SKPsOc2e4SrIfOl2e/yFXSvRLM=
 github.com/mattn/go-isatty v0.0.20 h1:xfD0iDuEKnDkl03q4limB+vH+GxLEtL/jb4xVJSWWEY=
 github.com/mattn/go-isatty v0.0.20/go.mod h1:W+V8PltTTMOvKvAeJH7IuucS94S2C6jfK/D7dTCTo3Y=
 github.com/mattn/go-localereader v0.0.1 h1:ygSAOl7ZXTx4RdPYinUpg6W99U8jWvWi9Ye2JC/oIi4=
@@ -4727,6 +4877,7 @@ golang.org/x/mod v0.29.0/go.mod h1:NyhrlYXJ2H4eJiRy/WDBO6HMqZQ6q9nk4JzS3NuCK+w=
 golang.org/x/sync v0.17.0 h1:l60nONMj9l5drqw6jlhIELNv9I0A4OFgRsG9k2oT9Ug=
 golang.org/x/sync v0.17.0/go.mod h1:9KTHXmSnoGruLpwFjVSX0lNNA75CykiMECbovNTZqGI=
 golang.org/x/sys v0.0.0-20210809222454-d867a43fc93e/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
+golang.org/x/sys v0.0.0-20220811171246-fbc7d0a398ab/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
 golang.org/x/sys v0.6.0/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
 golang.org/x/sys v0.38.0 h1:3yZWxaJjBmCWXqhN1qh02AkOnCQ1poK6oF+a7xWL6Gc=
 golang.org/x/sys v0.38.0/go.mod h1:OgkHotnGiDImocRcuBABYBEXf8A9a87e/uXjp9XT3ks=
