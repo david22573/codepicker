@@ -39,7 +39,8 @@ func NewTwoPassEngine(
 }
 
 // RunAnalysis performs Phase 2.1: The Analyst (Read-Only)
-func (e *TwoPassEngine) RunAnalysis(ctx context.Context, task, contextFile string) (*interaction.Analysis, error) {
+// UPDATED: Now accepts 'primer string'
+func (e *TwoPassEngine) RunAnalysis(ctx context.Context, task, contextFile, primer string) (*interaction.Analysis, error) {
 	readMap := make(map[string]agent.Tool)
 	var toolDescs strings.Builder
 
@@ -51,7 +52,10 @@ func (e *TwoPassEngine) RunAnalysis(ctx context.Context, task, contextFile strin
 		}
 	}
 
-	systemPrompt := fmt.Sprintf(`You are the CodePicker Analyst.
+	// Inject Primer into System Prompt
+	systemPrompt := fmt.Sprintf(`%s
+
+You are the CodePicker Analyst.
 Your goal is to diagnose the issue described in the TASK.
 You have READ-ONLY access.
 Locate the specific lines of code that need changing.
@@ -64,7 +68,7 @@ Thought: ...
 Action: ...
 Input: ...
 
-When you have found the issue, output your findings as the Final Answer.`, toolDescs.String())
+When you have found the issue, output your findings as the Final Answer.`, primer, toolDescs.String())
 
 	analyst := &ReActAgent{
 		model:       e.model,

@@ -9,8 +9,32 @@ import (
 var xmlToolRegex = regexp.MustCompile(`<invoke name="(.*?)">(.*?)</invoke>`)
 var xmlArgRegex = regexp.MustCompile(`<parameter name="(.*?)">(.*?)</parameter>`)
 
+// Strategy 3: Moonshot/Kimi Special Tokens
+// Matches: <|tool_call_begin|> functions.list_files:0 <|tool_call_argument_begin|> {"path": "."} <|tool_call_end|>
+var kimiToolRegex = regexp.MustCompile(`<\|tool_call_begin\|>\s*(?:functions\.)?([\w_]+)(?::\d+)?\s*<\|tool_call_argument_begin\|>\s*(\{.*?\})\s*<\|tool_call_end\|>`)
+
 // parseReActResponse extracts structured components from various LLM output formats.
 func parseReActResponse(resp string) (thought, tool, args string) {
+	// STRATEGY 3: Check for Kimi/Moonshot Special Tokens
+	// We check this first as it is the most specific and rigid format.
+	if kimiToolRegex.MatchString(resp) {
+		matches := kimiToolRegex.FindStringSubmatch(resp)
+		if len(matches) > 2 {
+			tool = matches[1] // The function name (e.g. list_files)
+			args = matches[2] // The JSON arguments
+
+			// Attempt to capture thought (text before the tool call)
+			loc := kimiToolRegex.FindStringIndex(resp)
+			if loc != nil {
+				thought = strings.TrimSpace(resp[:loc[0]])
+				// Clean up the "section begin" token if present in thought
+				thought = strings.ReplaceAll(thought, "<|tool_calls_section_begin|>", "")
+				thought = strings.TrimSpace(thought)
+			}
+			return
+		}
+	}
+
 	// STRATEGY 1: Check for XML format
 	// This takes priority if the model has drifted into XML mode.
 	if xmlToolRegex.MatchString(resp) {

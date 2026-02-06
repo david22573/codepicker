@@ -41,7 +41,8 @@ func NewAuditor(
 }
 
 // SuggestImprovements scans the codebase and returns a list of actionable tasks.
-func (a *Auditor) SuggestImprovements(ctx context.Context) ([]string, error) {
+// UPDATED: Now accepts a 'primer' string to give the agent immediate context.
+func (a *Auditor) SuggestImprovements(ctx context.Context, primer string) ([]string, error) {
 	// 1. Construct Read-Only Tools
 	toolDescs := ""
 	toolMap := make(map[string]agent.Tool)
@@ -50,8 +51,10 @@ func (a *Auditor) SuggestImprovements(ctx context.Context) ([]string, error) {
 		toolDescs += fmt.Sprintf("- %s: %s\n", t.Name(), t.Description())
 	}
 
-	// 2. Strict System Prompt (FIXED: Added strict One-Shot Example)
-	systemPrompt := fmt.Sprintf(`You are the CodePicker Scout.
+	// 2. Strict System Prompt with Primer
+	systemPrompt := fmt.Sprintf(`%s
+
+You are the CodePicker Scout.
 Your goal is to scan the codebase and identify 3 SAFE, ISOLATED improvements.
 Focus on: Error handling, unused variables, simple refactors, or documentation.
 
@@ -76,7 +79,7 @@ Final Answer:
 TASK: Fix unhandled error in main.go
 TASK: Remove unused import in adapters/parser.go
 
-Begin.`, toolDescs)
+Begin.`, primer, toolDescs)
 
 	// 3. Run the Agent
 	scout := &ReActAgent{

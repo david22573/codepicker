@@ -25,15 +25,13 @@ func NewPlanner(model agent.LLMClient, repo agent.Repository) *Planner {
 }
 
 // CreatePlan generates a new plan based on the task and file context
-// FIX: Updated signature to accept 'fileContext string' instead of '*domain.LLMContext'
-func (p *Planner) CreatePlan(ctx context.Context, taskInput, fileContext string) (*task.Plan, error) {
+// UPDATED: Added 'primer string' to signature
+func (p *Planner) CreatePlan(ctx context.Context, taskInput, fileContext, primer string) (*task.Plan, error) {
 	systemPrompt := `You are the Lead Architect.
 Break down the task into sequential steps.
 STRICTLY only reference files that exist in the PROJECT CONTEXT.
-
 OUTPUT FORMAT:
 Return ONLY raw JSON. Do not include markdown formatting.
-
 EXAMPLE:
 {
   "reasoning": "I need to read X to understand Y...",
@@ -48,8 +46,8 @@ EXAMPLE:
   "estimated_cost": 0.1
 }`
 
-	// Combine the markdown context and the user task into a single string prompt
-	userMessage := fmt.Sprintf("PROJECT CONTEXT:\n%s\n\nTASK: %s", fileContext, taskInput)
+	// Combine the Primer, File Context, and Task into the prompt
+	userMessage := fmt.Sprintf("PROJECT STARTER INFO:\n%s\n\nRELEVANT CODE SNIPPETS:\n%s\n\nTASK: %s", primer, fileContext, taskInput)
 
 	resp, err := p.model.Chat(ctx, systemPrompt, userMessage)
 	if err != nil {
@@ -87,7 +85,8 @@ EXAMPLE:
 
 // OptimizePlan uses AI to refine an existing plan based on feedback
 func (p *Planner) OptimizePlan(ctx context.Context, plan *task.Plan, feedback string) (*task.Plan, error) {
-	systemPrompt := `You are the Lead Architect. Refine the plan based on feedback.
+	systemPrompt := `You are the Lead Architect.
+Refine the plan based on feedback.
 OUTPUT FORMAT: Return ONLY raw JSON matching the original structure.`
 
 	planBytes, _ := json.Marshal(plan)

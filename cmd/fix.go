@@ -9,7 +9,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var fixTargetFile string
+// Local flags to ensure this file compiles independently
+var (
+	fixTargetFile string
+	fixDryRun     bool
+)
 
 var fixCmd = &cobra.Command{
 	Use:   "fix [task]",
@@ -30,8 +34,8 @@ Requires a task description and a target file.`,
 
 		cwd, _ := os.Getwd()
 
-		// FIX: Update NewContainer call signature
-		container, err := app.NewContainer(apiKey, cwd, "", dryRunFlag, ciFlag)
+		// FIX 1: Use local 'fixDryRun' and hardcode CI to false
+		container, err := app.NewContainer(apiKey, cwd, "", fixDryRun, false)
 		if err != nil {
 			fmt.Printf("❌ Container Init Failed: %v\n", err)
 			os.Exit(1)
@@ -47,8 +51,11 @@ Requires a task description and a target file.`,
 		// --- Phase 1: The Analyst ---
 		fmt.Printf("🧐 [ANALYST] Diagnosing issue in %s...\n", fixTargetFile)
 
-		// The Analyst reads the specific file to understand the context
-		analysis, err := container.TwoPassEngine.RunAnalysis(ctx, taskInput, fixTargetFile)
+		// FIX 2: Generate the Project Primer (Map)
+		primer := container.ProjectPrimer.Generate()
+
+		// FIX 3: Pass 'primer' to RunAnalysis (matches new signature)
+		analysis, err := container.TwoPassEngine.RunAnalysis(ctx, taskInput, fixTargetFile, primer)
 		if err != nil {
 			fmt.Printf("❌ Analysis Failed: %v\n", err)
 			os.Exit(1)
@@ -71,7 +78,7 @@ Requires a task description and a target file.`,
 		fmt.Println(patch.Diff)
 
 		// --- Phase 3: Verification (Optional) ---
-		if !dryRunFlag {
+		if !fixDryRun {
 			fmt.Println("\n🧪 [VERIFIER] Verifying patch in sandbox...")
 			result, err := container.Verifier.Verify(ctx, patch.Diff)
 			if err != nil {
@@ -94,5 +101,6 @@ Requires a task description and a target file.`,
 
 func init() {
 	fixCmd.Flags().StringVarP(&fixTargetFile, "file", "f", "", "Target file to analyze and fix")
+	fixCmd.Flags().BoolVar(&fixDryRun, "dry-run", false, "Enable read-only mode")
 	rootCmd.AddCommand(fixCmd)
 }

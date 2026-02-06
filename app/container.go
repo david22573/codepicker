@@ -29,12 +29,13 @@ type Container struct {
 	Verifier         *verifier.Pipeline
 	Git              *git.Client
 	ContextBuilder   *context.SliceBasedBuilder
+	ProjectPrimer    *context.ProjectPrimer
 	WorkspaceManager *fs.WorkspaceManager
 	Repository       *storage.SQLiteRepository
 	SliceStore       contextDomain.SliceStore
 	Logger           *logging.Logger
 	CostTracker      *llm.CostTracker
-	Config           *config.AppConfig // Exposed for CLI usage
+	Config           *config.AppConfig
 }
 
 func NewContainer(apiKey, projectRoot, llmModel string, isDryRun, isCI bool) (*Container, error) {
@@ -98,6 +99,9 @@ func NewContainer(apiKey, projectRoot, llmModel string, isDryRun, isCI bool) (*C
 
 	ctxBuilder := context.NewSliceBasedBuilder(repo, cfg.Agent.MaxContextSize)
 
+	// --- NEW: Init Primer ---
+	primer := context.NewProjectPrimer(projectRoot)
+
 	// 6. Initialize Agents
 	// We inject costTracker into the worker so it can record usage per turn
 	worker := agent.NewReActAgent(llmClient, allTools, guardRail, repo, logger, costTracker)
@@ -105,7 +109,7 @@ func NewContainer(apiKey, projectRoot, llmModel string, isDryRun, isCI bool) (*C
 
 	executor := agent.NewPlanExecutor(worker, repo, workspaceMgr)
 
-	// FIX: Auditor now receives logger and costTracker
+	// FIX: Auditor now receives logger and costTracker (prevents nil pointer crash)
 	auditor := agent.NewAuditor(llmClient, repo, allTools, guardRail, logger, costTracker)
 
 	explainer := agent.NewExplainer(llmClient, repo)
@@ -124,6 +128,7 @@ func NewContainer(apiKey, projectRoot, llmModel string, isDryRun, isCI bool) (*C
 		Verifier:         verifier,
 		Git:              gitClient,
 		ContextBuilder:   ctxBuilder,
+		ProjectPrimer:    primer,
 		WorkspaceManager: workspaceMgr,
 		Repository:       repo,
 		SliceStore:       repo,

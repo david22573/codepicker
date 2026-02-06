@@ -9,6 +9,9 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// Local flag to ensure this file compiles independently
+var improveDryRun bool
+
 var improveCmd = &cobra.Command{
 	Use:   "improve",
 	Short: "Automatically suggest and apply codebase improvements",
@@ -21,19 +24,25 @@ var improveCmd = &cobra.Command{
 
 		cwd, _ := os.Getwd()
 
-		// Initialize the container with current configuration
-		container, err := app.NewContainer(apiKey, cwd, "", dryRunFlag, ciFlag)
+		// FIX 1: Use local 'improveDryRun' and hardcode CI to false
+		container, err := app.NewContainer(apiKey, cwd, "", improveDryRun, false)
 		if err != nil {
 			fmt.Printf("❌ Container Init Failed: %v\n", err)
 			os.Exit(1)
 		}
+		// Defer close to ensure logs flush
+		defer container.Close()
 
 		ctx := context.Background()
 
+		// FIX 2: Generate the Project Primer (Map)
+		fmt.Println("🗺️  Building project map...")
+		primer := container.ProjectPrimer.Generate()
+
 		fmt.Println("📡 [SCOUT] Searching for potential improvements...")
 
-		// The Auditor uses the LLM to scan for safe refactors
-		tasks, err := container.Auditor.SuggestImprovements(ctx)
+		// FIX 3: Pass 'primer' to SuggestImprovements (matches new signature)
+		tasks, err := container.Auditor.SuggestImprovements(ctx, primer)
 		if err != nil {
 			fmt.Printf("❌ Audit Failed: %v\n", err)
 			os.Exit(1)
@@ -54,5 +63,6 @@ var improveCmd = &cobra.Command{
 }
 
 func init() {
+	improveCmd.Flags().BoolVar(&improveDryRun, "dry-run", false, "Enable read-only mode")
 	rootCmd.AddCommand(improveCmd)
 }

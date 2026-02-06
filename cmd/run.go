@@ -12,17 +12,20 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// Local flags to ensure self-contained compilation
 var (
-	dryRunFlag bool
-	ciFlag     bool
-	planIDFlag string
+	runDryRun  bool
+	runCI      bool
+	runPlanID  string
+	runAutoYes bool
 )
 
 var runCmd = &cobra.Command{
 	Use:   "run [task]",
 	Short: "Execute a coding task (via plan)",
 	Run: func(cmd *cobra.Command, args []string) {
-		if planIDFlag == "" && len(args) < 1 {
+		// Validation
+		if runPlanID == "" && len(args) < 1 {
 			ui.PrintError("You must provide a task string OR a --plan <id>")
 			_ = cmd.Usage()
 			os.Exit(1)
@@ -33,8 +36,10 @@ var runCmd = &cobra.Command{
 			taskInput = args[0]
 		}
 
-		if err := executeRun(taskInput, planIDFlag); err != nil {
-			if ciFlag {
+		// Execute
+		if err := executeRun(taskInput, runPlanID); err != nil {
+			if runCI {
+				// JSON Output for CI
 				res := task.CIResult{
 					Status: "failure",
 					Task:   taskInput,
@@ -57,15 +62,15 @@ func executeRun(taskInput, planID string) error {
 
 	cwd, _ := os.Getwd()
 
-	// Initialize Container
-	container, err := app.NewContainer(apiKey, cwd, "", dryRunFlag, ciFlag)
+	// Initialize Container with local flags
+	container, err := app.NewContainer(apiKey, cwd, "", runDryRun, runCI)
 	if err != nil {
 		return err
 	}
 	defer container.Close()
 
-	if !ciFlag {
-		printSafetyBanner(dryRunFlag)
+	if !runCI {
+		printSafetyBanner(runDryRun)
 	}
 
 	ctx := context.Background()
@@ -73,7 +78,8 @@ func executeRun(taskInput, planID string) error {
 
 	// --- Step 1: Planning ---
 	if planID != "" {
-		if !ciFlag {
+		// Load existing plan
+		if !runCI {
 			ui.PrintInfo(fmt.Sprintf("Loading Plan %s...", planID))
 		}
 		p, err := container.Repository.GetPlan(ctx, planID)
@@ -81,18 +87,23 @@ func executeRun(taskInput, planID string) error {
 			return fmt.Errorf("failed to load plan: %w", err)
 		}
 		plan = p
-		if plan.Status == task.StatusCompleted && !ciFlag {
+		if plan.Status == task.StatusCompleted && !runCI {
 			ui.PrintWarning("This plan is already marked as completed.")
 		}
 	} else {
-		if !ciFlag {
+		// Create new plan
+		if !runCI {
 			ui.PrintHeader("Planning Phase")
 
-			// Use Bubble Tea Spinner for the heavy lifting
 			var fileContext string
+			var primer string // New variable for the map
 
+			// Single spinner for context gathering
 			err := ui.RunSpinner("Analyzing project context...", func() error {
 				var innerErr error
+				// FIX 1: Generate Primer
+				primer = container.ProjectPrimer.Generate()
+				// Build semantic context
 				fileContext, innerErr = container.ContextBuilder.BuildForTask(taskInput)
 				return innerErr
 			})
@@ -100,9 +111,11 @@ func executeRun(taskInput, planID string) error {
 				ui.PrintWarning(fmt.Sprintf("Context generation partial: %v", err))
 			}
 
+			// Spinner for plan generation
 			err = ui.RunSpinner("Generating implementation plan...", func() error {
 				var innerErr error
-				plan, innerErr = container.Planner.CreatePlan(ctx, taskInput, fileContext)
+				// FIX 2: Pass 'primer' to CreatePlan (matches new signature)
+				plan, innerErr = container.Planner.CreatePlan(ctx, taskInput, fileContext, primer)
 				return innerErr
 			})
 
@@ -112,16 +125,19 @@ func executeRun(taskInput, planID string) error {
 
 			ui.PrintSuccess(fmt.Sprintf("Plan Generated (ID: %s)", plan.ID))
 
-			// Display Plan Summary using Lipgloss style
+			// Display Plan Summary
 			fmt.Printf("\n%s\n", ui.InfoStyle.Render("Strategy: "+plan.Reasoning))
 			for i, step := range plan.Steps {
 				fmt.Printf("   %d. %s\n", i+1, step.Description)
 			}
 			fmt.Println()
+
 		} else {
-			// CI Mode - Silent
+			// CI Mode - Silent execution
+			primer := container.ProjectPrimer.Generate()
 			fileContext, _ := container.ContextBuilder.BuildForTask(taskInput)
-			p, err := container.Planner.CreatePlan(ctx, taskInput, fileContext)
+			// Pass primer here too
+			p, err := container.Planner.CreatePlan(ctx, taskInput, fileContext, primer)
 			if err != nil {
 				return err
 			}
@@ -130,15 +146,15 @@ func executeRun(taskInput, planID string) error {
 	}
 
 	// --- Step 2: Execution ---
-	if !ciFlag {
+	if !runCI {
 		ui.PrintHeader("Execution Phase")
 	}
 
-	// We don't use a spinner here because the agent logs real-time steps to stdout
+	// Execute Plan
 	execErr := container.PlanExecutor.Execute(ctx, plan)
 
 	// --- Step 3: Reporting ---
-	if ciFlag {
+	if runCI {
 		return handleCIOutput(plan, execErr)
 	}
 
@@ -154,6 +170,8 @@ func executeRun(taskInput, planID string) error {
 	ui.PrintSuccess("Task Completed Successfully.")
 	return nil
 }
+
+// Helper functions
 
 func printSafetyBanner(isDryRun bool) {
 	if isDryRun {
@@ -206,8 +224,9 @@ func handleCIOutput(plan *task.Plan, execErr error) error {
 }
 
 func init() {
-	runCmd.Flags().BoolVar(&dryRunFlag, "dry-run", false, "Enable read-only mode")
-	runCmd.Flags().BoolVar(&ciFlag, "ci", false, "Enable CI mode (JSON output, no prompts, strict safety)")
-	runCmd.Flags().StringVar(&planIDFlag, "plan", "", "Execute a specific pre-generated plan ID")
+	runCmd.Flags().BoolVar(&runDryRun, "dry-run", false, "Enable read-only mode")
+	runCmd.Flags().BoolVar(&runCI, "ci", false, "Enable CI mode (JSON output, no prompts, strict safety)")
+	runCmd.Flags().StringVar(&runPlanID, "plan", "", "Execute a specific pre-generated plan ID")
+	runCmd.Flags().BoolVarP(&runAutoYes, "yes", "y", false, "Skip confirmation prompts")
 	rootCmd.AddCommand(runCmd)
 }
