@@ -7,26 +7,38 @@ import (
 
 	"github.com/david22573/codepicker/domain/agent"
 	"github.com/david22573/codepicker/domain/interaction"
+	"github.com/david22573/codepicker/infra/llm"
+	"github.com/david22573/codepicker/infra/logging"
 )
 
 type TwoPassEngine struct {
-	model  agent.LLMClient
-	repo   agent.Repository
-	tools  []agent.Tool
-	policy agent.Policy
+	model       agent.LLMClient
+	repo        agent.Repository
+	tools       []agent.Tool
+	policy      agent.Policy
+	logger      *logging.Logger
+	costTracker *llm.CostTracker
 }
 
-func NewTwoPassEngine(model agent.LLMClient, repo agent.Repository, tools []agent.Tool, policy agent.Policy) *TwoPassEngine {
+func NewTwoPassEngine(
+	model agent.LLMClient,
+	repo agent.Repository,
+	tools []agent.Tool,
+	policy agent.Policy,
+	logger *logging.Logger,
+	costTracker *llm.CostTracker,
+) *TwoPassEngine {
 	return &TwoPassEngine{
-		model:  model,
-		repo:   repo,
-		tools:  tools,
-		policy: policy,
+		model:       model,
+		repo:        repo,
+		tools:       tools,
+		policy:      policy,
+		logger:      logger,
+		costTracker: costTracker,
 	}
 }
 
 // RunAnalysis performs Phase 2.1: The Analyst (Read-Only)
-// FIX: Signature now accepts (task, contextFile string) to match cmd/fix.go usage
 func (e *TwoPassEngine) RunAnalysis(ctx context.Context, task, contextFile string) (*interaction.Analysis, error) {
 	readMap := make(map[string]agent.Tool)
 	var toolDescs strings.Builder
@@ -55,12 +67,14 @@ Input: ...
 When you have found the issue, output your findings as the Final Answer.`, toolDescs.String())
 
 	analyst := &ReActAgent{
-		model:   e.model,
-		tools:   readMap,
-		policy:  e.policy,
-		repo:    e.repo,
-		sysMsg:  systemPrompt,
-		maxTurn: 8,
+		model:       e.model,
+		tools:       readMap,
+		policy:      e.policy,
+		repo:        e.repo,
+		sysMsg:      systemPrompt,
+		maxTurn:     8,
+		logger:      e.logger,      // FIX: Injected Logger
+		costTracker: e.costTracker, // FIX: Injected CostTracker
 	}
 
 	input := fmt.Sprintf("TASK: %s\n\nStart by reading: %s", task, contextFile)
@@ -81,14 +95,12 @@ When you have found the issue, output your findings as the Final Answer.`, toolD
 func (e *TwoPassEngine) GeneratePatch(ctx context.Context, task string, analysis *interaction.Analysis) (*interaction.Patch, error) {
 	systemPrompt := `You are the CodePicker Engineer.
 Your goal is to write a Git Unified Diff to fix the issue described.
-
 RULES FOR DIFF GENERATION:
 1. Start with 'diff --git a/file b/file'.
 2. Use standard '--- a/file' and '+++ b/file' headers.
 3. INCLUDE 3 LINES OF CONTEXT around every change. Git apply will fail without context.
 4. Do not omit lines with "...".
 5. Ensure the indentation matches the original file exactly.
-
 Output ONLY the raw diff content. No markdown wrappers.`
 
 	userPrompt := fmt.Sprintf("TASK: %s\n\nANALYSIS:\n%s", task, analysis.Markdown)
@@ -109,7 +121,6 @@ func (e *TwoPassEngine) RefinePatch(ctx context.Context, task string, analysis *
 	systemPrompt := `You are the CodePicker Repair Engineer.
 Your previous patch failed to apply.
 Analyze the error message and correct the patch.
-
 RULES:
 1. Keep the standard Git Unified Diff format.
 2. Fix context lines or indentation based on the error.

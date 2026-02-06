@@ -9,7 +9,7 @@ import (
 	"github.com/david22573/codepicker/adapters/policy"
 	"github.com/david22573/codepicker/adapters/tools"
 	"github.com/david22573/codepicker/adapters/verifier"
-	"github.com/david22573/codepicker/domain/config" // Import Config
+	"github.com/david22573/codepicker/domain/config"
 	contextDomain "github.com/david22573/codepicker/domain/context"
 	"github.com/david22573/codepicker/infra/fs"
 	"github.com/david22573/codepicker/infra/git"
@@ -81,7 +81,6 @@ func NewContainer(apiKey, projectRoot, llmModel string, isDryRun, isCI bool) (*C
 	gitClient := git.NewClient(projectRoot, isDryRun)
 
 	// 3. Initialize LLM & Cost Tracker with Config
-	// Note: You'll need to update NewOpenRouterAdapter signature in infra/llm next!
 	llmClient := llm.NewOpenRouterAdapter(apiKey, cfg.LLM.Model, time.Duration(cfg.LLM.TimeoutSeconds)*time.Second)
 
 	// Initialize Cost Tracker with limits
@@ -105,9 +104,15 @@ func NewContainer(apiKey, projectRoot, llmModel string, isDryRun, isCI bool) (*C
 	planner := agent.NewPlanner(llmClient, repo)
 
 	executor := agent.NewPlanExecutor(worker, repo, workspaceMgr)
-	auditor := agent.NewAuditor(llmClient, repo, allTools, guardRail)
+
+	// FIX: Auditor now receives logger and costTracker
+	auditor := agent.NewAuditor(llmClient, repo, allTools, guardRail, logger, costTracker)
+
 	explainer := agent.NewExplainer(llmClient, repo)
-	twoPass := agent.NewTwoPassEngine(llmClient, repo, allTools, guardRail)
+
+	// FIX: TwoPassEngine now receives logger and costTracker
+	twoPass := agent.NewTwoPassEngine(llmClient, repo, allTools, guardRail, logger, costTracker)
+
 	verifier := verifier.NewPipeline(projectRoot)
 
 	return &Container{

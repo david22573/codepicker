@@ -9,21 +9,34 @@ import (
 
 	"github.com/david22573/codepicker/domain/agent"
 	"github.com/david22573/codepicker/domain/audit"
+	"github.com/david22573/codepicker/infra/llm"
+	"github.com/david22573/codepicker/infra/logging"
 )
 
 type Auditor struct {
-	model  agent.LLMClient
-	repo   agent.Repository
-	tools  []agent.Tool
-	policy agent.Policy
+	model       agent.LLMClient
+	repo        agent.Repository
+	tools       []agent.Tool
+	policy      agent.Policy
+	logger      *logging.Logger
+	costTracker *llm.CostTracker
 }
 
-func NewAuditor(model agent.LLMClient, repo agent.Repository, tools []agent.Tool, policy agent.Policy) *Auditor {
+func NewAuditor(
+	model agent.LLMClient,
+	repo agent.Repository,
+	tools []agent.Tool,
+	policy agent.Policy,
+	logger *logging.Logger,
+	costTracker *llm.CostTracker,
+) *Auditor {
 	return &Auditor{
-		model:  model,
-		repo:   repo,
-		tools:  tools,
-		policy: policy,
+		model:       model,
+		repo:        repo,
+		tools:       tools,
+		policy:      policy,
+		logger:      logger,
+		costTracker: costTracker,
 	}
 }
 
@@ -67,12 +80,14 @@ Begin.`, toolDescs)
 
 	// 3. Run the Agent
 	scout := &ReActAgent{
-		model:   a.model,
-		tools:   toolMap,
-		policy:  a.policy, // Strict Read-Only
-		repo:    a.repo,
-		sysMsg:  systemPrompt,
-		maxTurn: 8,
+		model:       a.model,
+		tools:       toolMap,
+		policy:      a.policy, // Strict Read-Only
+		repo:        a.repo,
+		sysMsg:      systemPrompt,
+		maxTurn:     8,
+		logger:      a.logger,      // FIX: Injected Logger
+		costTracker: a.costTracker, // FIX: Injected CostTracker
 	}
 
 	fmt.Println("📡 [SCOUT] Scanning for improvements...")
@@ -130,12 +145,14 @@ Begin.`, toolDescs)
 
 	// 2. Create an Ephemeral Agent for this Audit
 	auditAgent := &ReActAgent{
-		model:   a.model,
-		tools:   toolMap,
-		policy:  a.policy, // This must be the ReadOnly policy
-		repo:    a.repo,
-		sysMsg:  systemPrompt,
-		maxTurn: 10,
+		model:       a.model,
+		tools:       toolMap,
+		policy:      a.policy, // This must be the ReadOnly policy
+		repo:        a.repo,
+		sysMsg:      systemPrompt,
+		maxTurn:     10,
+		logger:      a.logger,      // FIX: Injected Logger
+		costTracker: a.costTracker, // FIX: Injected CostTracker
 	}
 
 	// 3. Run the Agent
