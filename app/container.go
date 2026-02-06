@@ -9,6 +9,7 @@ import (
 	"github.com/david22573/codepicker/adapters/policy"
 	"github.com/david22573/codepicker/adapters/tools"
 	"github.com/david22573/codepicker/adapters/verifier"
+	"github.com/david22573/codepicker/domain/config" // Import Config
 	contextDomain "github.com/david22573/codepicker/domain/context"
 	"github.com/david22573/codepicker/infra/fs"
 	"github.com/david22573/codepicker/infra/git"
@@ -32,7 +33,8 @@ type Container struct {
 	Repository       *storage.SQLiteRepository
 	SliceStore       contextDomain.SliceStore
 	Logger           *logging.Logger
-	CostTracker      *llm.CostTracker // Phase 3: Exposed for CLI summaries
+	CostTracker      *llm.CostTracker
+	Config           *config.AppConfig // Exposed for CLI usage
 }
 
 func NewContainer(apiKey, projectRoot, llmModel string, isDryRun, isCI bool) (*Container, error) {
@@ -47,9 +49,24 @@ func NewContainer(apiKey, projectRoot, llmModel string, isDryRun, isCI bool) (*C
 		return nil, err
 	}
 
+	// 2. Load Configuration
+	configPath := filepath.Join(projectRoot, "config.json")
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		logger.Warn("Failed to load config.json, using defaults", zap.Error(err))
+		cfg = config.DefaultConfig()
+	}
+
+	// Override model if provided via CLI
+	if llmModel != "" {
+		cfg.LLM.Model = llmModel
+	}
+
 	logger.Info("Initializing CodePicker Container",
 		zap.String("mode", logEnv),
-		zap.String("root", projectRoot))
+		zap.String("root", projectRoot),
+		zap.String("model", cfg.LLM.Model),
+		zap.Bool("dry_run", isDryRun))
 
 	hiddenDir := filepath.Join(projectRoot, ".codepicker")
 	dbPath := filepath.Join(hiddenDir, "state.db")
@@ -61,38 +78,33 @@ func NewContainer(apiKey, projectRoot, llmModel string, isDryRun, isCI bool) (*C
 	}
 
 	workspaceMgr := fs.NewWorkspaceManager(projectRoot)
-	gitClient := git.NewClient(projectRoot)
+	gitClient := git.NewClient(projectRoot, isDryRun)
 
-	// 2. Initialize LLM & Cost Tracker
-	selectedModel := "moonshotai/kimi-k2.5"
-	if llmModel != "" {
-		selectedModel = llmModel
-	}
-	llmClient := llm.NewOpenRouterAdapter(apiKey, selectedModel)
+	// 3. Initialize LLM & Cost Tracker with Config
+	// Note: You'll need to update NewOpenRouterAdapter signature in infra/llm next!
+	llmClient := llm.NewOpenRouterAdapter(apiKey, cfg.LLM.Model, time.Duration(cfg.LLM.TimeoutSeconds)*time.Second)
 
-	// Phase 3: Initialize Cost Tracker (Estimates for Kimi/Moonshot: ~$0.30 input / $0.60 output)
-	costTracker := llm.NewCostTracker(0.3, 0.6)
+	// Initialize Cost Tracker with limits
+	costTracker := llm.NewCostTracker(cfg.LLM.InputCostPer1M, cfg.LLM.OutputCostPer1M)
 
-	// 3. Initialize Infrastructure
+	// 4. Initialize Infrastructure
 	shadowMgr := fs.NewShadowManager(projectRoot)
-	shellExec := shell.NewExecutor(30*time.Second, 5000)
+	shellExec := shell.NewExecutor(30*time.Second, 5000, isDryRun)
 	allTools := tools.DefaultSet(shadowMgr, shellExec, projectRoot)
 
-	// 4. Initialize Security Policy
+	// 5. Initialize Security Policy
 	policyPath := filepath.Join(projectRoot, "policy.json")
 	policyConfig, _ := policy.LoadPolicy(policyPath)
 	guardRail := policy.NewEnforcer(*policyConfig, isDryRun)
 
-	ctxBuilder := context.NewSliceBasedBuilder(repo, 16000)
+	ctxBuilder := context.NewSliceBasedBuilder(repo, cfg.Agent.MaxContextSize)
 
-	// 5. Initialize Agents with Dependencies
-	// Note: We inject costTracker into the worker so it can record usage per turn
+	// 6. Initialize Agents
+	// We inject costTracker into the worker so it can record usage per turn
 	worker := agent.NewReActAgent(llmClient, allTools, guardRail, repo, logger, costTracker)
 	planner := agent.NewPlanner(llmClient, repo)
 
-	// Note: We inject workspaceMgr into the executor to enable Transaction/Rollback support
 	executor := agent.NewPlanExecutor(worker, repo, workspaceMgr)
-
 	auditor := agent.NewAuditor(llmClient, repo, allTools, guardRail)
 	explainer := agent.NewExplainer(llmClient, repo)
 	twoPass := agent.NewTwoPassEngine(llmClient, repo, allTools, guardRail)
@@ -112,6 +124,7 @@ func NewContainer(apiKey, projectRoot, llmModel string, isDryRun, isCI bool) (*C
 		SliceStore:       repo,
 		Logger:           logger,
 		CostTracker:      costTracker,
+		Config:           cfg,
 	}, nil
 }
 

@@ -13,16 +13,23 @@ import (
 type Executor struct {
 	Timeout   time.Duration
 	MaxOutput int
+	DryRun    bool
 }
 
-func NewExecutor(timeout time.Duration, maxOutput int) *Executor {
+func NewExecutor(timeout time.Duration, maxOutput int, dryRun bool) *Executor {
 	return &Executor{
 		Timeout:   timeout,
 		MaxOutput: maxOutput,
+		DryRun:    dryRun,
 	}
 }
 
 func (e *Executor) Run(ctx context.Context, command string, args ...string) (string, error) {
+	// Safety Check: Dry Run
+	if e.DryRun {
+		return fmt.Sprintf("[DRY-RUN] Would execute: %s %v", command, args), nil
+	}
+
 	// Create a context with timeout if one isn't already set
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc

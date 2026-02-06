@@ -11,14 +11,23 @@ import (
 // Client wraps git command line operations.
 type Client struct {
 	ProjectRoot string
+	DryRun      bool
 }
 
-func NewClient(root string) *Client {
-	return &Client{ProjectRoot: root}
+func NewClient(root string, dryRun bool) *Client {
+	return &Client{
+		ProjectRoot: root,
+		DryRun:      dryRun,
+	}
 }
 
 // StageAll runs 'git add .' to stage all changes.
 func (c *Client) StageAll() error {
+	if c.DryRun {
+		fmt.Println("🔒 [DRY-RUN] Skipping 'git add .'")
+		return nil
+	}
+
 	cmd := exec.Command("git", "add", ".")
 	cmd.Dir = c.ProjectRoot
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -30,6 +39,11 @@ func (c *Client) StageAll() error {
 // Commit creates a new commit with the provenance message.
 func (c *Client) Commit(p *audit.Provenance) (string, error) {
 	msg := p.FormatCommitMessage()
+
+	if c.DryRun {
+		fmt.Printf("🔒 [DRY-RUN] Would commit with message:\n%s\n", msg)
+		return "dry-run-hash", nil
+	}
 
 	// We use the -m flag. For very large messages, passing via stdin is safer,
 	// but for metadata this is sufficient.

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -59,7 +60,6 @@ FORMAT RULES:
 4. STRICTLY FORBIDDEN: Do not use XML tags like <invoke> or <function_calls>.
 5. Do NOT output Markdown code blocks for the whole response.
 6. Wait for the [SYSTEM] Observation before proceeding.
-
 EXAMPLE INTERACTION:
 Thought: I need to read the main file to understand the entry point.
 Action: read_file
@@ -94,6 +94,16 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 	execID := fmt.Sprintf("exec-%d", time.Now().Unix())
 	auditTrail := audit.NewAuditTrail(execID)
 
+	// FIX: Ensure audit trail is saved even if we panic or error out early
+	defer func() {
+		savePath := filepath.Join(".codepicker", "audit", fmt.Sprintf("%s.json", execID))
+		// Ensure dir exists
+		_ = os.MkdirAll(filepath.Dir(savePath), 0755)
+		if err := auditTrail.Save(savePath); err != nil {
+			a.logger.Error("Failed to save audit trail", zap.Error(err))
+		}
+	}()
+
 	// Create a context-aware logger
 	logger := a.logger.WithContext(ctx)
 
@@ -109,6 +119,9 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 
 	for i := 0; i < a.maxTurn; i++ {
 		logger.Debug("Starting Turn", zap.Int("turn", i+1))
+
+		// Record LLM Request start
+		auditTrail.Record("llm_request", map[string]interface{}{"turn": i + 1})
 
 		// Phase 3: Cost Tracking Integration
 		// We use type assertion to check if the model supports usage tracking
@@ -130,12 +143,13 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 		}
 
 		if err != nil {
+			auditTrail.Record("error", map[string]interface{}{"phase": "llm_chat", "error": err.Error()})
 			return "", errors.NewLLM("agent.Run", err)
 		}
 
 		thought, toolName, toolArgs := parseReActResponse(response)
 
-		auditTrail.Record("turn", map[string]interface{}{
+		auditTrail.Record("turn_decision", map[string]interface{}{
 			"turn_id": i + 1,
 			"thought": thought,
 			"tool":    toolName,
@@ -148,9 +162,8 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 			execution.Finish()
 			_ = a.repo.SaveExecution(ctx, execution)
 
-			// Save Audit Trail to disk
-			auditTrail.Record("finish", map[string]interface{}{"result": response})
-			_ = auditTrail.Save(filepath.Join(".codepicker", "audit", fmt.Sprintf("%s.json", execID)))
+			// Record success before saving in defer
+			auditTrail.Record("finish", map[string]interface{}{"result": response, "status": "success"})
 
 			return response, nil
 		}
@@ -160,6 +173,8 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 		if !allowed {
 			toolOut := fmt.Sprintf("Error: Policy Violation: %s", reason)
 			logger.Warn("Guardrail Blocked Action", zap.String("tool", toolName), zap.String("reason", reason))
+
+			auditTrail.Record("policy_block", map[string]interface{}{"tool": toolName, "reason": reason})
 
 			currentContext += fmt.Sprintf("\nThought: %s\nAction: %s\nInput: %s\nObservation: %s\n", thought, toolName, toolArgs, toolOut)
 			continue
@@ -177,6 +192,12 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 			duration := time.Since(startTime)
 			logger.LogToolExecution(toolName, toolArgs, duration, err)
 
+			auditTrail.Record("tool_execution", map[string]interface{}{
+				"tool":        toolName,
+				"duration_ms": duration.Milliseconds(),
+				"success":     err == nil,
+			})
+
 			if err != nil {
 				toolOut = fmt.Sprintf("Error: %v", err)
 			}
@@ -188,5 +209,6 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 		currentContext += fmt.Sprintf("\nThought: %s\nAction: %s\nInput: %s\nObservation: %s\n", thought, toolName, toolArgs, toolOut)
 	}
 
+	auditTrail.Record("timeout", map[string]interface{}{"max_turns": a.maxTurn})
 	return "", errors.NewSystem("agent.Run", fmt.Sprintf("Max turns (%d) exceeded", a.maxTurn), nil)
 }

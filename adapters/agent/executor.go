@@ -25,16 +25,22 @@ func NewPlanExecutor(worker agent.Agent, repo agent.Repository, ws *fs.Workspace
 }
 
 func (e *PlanExecutor) Execute(ctx context.Context, plan *task.Plan) error {
+	// Start Transaction
 	txn, err := e.workspaceMgr.BeginTransaction()
 	if err != nil {
 		return fmt.Errorf("failed to start transaction: %w", err)
 	}
 
+	// FIX: Robust rollback defer
+	// If Execute returns before txn.Commit(), this will automatically rollback changes.
 	defer func() {
-		// Updated to access the exported 'Committed' field
 		if !txn.Committed {
-			fmt.Println("⚠️  [SYSTEM] Error detected. Rolling back changes...")
-			txn.Rollback()
+			fmt.Println("⚠️  [SYSTEM] Plan execution failed or interrupted. Rolling back filesystem changes...")
+			if err := txn.Rollback(); err != nil {
+				fmt.Printf("❌ [CRITICAL] Rollback failed: %v\n", err)
+			} else {
+				fmt.Println("✅ [SYSTEM] Rollback complete. Filesystem restored.")
+			}
 		}
 	}()
 
@@ -48,9 +54,14 @@ func (e *PlanExecutor) Execute(ctx context.Context, plan *task.Plan) error {
 
 		fmt.Printf("\n🔹 [PLANNER] STEP %d/%d: %s\n", step.ID, len(plan.Steps), step.Description)
 
-		// Before execution, backup files
+		// Backup relevant files before the agent touches them
+		// FIX: We now check errors here. If backup fails, we abort immediately to be safe.
 		for _, file := range step.Files {
-			txn.BackupFile(file)
+			if err := txn.BackupFile(file); err != nil {
+				plan.Status = task.StatusFailed
+				_ = e.repo.SavePlan(ctx, plan)
+				return fmt.Errorf("backup failed for %s: %w", file, err)
+			}
 		}
 
 		workerInput := fmt.Sprintf("%s\n\nFocus on these files: %v", step.Instruction, step.Files)
@@ -60,13 +71,14 @@ func (e *PlanExecutor) Execute(ctx context.Context, plan *task.Plan) error {
 			plan.MarkStepFailed(step.ID, err)
 			plan.Status = task.StatusFailed
 			_ = e.repo.SavePlan(ctx, plan)
-			return err // Triggers rollback
+			return err // Triggers rollback via defer
 		}
 
 		plan.MarkStepComplete(step.ID, result)
 		_ = e.repo.SavePlan(ctx, plan)
 	}
 
+	// Success! Commit the transaction.
 	txn.Commit()
 	plan.Status = task.StatusCompleted
 	return e.repo.SavePlan(ctx, plan)

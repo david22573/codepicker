@@ -2,20 +2,20 @@ package llm
 
 import (
 	"bytes"
-	"context" // Standard library context (REQUIRED)
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"time"
 
-	domainContext "github.com/david22573/codepicker/domain/context" // Aliased to prevent collision
+	domainContext "github.com/david22573/codepicker/domain/context"
 	"github.com/david22573/codepicker/domain/errors"
 )
 
 const openRouterURL = "https://openrouter.ai/api/v1/chat/completions"
 
-// OpenRouterAdapter implements domain.agent.LLMClient with reliability features.
+// OpenRouterAdapter implements agent.LLMClient using OpenRouter API.
 type OpenRouterAdapter struct {
 	apiKey         string
 	model          string
@@ -23,107 +23,123 @@ type OpenRouterAdapter struct {
 	circuitBreaker *CircuitBreaker
 }
 
-// NewOpenRouterAdapter creates a client with a circuit breaker configuration.
-func NewOpenRouterAdapter(apiKey, model string) *OpenRouterAdapter {
+// NewOpenRouterAdapter initializes the client with config-defined timeout and a standard circuit breaker.
+func NewOpenRouterAdapter(apiKey, model string, timeout time.Duration) *OpenRouterAdapter {
 	return &OpenRouterAdapter{
 		apiKey: apiKey,
 		model:  model,
-		// Increased timeout to 120s for "reasoning" models that take longer to start
-		client: &http.Client{Timeout: 120 * time.Second},
-		// Circuit breaker trips after 5 failures, resets after 1 minute of probation
-		circuitBreaker: NewCircuitBreaker(5, 1*time.Minute),
+		client: &http.Client{
+			Timeout: timeout,
+		},
+		// Initialize Circuit Breaker: 5 failures allowed, 1 minute reset timeout
+		circuitBreaker: NewCircuitBreaker(5, 60*time.Second),
 	}
 }
 
-// ChatWithUsage returns the response text along with token metrics for cost tracking.
-func (c *OpenRouterAdapter) ChatWithUsage(ctx context.Context, systemPrompt, userMsg string) (string, domainContext.TokenUsage, error) {
-	var result string
-	var usage domainContext.TokenUsage
-
-	// Execute the request inside the circuit breaker
-	err := c.circuitBreaker.Execute(func() error {
-		// Use a closure to capture the return values
-		resp, use, err := c.doChat(ctx, systemPrompt, userMsg)
-		if err != nil {
-			return err
-		}
-		result = resp
-		usage = use
-		return nil
-	})
-
-	return result, usage, err
+type chatRequest struct {
+	Model    string    `json:"model"`
+	Messages []message `json:"messages"`
 }
 
-// Chat fulfills the standard interface, discarding usage metrics.
-func (c *OpenRouterAdapter) Chat(ctx context.Context, systemPrompt, userMsg string) (string, error) {
-	resp, _, err := c.ChatWithUsage(ctx, systemPrompt, userMsg)
+type message struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type chatResponse struct {
+	Choices []struct {
+		Message message `json:"message"`
+	} `json:"choices"`
+	Usage struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
+	} `json:"usage"`
+	Error *struct {
+		Message string `json:"message"`
+	} `json:"error,omitempty"`
+}
+
+// Chat implements the basic LLMClient interface.
+func (o *OpenRouterAdapter) Chat(ctx context.Context, systemPrompt, userPrompt string) (string, error) {
+	resp, _, err := o.ChatWithUsage(ctx, systemPrompt, userPrompt)
 	return resp, err
 }
 
-// doChat performs the actual HTTP request logic.
-func (c *OpenRouterAdapter) doChat(ctx context.Context, systemPrompt, userMsg string) (string, domainContext.TokenUsage, error) {
-	reqBody := map[string]interface{}{
-		"model": c.model,
-		"messages": []map[string]string{
-			{"role": "system", "content": systemPrompt},
-			{"role": "user", "content": userMsg},
+// ChatWithUsage implements the extended interface for cost tracking.
+func (o *OpenRouterAdapter) ChatWithUsage(ctx context.Context, systemPrompt, userPrompt string) (string, domainContext.TokenUsage, error) {
+	reqBody := chatRequest{
+		Model: o.model,
+		Messages: []message{
+			{Role: "system", Content: systemPrompt},
+			{Role: "user", Content: userPrompt},
 		},
-		"temperature": 0.1, // Low temp for deterministic code generation
 	}
 
-	jsonBytes, err := json.Marshal(reqBody)
+	jsonBody, err := json.Marshal(reqBody)
 	if err != nil {
 		return "", domainContext.TokenUsage{}, errors.NewSystem("llm.Chat", "failed to marshal request", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", openRouterURL, bytes.NewBuffer(jsonBytes))
-	if err != nil {
-		return "", domainContext.TokenUsage{}, errors.NewSystem("llm.Chat", "failed to create request", err)
+	var responseContent string
+	var usage domainContext.TokenUsage
+
+	// Wrap the network call in the Circuit Breaker
+	opErr := o.circuitBreaker.Execute(func() error {
+		req, err := http.NewRequestWithContext(ctx, "POST", openRouterURL, bytes.NewBuffer(jsonBody))
+		if err != nil {
+			return errors.NewSystem("llm.Chat", "failed to create request", err)
+		}
+
+		req.Header.Set("Authorization", "Bearer "+o.apiKey)
+		req.Header.Set("Content-Type", "application/json")
+		// Optional: Site URL and Title for OpenRouter rankings
+		req.Header.Set("HTTP-Referer", "https://github.com/david22573/codepicker")
+		req.Header.Set("X-Title", "CodePicker")
+
+		resp, err := o.client.Do(req)
+		if err != nil {
+			return errors.NewLLM("llm.Chat", fmt.Errorf("network request failed: %w", err))
+		}
+		defer resp.Body.Close()
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return errors.NewSystem("llm.Chat", "failed to read response body", err)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			return errors.NewLLM("llm.Chat", fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body)))
+		}
+
+		var chatResp chatResponse
+		if err := json.Unmarshal(body, &chatResp); err != nil {
+			return errors.NewSystem("llm.Chat", "failed to parse response json", err)
+		}
+
+		if chatResp.Error != nil {
+			return errors.NewLLM("llm.Chat", fmt.Errorf("api returned error: %s", chatResp.Error.Message))
+		}
+
+		if len(chatResp.Choices) == 0 {
+			return errors.NewLLM("llm.Chat", fmt.Errorf("received empty choices from API"))
+		}
+
+		responseContent = chatResp.Choices[0].Message.Content
+
+		// Capture usage stats
+		usage = domainContext.TokenUsage{
+			PromptTokens:     chatResp.Usage.PromptTokens,
+			CompletionTokens: chatResp.Usage.CompletionTokens,
+			TotalTokens:      chatResp.Usage.TotalTokens,
+		}
+
+		return nil
+	})
+
+	if opErr != nil {
+		return "", domainContext.TokenUsage{}, opErr
 	}
 
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("HTTP-Referer", "https://github.com/david22573/codepicker")
-	req.Header.Set("X-Title", "CodePicker")
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return "", domainContext.TokenUsage{}, errors.NewLLM("llm.Chat", err)
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-
-	// Handle non-200 status codes
-	if resp.StatusCode != http.StatusOK {
-		return "", domainContext.TokenUsage{}, errors.NewLLM("llm.Chat", fmt.Errorf("API error %d: %s", resp.StatusCode, string(body)))
-	}
-
-	// Parse the response
-	var apiResp struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-		Usage domainContext.TokenUsage `json:"usage"` // Capture token usage
-		Error *struct {
-			Message string `json:"message"`
-		} `json:"error,omitempty"`
-	}
-
-	if err := json.Unmarshal(body, &apiResp); err != nil {
-		return "", domainContext.TokenUsage{}, errors.NewSystem("llm.Chat", fmt.Sprintf("failed to parse response: %s", string(body)), err)
-	}
-
-	if apiResp.Error != nil {
-		return "", domainContext.TokenUsage{}, errors.NewLLM("llm.Chat", fmt.Errorf("provider error: %s", apiResp.Error.Message))
-	}
-
-	if len(apiResp.Choices) == 0 {
-		return "", domainContext.TokenUsage{}, errors.NewLLM("llm.Chat", fmt.Errorf("received empty choices from API"))
-	}
-
-	return apiResp.Choices[0].Message.Content, apiResp.Usage, nil
+	return responseContent, usage, nil
 }

@@ -34,11 +34,13 @@ func NewCircuitBreaker(threshold int, timeout time.Duration) *CircuitBreaker {
 
 // Execute runs the given function behind the circuit breaker protection.
 func (cb *CircuitBreaker) Execute(fn func() error) error {
+	// 1. Check State (Hold Lock briefly)
 	cb.mu.Lock()
-	if cb.state == StateOpen {
-		// Check if enough time has passed to try again
+	currentState := cb.state
+	if currentState == StateOpen {
 		if time.Since(cb.lastFailureTime) > cb.resetTimeout {
 			cb.state = StateHalfOpen
+			currentState = StateHalfOpen
 		} else {
 			cb.mu.Unlock()
 			return fmt.Errorf("circuit breaker is open: LLM service temporarily disabled")
@@ -46,9 +48,11 @@ func (cb *CircuitBreaker) Execute(fn func() error) error {
 	}
 	cb.mu.Unlock()
 
-	// Execute the actual operation (e.g., the LLM API call)
+	// 2. Execute Operation (NO LOCK - Concurrency allowed!)
+	// This was the critical fix: previously the lock was held here.
 	err := fn()
 
+	// 3. Update State based on result (Hold Lock briefly)
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
 
@@ -62,22 +66,17 @@ func (cb *CircuitBreaker) Execute(fn func() error) error {
 		}
 
 		// If we were testing the waters (Half-Open) and failed, go back to Open immediately
-		if cb.state == StateHalfOpen {
+		if currentState == StateHalfOpen {
 			cb.state = StateOpen
-			// Reset timer to force full wait
 			cb.lastFailureTime = time.Now()
 		}
 
 		return err
 	}
 
-	// Success! Reset everything
-	if cb.state == StateHalfOpen {
-		// If we succeeded in Half-Open, the service is healthy again
+	// Success! Reset everything if we were shaky or just keep clean
+	if currentState == StateHalfOpen || currentState == StateClosed {
 		cb.state = StateClosed
-		cb.failureCount = 0
-	} else if cb.state == StateClosed {
-		// Normal success, just keep failure count clean
 		cb.failureCount = 0
 	}
 

@@ -203,15 +203,15 @@ func shouldPack(path string, d fs.DirEntry, limit int64) bool {
 	allowed := map[string]bool{
 		".go": true, ".mod": true, ".sum": true,
 		".md": false, ".json": true, ".yaml": true, ".yml": true,
-		".sql": true, ".sh": true, ".txt": true, ".toml": true,
+		".sql": true, ".sh": false, ".txt": true, ".toml": true,
 		".html": true, ".css": true, ".js": true, ".ts": true,
 		".tsx": true, ".jsx": true, ".py": true, ".c": true, ".h": true,
 		".dockerfile": false,
 	}
 
 	specialFiles := map[string]bool{
-		"makefile": true, "dockerfile": true, "license": true,
-		"readme": true, "changelog": true, "notice": true,
+		"makefile": true, "dockerfile": true, "license": false,
+		"readme": false, "changelog": true, "notice": false,
 	}
 
 	if allowed[ext] {

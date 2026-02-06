@@ -1,0 +1,16 @@
+{
+  "llm": {
+    "model": "moonshotai/kimi-k2.5",
+    "timeout_seconds": 120,
+    "max_tokens": 16000,
+    "temperature": 0.1,
+    "input_cost_per_1m": 0.30,
+    "output_cost_per_1m": 0.60,
+    "budget_cap": 2.00
+  },
+  "agent": {
+    "max_turns": 20,
+    "use_reflexion": true,
+    "max_context_size": 128000
+  }
+}
