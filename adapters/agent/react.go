@@ -18,7 +18,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// ReActAgent implements domain.agent.Agent using the ReAct pattern. [cite: 40]
+// ReActAgent implements domain.agent.Agent using the ReAct pattern.
 type ReActAgent struct {
 	model       agent.LLMClient
 	tools       map[string]agent.Tool
@@ -36,7 +36,7 @@ func NewReActAgent(
 	policy agent.Policy,
 	repo agent.Repository,
 	logger *logging.Logger,
-	costTracker *llm.CostTracker, // Injected dependency [cite: 40]
+	costTracker *llm.CostTracker, // Injected dependency
 ) *ReActAgent {
 	toolMap := make(map[string]agent.Tool)
 	var toolDescs strings.Builder
@@ -48,20 +48,20 @@ func NewReActAgent(
 
 	systemPrompt := fmt.Sprintf(`You are CodePicker, an autonomous coding agent.
 You verify every step. You never hallucinate filenames.
-You operate in a loop: THOUGHT -> ACTION -> OBSERVATION. [cite: 41]
+You operate in a loop: THOUGHT -> ACTION -> OBSERVATION.
 
 AVAILABLE TOOLS:
 %s
 
-FORMAT RULES: [cite: 42]
+FORMAT RULES:
 1. Output "Thought:", then "Action:", then "Input:".
 2. "Action" must be a single tool name (e.g. read_file).
 3. "Input" must be valid JSON single-line.
-4. STRICTLY FORBIDDEN: Do not use XML tags like <invoke> or <function_calls>. [cite: 43]
+4. STRICTLY FORBIDDEN: Do not use XML tags like <invoke> or <function_calls>.
 5. Do NOT output Markdown code blocks for the whole response.
-6. Wait for the [SYSTEM] Observation before proceeding. [cite: 44]
+6. Wait for the [SYSTEM] Observation before proceeding.
 
-EXAMPLE INTERACTION: [cite: 45]
+EXAMPLE INTERACTION:
 Thought: I need to read the main file to understand the entry point.
 Action: read_file
 Input: {"path": "main.go"}
@@ -85,17 +85,17 @@ func (a *ReActAgent) Name() string {
 }
 
 func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) {
-	// Phase 1: Validation [cite: 46]
+	// Phase 1: Validation
 	validator := validation.NewValidator()
 	if err := validator.ValidateTask(taskInput); err != nil {
 		return "", fmt.Errorf("invalid task: %w", err)
 	}
 
-	// Phase 3: Audit Trail Initialization [cite: 47]
+	// Phase 3: Audit Trail Initialization
 	execID := fmt.Sprintf("exec-%d", time.Now().Unix())
 	auditTrail := audit.NewAuditTrail(execID)
 
-	// FIX: Ensure audit trail is saved even if we panic or error out early [cite: 47]
+	// FIX: Ensure audit trail is saved even if we panic or error out early
 	defer func() {
 		savePath := filepath.Join(".codepicker", "audit", fmt.Sprintf("%s.json", execID))
 		_ = os.MkdirAll(filepath.Dir(savePath), 0755)
@@ -106,7 +106,7 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 
 	logger := a.logger.WithContext(ctx)
 	execution := agent.NewExecution(execID, "adhoc-plan")
-	logger.Info("Agent Run Started", zap.String("task", taskInput), zap.String("execution_id", execID)) [cite: 48]
+	logger.Info("Agent Run Started", zap.String("task", taskInput), zap.String("execution_id", execID))
 
 	if err := a.repo.SaveExecution(ctx, execution); err != nil {
 		return "", err
@@ -115,11 +115,11 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 	auditTrail.Record("start", map[string]interface{}{"task": taskInput})
 	currentContext := fmt.Sprintf("TASK: %s\n", taskInput)
 
-	for i := 0; i < a.maxTurn; i++ { [cite: 49]
+	for i := 0; i < a.maxTurn; i++ {
 		logger.Debug("Starting Turn", zap.Int("turn", i+1))
 		auditTrail.Record("llm_request", map[string]interface{}{"turn": i + 1})
 
-		// Phase 3: Cost Tracking Integration [cite: 50]
+		// Phase 3: Cost Tracking Integration
 		var response string
 		var err error
 		var usage domainContext.TokenUsage
@@ -159,7 +159,7 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 			return response, nil
 		}
 
-		// Phase 1: Security & Policy Check [cite: 51]
+		// Phase 1: Security & Policy Check
 		allowed, reason := a.policy.CanExecute(toolName, toolArgs)
 		if !allowed {
 			toolOut := fmt.Sprintf("Error: Policy Violation: %s", reason)
@@ -170,7 +170,7 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 			continue
 		}
 
-		// Tool Execution [cite: 51]
+		// Tool Execution
 		tool, exists := a.tools[toolName]
 		var toolOut string
 		startTime := time.Now()
@@ -193,17 +193,18 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 			}
 		}
 
-		// Record the full output in the DB for audit [cite: 51]
+		// Record the full output in the DB for audit
 		execution.RecordTurn(thought, toolName, toolArgs, toolOut)
 		_ = a.repo.SaveExecution(ctx, execution)
 
 		// TRUNCATION FIX: Cap the observation size added to LLM context to stop Turn 2 freezes.
+		// We use a 2000 character limit to keep the prompt size manageable while keeping full logs in the DB.
 		contextObservation := toolOut
 		if len(contextObservation) > 2000 {
 			contextObservation = contextObservation[:2000] + "... (truncated for context safety)"
 		}
 
-		currentContext += fmt.Sprintf("\nThought: %s\nAction: %s\nInput: %s\nObservation: %s\n", 
+		currentContext += fmt.Sprintf("\nThought: %s\nAction: %s\nInput: %s\nObservation: %s\n",
 			thought, toolName, toolArgs, contextObservation)
 	}
 
