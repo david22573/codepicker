@@ -2,252 +2,144 @@ package context
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 
-	"github.com/david22573/codepicker/domain/errors"
+	"github.com/david22573/codepicker/domain/context"
 )
 
-// Config defines the rules for context generation
-type Config struct {
-	MaxTokens       int
-	IncludePatterns []string
-	ExcludePatterns []string
-	ProjectRoot     string
+// SliceBasedBuilder finds the most relevant code chunks for a specific prompt
+type SliceBasedBuilder struct {
+	store     context.SliceStore
+	maxTokens int
 }
 
-type Builder struct{}
-
-func NewBuilder() *Builder {
-	return &Builder{}
+// NewSliceBasedBuilder initializes the builder with a persistence store and token limit
+func NewSliceBasedBuilder(store context.SliceStore, maxTokens int) *SliceBasedBuilder {
+	return &SliceBasedBuilder{
+		store:     store,
+		maxTokens: maxTokens,
+	}
 }
 
-// Build generates a markdown string containing the project context
-func (b *Builder) Build(cfg Config) (string, error) {
-	var sb strings.Builder
+// BuildForTask extracts keywords from the task and retrieves relevant slices from the store
+func (b *SliceBasedBuilder) BuildForTask(taskDescription string) (string, error) {
+	keywords := b.extractKeywords(taskDescription)
 
-	// 1. Discovery: Collect all candidate files
-	candidates, err := b.scanProject(cfg)
+	// Increased MaxResults to give the ranker more to work with
+	query := context.SliceQuery{
+		Keywords:   keywords,
+		MaxResults: 60,
+	}
+
+	slices, err := b.store.Query(query)
 	if err != nil {
-		return "", errors.NewSystem("context.Build", "scan failed", err)
+		return "", fmt.Errorf("failed to query slices: %w", err)
 	}
 
-	// 2. The Map: Generate and append the file tree first
-	// This gives the LLM a high-level mental model before reading code
-	sb.WriteString("# Project Context\n\n")
-	sb.WriteString("## File Tree\n")
-	sb.WriteString("```text\n")
-	sb.WriteString(b.generateTree(candidates))
-	sb.WriteString("```\n\n")
+	ranked := b.rankSlices(slices, keywords)
+	selected := b.packSlices(ranked, b.maxTokens)
 
-	// 3. Smart Sort: Prioritize Core Logic over Implementation Details
-	// (e.g. main.go and domain/ interfaces come before infrastructure)
-	sort.SliceStable(candidates, func(i, j int) bool {
-		return scoreFile(candidates[i]) > scoreFile(candidates[j])
-	})
-
-	// 4. Content Dump: Read files and enforce budget
-	sb.WriteString("## Source Code\n\n")
-
-	currentTokens := 0
-	filesProcessed := 0
-
-	for _, relPath := range candidates {
-		fullPath := filepath.Join(cfg.ProjectRoot, relPath)
-
-		// OPTIMIZATION: Check file metadata before reading content
-		info, err := os.Stat(fullPath)
-		if err != nil {
-			continue // Skip if file is gone or unreadable
-		}
-
-		// Heuristic: Code usually averages 3.5 chars/token.
-		// We use size/3 to be safe on the upper bound.
-		estTokens := int(info.Size()) / 3
-
-		// Add header tokens overhead
-		estTokens += 20
-
-		// Stop if this file would exceed the limit
-		if cfg.MaxTokens > 0 && currentTokens+estTokens > cfg.MaxTokens {
-			sb.WriteString(fmt.Sprintf("\n> ⚠️ Context limit reached (%d/%d tokens). Skipping remaining %d files.\n",
-				currentTokens, cfg.MaxTokens, len(candidates)-filesProcessed))
-			break
-		}
-
-		// Only NOW do we pay the cost of reading the file into memory
-		content, err := os.ReadFile(fullPath)
-		if err != nil {
-			continue
-		}
-
-		// Determine language for syntax highlighting
-		lang := detectLanguage(relPath)
-
-		// Use XML-style wrapping for clearer boundary detection by Agents
-		sb.WriteString(fmt.Sprintf("<file path=\"%s\">\n", relPath))
-		sb.WriteString(fmt.Sprintf("```%s\n", lang))
-		sb.WriteString(string(content))
-		sb.WriteString("\n```\n")
-		sb.WriteString("</file>\n\n")
-
-		currentTokens += estTokens
-		filesProcessed++
-	}
-
-	return sb.String(), nil
+	return b.formatContext(selected), nil
 }
 
-// scanProject walks the directory and applies include/exclude rules
-func (b *Builder) scanProject(cfg Config) ([]string, error) {
-	var candidates []string
+// rankSlices scores code chunks based on keyword matches in symbols and content
+func (b *SliceBasedBuilder) rankSlices(slices []context.CodeSlice, keywords []string) []context.CodeSlice {
+	type scoredSlice struct {
+		slice context.CodeSlice
+		score int
+	}
 
-	err := filepath.Walk(cfg.ProjectRoot, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil
-		}
-		if info.IsDir() {
-			// Always exclude hidden dirs and known huge vendor folders
-			if strings.HasPrefix(info.Name(), ".") && info.Name() != "." {
-				return filepath.SkipDir
-			}
-			if info.Name() == "vendor" || info.Name() == "node_modules" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
+	scored := make([]scoredSlice, len(slices))
+	for i, s := range slices {
+		score := 0
+		for _, kw := range keywords {
+			lowerKw := strings.ToLower(kw)
 
-		relPath, _ := filepath.Rel(cfg.ProjectRoot, path)
-		filename := filepath.Base(path)
-
-		// Check User Excludes
-		for _, pat := range cfg.ExcludePatterns {
-			// 1. Check strict path match (e.g. "cmd/internal")
-			matchedPath, _ := filepath.Match(pat, relPath)
-
-			// 2. Check filename match (e.g. "*.log" or "go.sum")
-			matchedName, _ := filepath.Match(pat, filename)
-
-			// 3. FIX: Check directory prefix match
-			// If pat is "tmp", this ensures we match "tmp/file.go"
-			// We add PathSeparator to ensure "temp" doesn't match "templates/file.go"
-			dirPrefix := pat + string(os.PathSeparator)
-			matchedDir := strings.HasPrefix(relPath, dirPrefix)
-
-			if matchedPath || matchedName || matchedDir {
-				return nil // Skip this file
-			}
-		}
-
-		// Check User Includes (if specified)
-		if len(cfg.IncludePatterns) > 0 {
-			included := false
-			for _, pat := range cfg.IncludePatterns {
-				matched, _ := filepath.Match(pat, relPath)
-				if matched {
-					included = true
-					break
+			// Symbols (func/struct names) are highest priority
+			for _, sym := range s.Symbols {
+				if strings.Contains(strings.ToLower(sym), lowerKw) {
+					score += 20
 				}
 			}
-			if !included {
-				return nil
+
+			// Content matches
+			if strings.Contains(strings.ToLower(s.Content), lowerKw) {
+				score += 5
+			}
+
+			// File path matches
+			if strings.Contains(strings.ToLower(s.FilePath), lowerKw) {
+				score += 10
 			}
 		}
+		scored[i] = scoredSlice{s, score}
+	}
 
-		candidates = append(candidates, relPath)
-		return nil
+	sort.Slice(scored, func(i, j int) bool {
+		return scored[i].score > scored[j].score
 	})
 
-	return candidates, err
+	result := make([]context.CodeSlice, len(scored))
+	for i, s := range scored {
+		result[i] = s.slice
+	}
+	return result
 }
 
-// generateTree creates a visual representation of the selected files
-func (b *Builder) generateTree(files []string) string {
-	// Re-sort alphabetically for the tree view only
-	treeFiles := make([]string, len(files))
-	copy(treeFiles, files)
-	sort.Strings(treeFiles)
+// packSlices fits as many high-scoring slices as possible into the token limit
+func (b *SliceBasedBuilder) packSlices(slices []context.CodeSlice, maxTokens int) []context.CodeSlice {
+	var selected []context.CodeSlice
+	totalTokens := 0
 
-	var sb strings.Builder
-	for _, f := range treeFiles {
-		sb.WriteString(fmt.Sprintf("├── %s\n", f))
+	for _, s := range slices {
+		// More conservative estimation: ~3 characters per token for code
+		estTokens := len(s.Content) / 3
+		if totalTokens+estTokens > maxTokens {
+			continue
+		}
+		selected = append(selected, s)
+		totalTokens += estTokens
 	}
+
+	return selected
+}
+
+// formatContext renders the selected slices into a single Markdown block
+func (b *SliceBasedBuilder) formatContext(slices []context.CodeSlice) string {
+	var sb strings.Builder
+	sb.WriteString("# RELEVANT CODE CONTEXT\n")
+	sb.WriteString("The following code units were selected based on your current task.\n\n")
+
+	byFile := make(map[string][]context.CodeSlice)
+	for _, s := range slices {
+		byFile[s.FilePath] = append(byFile[s.FilePath], s)
+	}
+
+	for path, fileSlices := range byFile {
+		sb.WriteString(fmt.Sprintf("## File: %s\n", path))
+		for _, s := range fileSlices {
+			sb.WriteString(fmt.Sprintf("### %s (Lines %d-%d)\n", s.SliceType, s.StartLine, s.EndLine))
+			sb.WriteString("```go\n")
+			sb.WriteString(s.Content)
+			sb.WriteString("\n```\n")
+		}
+		sb.WriteString("\n---\n")
+	}
+
 	return sb.String()
 }
 
-// scoreFile assigns a priority score. Higher is better.
-func scoreFile(path string) int {
-	base := strings.ToLower(filepath.Base(path))
-	dir := strings.ToLower(filepath.Dir(path))
-
-	score := 10 // Default score
-
-	// CRITICAL: Entry points and configuration
-	if base == "main.go" || base == "go.mod" || base == "makefile" {
-		return 100
+// extractKeywords cleans the task input for better search matching
+func (b *SliceBasedBuilder) extractKeywords(text string) []string {
+	stopWords := map[string]bool{"the": true, "for": true, "fix": true, "add": true, "and": true, "with": true, "how": true}
+	words := strings.Fields(strings.ToLower(text))
+	var keywords []string
+	for _, w := range words {
+		w = strings.Trim(w, ".,!?;:\"'")
+		if len(w) > 2 && !stopWords[w] {
+			keywords = append(keywords, w)
+		}
 	}
-
-	// HIGH: Domain logic (Interfaces & Entities)
-	if strings.Contains(dir, "domain") {
-		return 80
-	}
-
-	// MEDIUM-HIGH: Command definitions
-	if strings.Contains(dir, "cmd") {
-		return 70
-	}
-
-	// MEDIUM: Core Adapters (Business logic implementation)
-	if strings.Contains(dir, "adapters") {
-		return 60
-	}
-
-	// LOW: Infrastructure (Details)
-	if strings.Contains(dir, "infra") {
-		return 40
-	}
-
-	// LOWEST: Tests
-	if strings.HasSuffix(base, "_test.go") {
-		return 0
-	}
-
-	return score
-}
-
-// detectLanguage maps file extensions to markdown language identifiers
-func detectLanguage(path string) string {
-	ext := strings.ToLower(filepath.Ext(path))
-	base := strings.ToLower(filepath.Base(path))
-
-	switch {
-	case base == "makefile":
-		return "makefile"
-	case base == "dockerfile":
-		return "dockerfile"
-	case ext == ".go":
-		return "go"
-	case ext == ".js":
-		return "javascript"
-	case ext == ".ts":
-		return "typescript"
-	case ext == ".json":
-		return "json"
-	case ext == ".md":
-		return "markdown"
-	case ext == ".yml", ext == ".yaml":
-		return "yaml"
-	case ext == ".html":
-		return "html"
-	case ext == ".css":
-		return "css"
-	case ext == ".sh":
-		return "bash"
-	case ext == ".sql":
-		return "sql"
-	default:
-		return "text"
-	}
+	return keywords
 }

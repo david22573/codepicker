@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/david22573/codepicker/domain/errors"
 )
 
 // ChangeType indicates the nature of the file operation
@@ -44,19 +46,25 @@ func (s *FileChangeSummary) String() string {
 
 // Diff analyzes the differences between the shadow file and the real file
 func (s *ShadowManager) Diff(relPath string) (*FileChangeSummary, error) {
-	shadowPath := filepath.Join(s.ProjectRoot, ShadowDir, relPath)
-	realPath := filepath.Join(s.ProjectRoot, relPath)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-	// 1. Read Shadow (Must exist)
+	cleanPath, err := s.sanitizePath(relPath)
+	if err != nil {
+		return nil, err
+	}
+
+	shadowPath := filepath.Join(s.ProjectRoot, ShadowDir, cleanPath)
+	realPath := filepath.Join(s.ProjectRoot, cleanPath)
+
 	shadowContent, err := os.ReadFile(shadowPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("shadow file does not exist: %s", relPath)
+			return nil, fmt.Errorf("shadow file does not exist: %s", cleanPath)
 		}
 		return nil, err
 	}
 
-	// 2. Read Real (Might not exist)
 	realContent, err := os.ReadFile(realPath)
 	isNew := os.IsNotExist(err)
 
@@ -64,7 +72,7 @@ func (s *ShadowManager) Diff(relPath string) (*FileChangeSummary, error) {
 
 	if isNew {
 		return &FileChangeSummary{
-			Path:       relPath,
+			Path:       cleanPath,
 			Type:       ChangeNew,
 			OldLines:   0,
 			NewLines:   shadowLines,
@@ -72,10 +80,9 @@ func (s *ShadowManager) Diff(relPath string) (*FileChangeSummary, error) {
 		}, nil
 	}
 
-	// 3. Compare for Modification
 	if bytes.Equal(shadowContent, realContent) {
 		return &FileChangeSummary{
-			Path:     relPath,
+			Path:     cleanPath,
 			Type:     ChangeNoOp,
 			OldLines: shadowLines,
 			NewLines: shadowLines,
@@ -84,7 +91,7 @@ func (s *ShadowManager) Diff(relPath string) (*FileChangeSummary, error) {
 
 	realLines := countLines(realContent)
 	return &FileChangeSummary{
-		Path:       relPath,
+		Path:       cleanPath,
 		Type:       ChangeModified,
 		OldLines:   realLines,
 		NewLines:   shadowLines,
@@ -92,6 +99,38 @@ func (s *ShadowManager) Diff(relPath string) (*FileChangeSummary, error) {
 	}, nil
 }
 
+// Apply moves a file from shadow to real FS (The "Commit" action)
+// Updated with Mutex and Sanitization for Phase 1.1
+func (s *ShadowManager) Apply(relPath string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cleanPath, err := s.sanitizePath(relPath)
+	if err != nil {
+		return err
+	}
+
+	shadowPath := filepath.Join(s.ProjectRoot, ShadowDir, cleanPath)
+	realPath := filepath.Join(s.ProjectRoot, cleanPath)
+
+	content, err := os.ReadFile(shadowPath)
+	if err != nil {
+		return errors.NewValidation("fs.Apply", "shadow file not found: "+cleanPath)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(realPath), 0755); err != nil {
+		return errors.NewSystem("fs.Apply", "failed to create dirs", err)
+	}
+
+	if err := os.WriteFile(realPath, content, 0644); err != nil {
+		return errors.NewSystem("fs.Apply", "failed to write real file", err)
+	}
+
+	_ = os.Remove(shadowPath)
+	return nil
+}
+
+// Helper for Diff
 func countLines(data []byte) int {
 	sc := bufio.NewScanner(bytes.NewReader(data))
 	count := 0

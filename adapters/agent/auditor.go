@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/david22573/codepicker/domain/agent"
@@ -26,9 +27,81 @@ func NewAuditor(model agent.LLMClient, repo agent.Repository, tools []agent.Tool
 	}
 }
 
+// SuggestImprovements scans the codebase and returns a list of actionable tasks.
+func (a *Auditor) SuggestImprovements(ctx context.Context) ([]string, error) {
+	// 1. Construct Read-Only Tools
+	toolDescs := ""
+	toolMap := make(map[string]agent.Tool)
+	for _, t := range a.tools {
+		toolMap[t.Name()] = t
+		toolDescs += fmt.Sprintf("- %s: %s\n", t.Name(), t.Description())
+	}
+
+	// 2. Strict System Prompt (FIXED: Added strict One-Shot Example)
+	systemPrompt := fmt.Sprintf(`You are the CodePicker Scout.
+Your goal is to scan the codebase and identify 3 SAFE, ISOLATED improvements.
+Focus on: Error handling, unused variables, simple refactors, or documentation.
+
+AVAILABLE TOOLS:
+%s
+
+RULES:
+1. You MUST use tools to see the code. Do not guess.
+2. You MUST follow the ReAct format exactly.
+3. Your Final Answer must ONLY be the list of tasks.
+
+FORMAT EXAMPLE (Follow this exactly):
+Thought: I need to see the file structure.
+Action: list_files
+Input: {"path": "."}
+(System adds Observation...)
+Thought: I see main.go. I should check it for errors.
+Action: read_file
+Input: {"path": "main.go"}
+...
+Final Answer:
+TASK: Fix unhandled error in main.go
+TASK: Remove unused import in adapters/parser.go
+
+Begin.`, toolDescs)
+
+	// 3. Run the Agent
+	scout := &ReActAgent{
+		model:   a.model,
+		tools:   toolMap,
+		policy:  a.policy, // Strict Read-Only
+		repo:    a.repo,
+		sysMsg:  systemPrompt,
+		maxTurn: 8,
+	}
+
+	fmt.Println("📡 [SCOUT] Scanning for improvements...")
+	result, err := scout.Run(ctx, "Find 3 safe improvements in the current directory.")
+	if err != nil {
+		return nil, err
+	}
+
+	// 4. Parse the output into a slice
+	var tasks []string
+	lines := strings.Split(result, "\n")
+	for _, line := range lines {
+		clean := strings.TrimSpace(line)
+		// We look for lines starting with TASK: (case insensitive to be safe)
+		if strings.HasPrefix(strings.ToUpper(clean), "TASK:") {
+			// Extract the text after "TASK:"
+			parts := strings.SplitN(clean, ":", 2)
+			if len(parts) == 2 {
+				tasks = append(tasks, strings.TrimSpace(parts[1]))
+			}
+		}
+	}
+
+	return tasks, nil
+}
+
+// RunAudit performs the detailed security/quality analysis.
 func (a *Auditor) RunAudit(ctx context.Context, input string) (*audit.Report, error) {
 	// 1. Construct the Auditor Persona
-	// We override the default ReAct system prompt here to focus on analysis
 	toolDescs := ""
 	toolMap := make(map[string]agent.Tool)
 	for _, t := range a.tools {
@@ -56,14 +129,13 @@ Input: <json_args>
 Begin.`, toolDescs)
 
 	// 2. Create an Ephemeral Agent for this Audit
-	// We manually construct the ReActAgent struct to inject the custom prompt
 	auditAgent := &ReActAgent{
 		model:   a.model,
 		tools:   toolMap,
 		policy:  a.policy, // This must be the ReadOnly policy
 		repo:    a.repo,
 		sysMsg:  systemPrompt,
-		maxTurn: 10, // Audits shouldn't loop forever
+		maxTurn: 10,
 	}
 
 	// 3. Run the Agent

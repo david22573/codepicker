@@ -1,46 +1,70 @@
 package app
 
 import (
-	"fmt"
-	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/david22573/codepicker/adapters/agent"
-	contextBuilder "github.com/david22573/codepicker/adapters/context"
+	"github.com/david22573/codepicker/adapters/context"
 	"github.com/david22573/codepicker/adapters/policy"
 	"github.com/david22573/codepicker/adapters/tools"
-	domainAgent "github.com/david22573/codepicker/domain/agent"
+	"github.com/david22573/codepicker/adapters/verifier"
+	contextDomain "github.com/david22573/codepicker/domain/context"
 	"github.com/david22573/codepicker/infra/fs"
+	"github.com/david22573/codepicker/infra/git"
 	"github.com/david22573/codepicker/infra/llm"
+	"github.com/david22573/codepicker/infra/logging"
 	"github.com/david22573/codepicker/infra/shell"
 	"github.com/david22573/codepicker/infra/storage"
+	"go.uber.org/zap"
 )
 
-// Container holds the wired dependencies
 type Container struct {
-	Planner        *agent.Planner
-	PlanExecutor   *agent.PlanExecutor
-	Auditor        *agent.Auditor
-	Explainer      *agent.Explainer // <--- Phase 4: Added Explainer
-	ContextBuilder *contextBuilder.Builder
-	Repository     domainAgent.Repository
+	Planner          *agent.Planner
+	PlanExecutor     *agent.PlanExecutor
+	Auditor          *agent.Auditor
+	Explainer        *agent.Explainer
+	TwoPassEngine    *agent.TwoPassEngine
+	Verifier         *verifier.Pipeline
+	Git              *git.Client
+	ContextBuilder   *context.SliceBasedBuilder
+	WorkspaceManager *fs.WorkspaceManager
+	Repository       *storage.SQLiteRepository // Changed to pointer to avoid lock copy
+	SliceStore       contextDomain.SliceStore
+	Logger           *logging.Logger
 }
 
-// NewContainer initializes the entire application stack
 func NewContainer(apiKey, projectRoot, llmModel string, isDryRun, isCI bool) (*Container, error) {
-	// ... [Infrastructure setup remains same] ...
-	hiddenDir := filepath.Join(projectRoot, ".codepicker")
-	if err := os.MkdirAll(hiddenDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create .codepicker dir: %w", err)
-	}
-	dbPath := filepath.Join(hiddenDir, "state.db")
-	repo, err := storage.NewSQLiteRepository(dbPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to init sqlite: %w", err)
+	// 1. Initialize Logger
+	logEnv := "development"
+	if isCI {
+		logEnv = "production"
 	}
 
-	selectedModel := "liquid/lfm-2.5-1.2b-thinking:free"
+	logger, err := logging.NewLogger(logEnv)
+	if err != nil {
+		return nil, err
+	}
+
+	// Fixed: Use zap fields instead of map
+	logger.Info("Initializing CodePicker Container",
+		zap.String("mode", logEnv),
+		zap.String("root", projectRoot))
+
+	hiddenDir := filepath.Join(projectRoot, ".codepicker")
+	dbPath := filepath.Join(hiddenDir, "state.db")
+
+	repo, err := storage.NewSQLiteRepository(dbPath)
+	if err != nil {
+		// Fixed: Use zap fields
+		logger.Error("Database initialization failed", zap.Error(err))
+		return nil, err
+	}
+
+	workspaceMgr := fs.NewWorkspaceManager(projectRoot)
+	_ = git.NewClient(projectRoot)
+
+	selectedModel := "moonshotai/kimi-k2.5"
 	if llmModel != "" {
 		selectedModel = llmModel
 	}
@@ -48,35 +72,37 @@ func NewContainer(apiKey, projectRoot, llmModel string, isDryRun, isCI bool) (*C
 
 	shadowMgr := fs.NewShadowManager(projectRoot)
 	shellExec := shell.NewExecutor(30*time.Second, 5000)
-
 	allTools := tools.DefaultSet(shadowMgr, shellExec, projectRoot)
-	strictPolicy := policy.NewStrictPolicy(isDryRun, isCI)
-	worker := agent.NewReActAgent(llmClient, allTools, strictPolicy, repo)
 
+	policyPath := filepath.Join(projectRoot, "policy.json")
+	policyConfig, _ := policy.LoadPolicy(policyPath)
+	guardRail := policy.NewEnforcer(*policyConfig, isDryRun)
+
+	ctxBuilder := context.NewSliceBasedBuilder(repo, 16000)
+
+	// Updated to pass logger
+	worker := agent.NewReActAgent(llmClient, allTools, guardRail, repo, logger)
 	planner := agent.NewPlanner(llmClient, repo)
 	executor := agent.NewPlanExecutor(worker, repo)
 
-	// Phase 1 Auditor
-	auditPolicy := policy.NewStrictPolicy(true, false)
-	var readTools []domainAgent.Tool
-	for _, t := range allTools {
-		if t.Name() != "write_file" && t.Name() != "run_cmd" {
-			readTools = append(readTools, t)
-		}
-	}
-	auditor := agent.NewAuditor(llmClient, repo, readTools, auditPolicy)
-
-	// Phase 4: Explainer
-	explainer := agent.NewExplainer(llmClient, repo)
-
-	ctxBuilder := contextBuilder.NewBuilder()
-
 	return &Container{
-		Planner:        planner,
-		PlanExecutor:   executor,
-		Auditor:        auditor,
-		Explainer:      explainer, // <--- Wired here
-		ContextBuilder: ctxBuilder,
-		Repository:     repo,
+		Planner:          planner,
+		PlanExecutor:     executor,
+		ContextBuilder:   ctxBuilder,
+		WorkspaceManager: workspaceMgr,
+		Repository:       repo, // Pass pointer, do not dereference
+		SliceStore:       repo,
+		Logger:           logger,
 	}, nil
+}
+
+// Close ensures all resources (DB, Logger) are flushed and closed properly
+func (c *Container) Close() {
+	if c.Logger != nil {
+		c.Logger.Info("Shutting down container...")
+		c.Logger.Sync()
+	}
+	if c.Repository != nil {
+		c.Repository.Close()
+	}
 }

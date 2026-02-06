@@ -4,132 +4,175 @@ import (
 	"bufio"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
-	"github.com/david22573/codepicker/adapters/context" // Ensure this matches your folder structure
+	"github.com/david22573/codepicker/app"
+	ctxDomain "github.com/david22573/codepicker/domain/context"
+	"github.com/david22573/codepicker/infra/indexer"
 	"github.com/spf13/cobra"
 )
 
 var (
-	ctxMaxTokens int
-	ctxInclude   []string
-	ctxExclude   []string
-	skeletonMode bool // Defined for future use, but currently unused in Config
+	ctxInclude []string
+	ctxExclude []string
 )
 
-// contextCmd represents the context command namespace
+// contextCmd represents the base command for context management
 var contextCmd = &cobra.Command{
 	Use:   "context",
-	Short: "Manage execution context",
+	Short: "Manage the semantic code index and execution context",
 }
 
-var contextBuildCmd = &cobra.Command{
-	Use:   "build",
-	Short: "Generate a deterministic context file for the agent",
+// contextIndexCmd triggers the semantic indexing with your ignore logic
+var contextIndexCmd = &cobra.Command{
+	Use:   "index [directory]",
+	Short: "Scan and index the codebase using ignore patterns",
+	Args:  cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return fmt.Errorf("could not determine current working directory: %w", err)
+		targetDir := "."
+		if len(args) > 0 {
+			targetDir = args[0]
 		}
 
-		// 1. Initialize Excludes with reasonable defaults
-		// We always want to ignore .git and the context file itself
-		finalExcludes := []string{".git", ".git/*", "codepicker_context.md"}
+		apiKey := os.Getenv("OPENROUTER_API_KEY")
+		cwd, _ := os.Getwd()
 
-		// 2. Load .gitignore (Safety)
+		container, err := app.NewContainer(apiKey, cwd, "", false, false)
+		if err != nil {
+			return fmt.Errorf("failed to initialize container: %w", err)
+		}
+
+		// --- Your Original Ignore Logic ---
+		finalExcludes := []string{".git", ".git/*", ".codepicker/*"}
+
 		if gitIgnore, err := readIgnoreFile(".gitignore"); err == nil {
 			finalExcludes = append(finalExcludes, gitIgnore...)
 			fmt.Printf("🛡️  Loaded %d patterns from .gitignore\n", len(gitIgnore))
 		}
 
-		// 3. Load .codepickerignore (Noise Reduction)
-		// This allows you to exclude things like go.sum, *.svg, etc.
 		if cpIgnore, err := readIgnoreFile(".codepickerignore"); err == nil {
 			finalExcludes = append(finalExcludes, cpIgnore...)
 			fmt.Printf("👁️  Loaded %d patterns from .codepickerignore\n", len(cpIgnore))
 		}
-
-		// 4. Append CLI flags (Manual overrides)
 		finalExcludes = append(finalExcludes, ctxExclude...)
 
-		builder := context.NewBuilder()
+		fmt.Printf("🔍 Indexing codebase at: %s (respecting ignore patterns)\n", targetDir)
 
-		// Construct the config
-		// Note: We are passing ctxMaxTokens directly.
-		// If it is 0, the builder must handle it as "Unlimited".
-		config := context.Config{
-			ProjectRoot:     cwd,
-			MaxTokens:       ctxMaxTokens,
-			IncludePatterns: ctxInclude,
-			ExcludePatterns: finalExcludes,
-			// Skeleton: skeletonMode, // TODO: Add this field to context.Config if you implement skeleton logic later
+		// --- Semantic Indexing (Phase 2 & 5) ---
+		slicer := indexer.NewCodeSlicer()
+		manager := indexer.NewIndexManager(slicer, container.SliceStore)
+
+		if err := manager.IndexDirectory(targetDir); err != nil {
+			return fmt.Errorf("indexing failed: %w", err)
 		}
 
-		// UX: nice output message
-		limitMsg := fmt.Sprintf("%d tokens", ctxMaxTokens)
-		if ctxMaxTokens == 0 {
-			limitMsg = "Unlimited"
-		}
-		fmt.Printf("📦 Building context (Limit: %s)...\n", limitMsg)
+		stats, _ := container.SliceStore.GetStats()
+		fmt.Printf("\n✅ Indexing complete! Total Slices: %d across %d files.\n",
+			stats.TotalSlices, stats.TotalFiles)
 
-		// 5. Build
-		output, err := builder.Build(config)
-		if err != nil {
-			return fmt.Errorf("failed to build context: %w", err)
-		}
-
-		// 6. Write Output
-		outFile := "codepicker_context.md"
-		// Ensure we write to the root we scanned, or use a flag for output path if desired
-		outPath := filepath.Join(cwd, outFile)
-
-		if err := os.WriteFile(outPath, []byte(output), 0644); err != nil {
-			return fmt.Errorf("failed to write output file: %w", err)
-		}
-
-		fmt.Printf("✅ Context written to %s (%d bytes)\n", outFile, len(output))
 		return nil
 	},
 }
 
-// readIgnoreFile is a helper to parse ignore-style files
+// contextExportCmd generates a full project markdown like you wanted
+var contextExportCmd = &cobra.Command{
+	Use:   "export [output_file]",
+	Short: "Export the entire semantic index as a single Markdown file",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		outFile := "codepicker_context.md"
+		if len(args) > 0 {
+			outFile = args[0]
+		}
+
+		cwd, _ := os.Getwd()
+		apiKey := os.Getenv("OPENROUTER_API_KEY")
+		container, err := app.NewContainer(apiKey, cwd, "", false, false)
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("📄 Exporting full index to %s...\n", outFile)
+
+		// Fixed: Pulling everything without FTS5 MATCH syntax
+		allSlices, err := container.Repository.GetAllSlices()
+		if err != nil {
+			return err
+		}
+
+		var sb strings.Builder
+		sb.WriteString("# CODEPICKER FULL PROJECT CONTEXT\n\n")
+
+		byFile := make(map[string][]ctxDomain.CodeSlice)
+		for _, s := range allSlices {
+			byFile[s.FilePath] = append(byFile[s.FilePath], s)
+		}
+
+		for path, slices := range byFile {
+			sb.WriteString(fmt.Sprintf("## File: %s\n", path))
+			for _, s := range slices {
+				sb.WriteString(fmt.Sprintf("### %s (Lines %d-%d)\n```go\n%s\n```\n\n",
+					s.SliceType, s.StartLine, s.EndLine, s.Content))
+			}
+			sb.WriteString("---\n")
+		}
+
+		return os.WriteFile(outFile, []byte(sb.String()), 0644)
+	},
+}
+
+// contextBuildCmd previews semantic slices for a specific task
+var contextBuildCmd = &cobra.Command{
+	Use:   "build [task]",
+	Short: "Preview semantic slices that would be sent for a task",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		taskInput := args[0]
+		apiKey := os.Getenv("OPENROUTER_API_KEY")
+		cwd, _ := os.Getwd()
+
+		container, err := app.NewContainer(apiKey, cwd, "", false, false)
+		if err != nil {
+			return err
+		}
+
+		// Uses Phase 3 ranking logic
+		output, err := container.ContextBuilder.BuildForTask(taskInput)
+		if err != nil {
+			return err
+		}
+
+		fmt.Println("\n--- SEMANTIC CONTEXT PREVIEW ---")
+		fmt.Println(output)
+		return nil
+	},
+}
+
+// readIgnoreFile is your original helper to parse ignore-style files
 func readIgnoreFile(filename string) ([]string, error) {
 	file, err := os.Open(filename)
 	if err != nil {
-		// It's okay if the file doesn't exist
 		return nil, err
 	}
 	defer file.Close()
 
 	var patterns []string
 	scanner := bufio.NewScanner(file)
-
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-
-		// Skip comments and empty lines
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-
 		patterns = append(patterns, line)
 	}
-
 	return patterns, scanner.Err()
 }
 
 func init() {
-	// Flags
-	contextBuildCmd.Flags().BoolVar(&skeletonMode, "skeleton", false, "Generate skeleton (signatures only) context")
+	contextIndexCmd.Flags().StringSliceVar(&ctxInclude, "include", []string{}, "Include patterns")
+	contextIndexCmd.Flags().StringSliceVar(&ctxExclude, "exclude", []string{}, "Exclude patterns")
 
-	// Default is 8000. To use unlimited, user must run: --max-tokens 0
-	contextBuildCmd.Flags().IntVar(&ctxMaxTokens, "max-tokens", 8000, "Maximum estimated tokens to include (set 0 for unlimited)")
-
-	contextBuildCmd.Flags().StringSliceVar(&ctxInclude, "include", []string{}, "Glob patterns to include (e.g. '*.go')")
-	contextBuildCmd.Flags().StringSliceVar(&ctxExclude, "exclude", []string{}, "Additional glob patterns to exclude")
-
-	// Register commands
+	contextCmd.AddCommand(contextIndexCmd)
 	contextCmd.AddCommand(contextBuildCmd)
+	contextCmd.AddCommand(contextExportCmd)
 	rootCmd.AddCommand(contextCmd)
 }

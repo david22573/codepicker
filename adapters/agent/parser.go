@@ -1,15 +1,54 @@
 package agent
 
 import (
+	"regexp"
 	"strings"
 )
 
-// parseReActResponse extracts the structured ReAct components.
-// It is robust against multi-line JSON and markdown artifacts.
-func parseReActResponse(resp string) (thought, tool, args string) {
-	lines := strings.Split(resp, "\n")
+// Regex to catch XML-style tool usage seen in logs (e.g., <invoke name="...">)
+var xmlToolRegex = regexp.MustCompile(`<invoke name="(.*?)">(.*?)</invoke>`)
+var xmlArgRegex = regexp.MustCompile(`<parameter name="(.*?)">(.*?)</parameter>`)
 
-	// State flags
+// parseReActResponse extracts structured components from various LLM output formats.
+func parseReActResponse(resp string) (thought, tool, args string) {
+	// STRATEGY 1: Check for XML format
+	// This takes priority if the model has drifted into XML mode.
+	if xmlToolRegex.MatchString(resp) {
+		matches := xmlToolRegex.FindStringSubmatch(resp)
+		if len(matches) > 1 {
+			tool = matches[1]
+			// Parse inner parameters into JSON-like string for the tool executor
+			rawArgs := matches[2]
+			argMatches := xmlArgRegex.FindAllStringSubmatch(rawArgs, -1)
+
+			// Reconstruct simplistic JSON for the existing tool interface
+			jsonBuilder := new(strings.Builder)
+			jsonBuilder.WriteString("{")
+			for i, m := range argMatches {
+				if i > 0 {
+					jsonBuilder.WriteString(", ")
+				}
+				// key: m[1], value: m[2]
+				jsonBuilder.WriteString(`"`)
+				jsonBuilder.WriteString(m[1])
+				jsonBuilder.WriteString(`": "`)
+				jsonBuilder.WriteString(m[2])
+				jsonBuilder.WriteString(`"`)
+			}
+			jsonBuilder.WriteString("}")
+			args = jsonBuilder.String()
+
+			// Everything before the tag is considered thought
+			loc := xmlToolRegex.FindStringIndex(resp)
+			if loc != nil {
+				thought = strings.TrimSpace(resp[:loc[0]])
+			}
+			return
+		}
+	}
+
+	// STRATEGY 2: Standard ReAct Parsing (Original Logic)
+	lines := strings.Split(resp, "\n")
 	inInput := false
 	var inputBuilder strings.Builder
 
@@ -41,7 +80,9 @@ func parseReActResponse(resp string) (thought, tool, args string) {
 		}
 	}
 
-	args = cleanInput(inputBuilder.String())
+	if tool != "" {
+		args = cleanInput(inputBuilder.String())
+	}
 	return
 }
 

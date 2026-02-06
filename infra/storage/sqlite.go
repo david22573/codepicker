@@ -4,23 +4,40 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/david22573/codepicker/domain/agent"
-	"github.com/david22573/codepicker/domain/errors"
+	ctxDomain "github.com/david22573/codepicker/domain/context"
 	"github.com/david22573/codepicker/domain/task"
-	_ "modernc.org/sqlite"
+	_ "modernc.org/sqlite" // Pure-go driver for maximum Termux compatibility
 )
 
-// SQLiteRepository implements domain.agent.Repository
+// SQLiteRepository implements agent.Repository and context.SliceStore.
+// Enhanced for Phase 2.1 with WAL mode and connection pooling.
 type SQLiteRepository struct {
 	db *sql.DB
+	mu sync.RWMutex
 }
 
+// NewSQLiteRepository initializes the DB with production-grade pragmas.
 func NewSQLiteRepository(path string) (*SQLiteRepository, error) {
-	db, err := sql.Open("sqlite", path)
+	// DSN optimized for concurrency and reliability on mobile filesystems.
+	// journal_mode=WAL: Allows concurrent reads while writing.
+	// busy_timeout=5000: Prevents "database is locked" errors during high I/O.
+	dsn := fmt.Sprintf("%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-64000)", path)
+
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to open sqlite: %w", err)
 	}
+
+	// Connection Pool Tuning: SQLite performs best with a single writer.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(time.Hour)
 
 	if err := migrate(db); err != nil {
 		db.Close()
@@ -30,221 +47,328 @@ func NewSQLiteRepository(path string) (*SQLiteRepository, error) {
 	return &SQLiteRepository{db: db}, nil
 }
 
-func migrate(db *sql.DB) error {
-	// 1. Executions Table
-	queryExec := `
-	CREATE TABLE IF NOT EXISTS executions (
-		id TEXT PRIMARY KEY,
-		plan_id TEXT,
-		status TEXT,
-		history_json TEXT,
-		start_time DATETIME,
-		end_time DATETIME
-	);
-	`
-	if _, err := db.Exec(queryExec); err != nil {
-		return err
+// Close terminates the database connection.
+func (r *SQLiteRepository) Close() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.db != nil {
+		return r.db.Close()
 	}
+	return nil
+}
 
-	// 2. Plans Table
-	queryPlans := `
-	CREATE TABLE IF NOT EXISTS plans (
-		id TEXT PRIMARY KEY,
-		original_task TEXT,
-		reasoning TEXT,
-		steps_json TEXT,
-		status TEXT,
-		estimated_cost REAL,
-		created_at DATETIME
-	);
-	`
-	_, err := db.Exec(queryPlans)
+func migrate(db *sql.DB) error {
+	queries := []string{
+		`CREATE TABLE IF NOT EXISTS executions (id TEXT PRIMARY KEY, plan_id TEXT, status TEXT, history_json TEXT, start_time DATETIME, end_time DATETIME);`,
+		`CREATE TABLE IF NOT EXISTS plans (id TEXT PRIMARY KEY, original_task TEXT, reasoning TEXT, steps_json TEXT, status TEXT, estimated_cost REAL, created_at DATETIME);`,
+		`CREATE TABLE IF NOT EXISTS code_slices (
+			id TEXT PRIMARY KEY,
+			file_path TEXT NOT NULL,
+			start_line INTEGER NOT NULL,
+			end_line INTEGER NOT NULL,
+			content TEXT NOT NULL,
+			language TEXT,
+			slice_type TEXT,
+			symbols_json TEXT,
+			content_hash TEXT,
+			indexed_at DATETIME
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_file_path ON code_slices(file_path);`,
+		`CREATE VIRTUAL TABLE IF NOT EXISTS slices_fts USING fts5(
+			id UNINDEXED,
+			file_path,
+			content,
+			symbols,
+			content='code_slices',
+			content_rowid='rowid'
+		);`,
+	}
+	for _, q := range queries {
+		if _, err := db.Exec(q); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// --- Execution Management ---
+
+func (r *SQLiteRepository) SaveExecution(ctx context.Context, exec *agent.Execution) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	history, _ := json.Marshal(exec.History)
+	_, err := r.db.ExecContext(ctx, `
+		INSERT INTO executions (id, plan_id, status, history_json, start_time, end_time) 
+		VALUES (?, ?, ?, ?, ?, ?) 
+		ON CONFLICT(id) DO UPDATE SET 
+			status=excluded.status, 
+			history_json=excluded.history_json, 
+			end_time=excluded.end_time`,
+		exec.ID, exec.PlanID, string(exec.Status), string(history), exec.StartTime, exec.EndTime,
+	)
 	return err
 }
 
-// --- Execution Methods ---
-
-func (r *SQLiteRepository) ListExecutions(ctx context.Context, limit int) ([]agent.ExecutionSummary, error) {
-	query := `
-	SELECT id, plan_id, status, start_time 
-	FROM executions 
-	ORDER BY start_time DESC 
-	LIMIT ?
-	`
-
-	rows, err := r.db.QueryContext(ctx, query, limit)
-	if err != nil {
-		return nil, errors.NewSystem("repo.ListExecutions", "query failed", err)
-	}
-	defer rows.Close()
-
-	var summaries []agent.ExecutionSummary
-	for rows.Next() {
-		var s agent.ExecutionSummary
-		var statusStr string
-		if err := rows.Scan(&s.ID, &s.PlanID, &statusStr, &s.StartTime); err != nil {
-			return nil, errors.NewSystem("repo.ListExecutions", "scan failed", err)
-		}
-		s.Status = task.Status(statusStr)
-		summaries = append(summaries, s)
-	}
-
-	return summaries, nil
-}
-
-func (r *SQLiteRepository) SaveExecution(ctx context.Context, exec *agent.Execution) error {
-	historyBytes, err := json.Marshal(exec.History)
-	if err != nil {
-		return errors.NewSystem("repo.SaveExecution", "json marshal failed", err)
-	}
-
-	query := `
-	INSERT INTO executions (id, plan_id, status, history_json, start_time, end_time)
-	VALUES (?, ?, ?, ?, ?, ?)
-	ON CONFLICT(id) DO UPDATE SET
-		status=excluded.status,
-		history_json=excluded.history_json,
-		end_time=excluded.end_time;
-	`
-
-	_, err = r.db.ExecContext(ctx, query,
-		exec.ID,
-		exec.PlanID,
-		string(exec.Status),
-		string(historyBytes),
-		exec.StartTime,
-		exec.EndTime,
-	)
-
-	if err != nil {
-		return errors.NewSystem("repo.SaveExecution", "db insert failed", err)
-	}
-	return nil
-}
-
 func (r *SQLiteRepository) GetExecution(ctx context.Context, id string) (*agent.Execution, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
 	row := r.db.QueryRowContext(ctx, "SELECT id, plan_id, status, history_json, start_time, end_time FROM executions WHERE id = ?", id)
-
 	var ex agent.Execution
-	var historyRaw string
-	var statusStr string
-	var endTime sql.NullTime
-
-	if err := row.Scan(&ex.ID, &ex.PlanID, &statusStr, &historyRaw, &ex.StartTime, &endTime); err != nil {
-		if err == sql.ErrNoRows {
-			return nil, errors.NewValidation("repo.GetExecution", "execution not found")
-		}
-		return nil, errors.NewSystem("repo.GetExecution", "db select failed", err)
+	var hist, status string
+	var end sql.NullTime
+	if err := row.Scan(&ex.ID, &ex.PlanID, &status, &hist, &ex.StartTime, &end); err != nil {
+		return nil, err
 	}
-
-	ex.Status = task.Status(statusStr)
-	if endTime.Valid {
-		ex.EndTime = endTime.Time
+	ex.Status = task.Status(status)
+	if end.Valid {
+		ex.EndTime = end.Time
 	}
-
-	if err := json.Unmarshal([]byte(historyRaw), &ex.History); err != nil {
-		return nil, errors.NewSystem("repo.GetExecution", "history corruption", err)
-	}
-
+	json.Unmarshal([]byte(hist), &ex.History)
 	return &ex, nil
 }
 
-// --- Plan Methods ---
+func (r *SQLiteRepository) ListExecutions(ctx context.Context, limit int) ([]agent.ExecutionSummary, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	rows, err := r.db.QueryContext(ctx, "SELECT id, plan_id, status, start_time FROM executions ORDER BY start_time DESC LIMIT ?", limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var res []agent.ExecutionSummary
+	for rows.Next() {
+		var s agent.ExecutionSummary
+		var stat string
+		rows.Scan(&s.ID, &s.PlanID, &stat, &s.StartTime)
+		s.Status = task.Status(stat)
+		res = append(res, s)
+	}
+	return res, nil
+}
+
+// --- Plan Management ---
 
 func (r *SQLiteRepository) SavePlan(ctx context.Context, plan *task.Plan) error {
-	stepsBytes, err := json.Marshal(plan.Steps)
-	if err != nil {
-		return errors.NewSystem("repo.SavePlan", "json marshal failed", err)
-	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
-	query := `
-	INSERT INTO plans (id, original_task, reasoning, steps_json, status, estimated_cost, created_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?)
-	ON CONFLICT(id) DO UPDATE SET
-		status=excluded.status,
-		steps_json=excluded.steps_json,
-		reasoning=excluded.reasoning;
-	`
-
-	_, err = r.db.ExecContext(ctx, query,
-		plan.ID,
-		plan.OriginalTask,
-		plan.Reasoning,
-		string(stepsBytes),
-		string(plan.Status),
-		plan.EstimatedCost,
-		plan.CreatedAt,
+	steps, _ := json.Marshal(plan.Steps)
+	_, err := r.db.ExecContext(ctx, `
+		INSERT INTO plans (id, original_task, reasoning, steps_json, status, estimated_cost, created_at) 
+		VALUES (?, ?, ?, ?, ?, ?, ?) 
+		ON CONFLICT(id) DO UPDATE SET 
+			status=excluded.status, 
+			steps_json=excluded.steps_json, 
+			reasoning=excluded.reasoning`,
+		plan.ID, plan.OriginalTask, plan.Reasoning, string(steps), string(plan.Status), plan.EstimatedCost, plan.CreatedAt,
 	)
-
-	if err != nil {
-		return errors.NewSystem("repo.SavePlan", "db insert failed", err)
-	}
-	return nil
+	return err
 }
 
 func (r *SQLiteRepository) GetPlan(ctx context.Context, id string) (*task.Plan, error) {
-	query := `SELECT id, original_task, reasoning, steps_json, status, estimated_cost, created_at FROM plans WHERE id = ?`
-	row := r.db.QueryRowContext(ctx, query, id)
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 
+	row := r.db.QueryRowContext(ctx, "SELECT id, original_task, reasoning, steps_json, status, estimated_cost, created_at FROM plans WHERE id = ?", id)
 	var p task.Plan
-	var stepsRaw string
-	var statusStr string
-
-	if err := row.Scan(&p.ID, &p.OriginalTask, &p.Reasoning, &stepsRaw, &statusStr, &p.EstimatedCost, &p.CreatedAt); err != nil {
-		if err == sql.ErrNoRows {
-			return nil, errors.NewValidation("repo.GetPlan", "plan not found")
-		}
-		return nil, errors.NewSystem("repo.GetPlan", "db select failed", err)
+	var steps, status string
+	if err := row.Scan(&p.ID, &p.OriginalTask, &p.Reasoning, &steps, &status, &p.EstimatedCost, &p.CreatedAt); err != nil {
+		return nil, err
 	}
-
-	p.Status = task.Status(statusStr)
-	if err := json.Unmarshal([]byte(stepsRaw), &p.Steps); err != nil {
-		return nil, errors.NewSystem("repo.GetPlan", "steps corruption", err)
-	}
-
+	p.Status = task.Status(status)
+	json.Unmarshal([]byte(steps), &p.Steps)
 	return &p, nil
 }
 
 func (r *SQLiteRepository) ListPlans(ctx context.Context, limit int) ([]agent.PlanSummary, error) {
-	query := `
-	SELECT id, original_task, status, steps_json, created_at 
-	FROM plans 
-	ORDER BY created_at DESC 
-	LIMIT ?`
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 
-	rows, err := r.db.QueryContext(ctx, query, limit)
-	if err != nil {
-		return nil, errors.NewSystem("repo.ListPlans", "query failed", err)
-	}
+	rows, _ := r.db.QueryContext(ctx, "SELECT id, original_task, status, steps_json, created_at FROM plans ORDER BY created_at DESC LIMIT ?", limit)
 	defer rows.Close()
 
-	var summaries []agent.PlanSummary
+	var res []agent.PlanSummary
 	for rows.Next() {
 		var p agent.PlanSummary
-		var stepsRaw string
-		var statusStr string
-
-		if err := rows.Scan(&p.ID, &p.OriginalTask, &statusStr, &stepsRaw, &p.CreatedAt); err != nil {
-			return nil, err
-		}
-
-		p.Status = task.Status(statusStr)
-
-		// Parse steps just to get the count
-		var steps []task.Step
-		if err := json.Unmarshal([]byte(stepsRaw), &steps); err == nil {
-			p.StepCount = len(steps)
-		}
-
-		summaries = append(summaries, p)
+		var steps, stat string
+		rows.Scan(&p.ID, &p.OriginalTask, &stat, &steps, &p.CreatedAt)
+		p.Status = task.Status(stat)
+		var s []task.Step
+		json.Unmarshal([]byte(steps), &s)
+		p.StepCount = len(s)
+		res = append(res, p)
 	}
-	return summaries, nil
+	return res, nil
 }
 
 func (r *SQLiteRepository) DeletePlan(ctx context.Context, id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	_, err := r.db.ExecContext(ctx, "DELETE FROM plans WHERE id = ?", id)
+	return err
+}
+
+// --- Context & Slice Management ---
+
+func (r *SQLiteRepository) IndexFile(filePath string, slices []ctxDomain.CodeSlice) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	tx, err := r.db.Begin()
 	if err != nil {
-		return errors.NewSystem("repo.DeletePlan", "delete failed", err)
+		return err
 	}
-	return nil
+	defer tx.Rollback()
+
+	if _, err := tx.Exec("DELETE FROM code_slices WHERE file_path = ?", filePath); err != nil {
+		return err
+	}
+
+	for _, s := range slices {
+		syms, _ := json.Marshal(s.Symbols)
+		_, err = tx.Exec(`
+			INSERT INTO code_slices (id, file_path, start_line, end_line, content, language, slice_type, symbols_json, indexed_at) 
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			s.ID, filePath, s.StartLine, s.EndLine, s.Content, s.Language, string(s.SliceType), string(syms), time.Now(),
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	_, _ = tx.Exec("INSERT INTO slices_fts(slices_fts) VALUES('rebuild')")
+	return tx.Commit()
+}
+
+func (r *SQLiteRepository) Query(q ctxDomain.SliceQuery) ([]ctxDomain.CodeSlice, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	searchQuery := strings.Join(q.Keywords, " ")
+	if strings.TrimSpace(searchQuery) == "" {
+		return nil, nil
+	}
+
+	limit := 20
+	if q.MaxResults > 0 {
+		limit = q.MaxResults
+	}
+
+	query := fmt.Sprintf(`
+		SELECT id, file_path, start_line, end_line, content, slice_type, symbols_json 
+		FROM code_slices 
+		WHERE rowid IN (SELECT rowid FROM slices_fts WHERE slices_fts MATCH ?) 
+		LIMIT %d`, limit)
+
+	rows, err := r.db.Query(query, searchQuery)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var res []ctxDomain.CodeSlice
+	for rows.Next() {
+		var s ctxDomain.CodeSlice
+		var st, syms string
+		rows.Scan(&s.ID, &s.FilePath, &s.StartLine, &s.EndLine, &s.Content, &st, &syms)
+		s.SliceType = ctxDomain.SliceType(st)
+		json.Unmarshal([]byte(syms), &s.Symbols)
+		res = append(res, s)
+	}
+	return res, nil
+}
+
+// GetAllSlices retrieves every code slice (used for full context export)
+func (r *SQLiteRepository) GetAllSlices() ([]ctxDomain.CodeSlice, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	rows, err := r.db.Query("SELECT id, file_path, start_line, end_line, content, slice_type, symbols_json FROM code_slices")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var res []ctxDomain.CodeSlice
+	for rows.Next() {
+		var s ctxDomain.CodeSlice
+		var st, syms string
+		if err := rows.Scan(&s.ID, &s.FilePath, &s.StartLine, &s.EndLine, &s.Content, &st, &syms); err != nil {
+			return nil, err
+		}
+		s.SliceType = ctxDomain.SliceType(st)
+		json.Unmarshal([]byte(syms), &s.Symbols)
+		res = append(res, s)
+	}
+	return res, nil
+}
+
+func (r *SQLiteRepository) GetByFile(path string) ([]ctxDomain.CodeSlice, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	rows, _ := r.db.Query("SELECT id, file_path, start_line, end_line, content, slice_type FROM code_slices WHERE file_path = ?", path)
+	defer rows.Close()
+	var res []ctxDomain.CodeSlice
+	for rows.Next() {
+		var s ctxDomain.CodeSlice
+		var st string
+		rows.Scan(&s.ID, &s.FilePath, &s.StartLine, &s.EndLine, &s.Content, &st)
+		s.SliceType = ctxDomain.SliceType(st)
+		res = append(res, s)
+	}
+	return res, nil
+}
+
+func (r *SQLiteRepository) InvalidateFile(path string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, err := r.db.Exec("DELETE FROM code_slices WHERE file_path = ?", path)
+	return err
+}
+
+func (r *SQLiteRepository) GetStats() (*ctxDomain.IndexStats, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var s ctxDomain.IndexStats
+	err := r.db.QueryRow("SELECT COUNT(*), COUNT(DISTINCT file_path) FROM code_slices").Scan(&s.TotalSlices, &s.TotalFiles)
+	s.LastIndexedAt = time.Now()
+	return &s, err
+}
+
+func (r *SQLiteRepository) GetByID(id string) (*ctxDomain.CodeSlice, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	row := r.db.QueryRow("SELECT id, file_path, start_line, end_line, content, slice_type FROM code_slices WHERE id = ?", id)
+	var s ctxDomain.CodeSlice
+	var st string
+	if err := row.Scan(&s.ID, &s.FilePath, &s.StartLine, &s.EndLine, &s.Content, &st); err != nil {
+		return nil, err
+	}
+	s.SliceType = ctxDomain.SliceType(st)
+	return &s, nil
+}
+
+func (r *SQLiteRepository) GetBySymbol(symbol string) ([]ctxDomain.CodeSlice, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	rows, err := r.db.Query("SELECT id, file_path, start_line, end_line, content FROM code_slices WHERE symbols_json LIKE ?", "%"+symbol+"%")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var res []ctxDomain.CodeSlice
+	for rows.Next() {
+		var s ctxDomain.CodeSlice
+		rows.Scan(&s.ID, &s.FilePath, &s.StartLine, &s.EndLine, &s.Content)
+		res = append(res, s)
+	}
+	return res, nil
 }

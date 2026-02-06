@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 
-	contextAdapters "github.com/david22573/codepicker/adapters/context"
 	"github.com/david22573/codepicker/app"
 	"github.com/david22573/codepicker/domain/task"
 	"github.com/spf13/cobra"
@@ -62,7 +61,6 @@ func executeRun(taskInput, planID string) error {
 		return err
 	}
 
-	// --- UX HARDENING: Startup Barriers ---
 	if !ciFlag {
 		printSafetyBanner(dryRunFlag)
 	}
@@ -70,7 +68,6 @@ func executeRun(taskInput, planID string) error {
 	ctx := context.Background()
 	var plan *task.Plan
 
-	// Scenario A: Resume Plan
 	if planID != "" {
 		if !ciFlag {
 			fmt.Printf("📂 [SYSTEM] Loading Plan %s...\n", planID)
@@ -84,22 +81,19 @@ func executeRun(taskInput, planID string) error {
 			fmt.Println("⚠️  [SYSTEM] Warning: This plan is already marked as completed.")
 		}
 	} else {
-		// Scenario B: Generate Plan
 		if !ciFlag {
 			fmt.Printf("🚀 [SYSTEM] Initializing task: %s\n", taskInput)
 			fmt.Println("🧠 [AGENT] Generating plan...")
 		}
 
-		// FIX: Generate File Context so the Planner can see the files
-		fileContext, err := container.ContextBuilder.Build(contextAdapters.Config{
-			ProjectRoot: cwd,
-			MaxTokens:   3000, // Sufficient for tree + critical file headers
-		})
+		// FIX: Use BuildForTask(taskInput) instead of Build()
+		// The new builder returns a string (markdown context), not an object.
+		fileContext, err := container.ContextBuilder.BuildForTask(taskInput)
 		if err != nil {
-			// Non-fatal, but warn
 			fmt.Printf("⚠️  Warning: Context generation incomplete: %v\n", err)
 		}
 
+		// Pass the generated string context to the planner
 		p, err := container.Planner.CreatePlan(ctx, taskInput, fileContext)
 		if err != nil {
 			return err
@@ -110,14 +104,12 @@ func executeRun(taskInput, planID string) error {
 		}
 	}
 
-	// Execute
 	if !ciFlag {
 		fmt.Println("▶️  [SYSTEM] Starting Execution Phase...")
 	}
 
 	execErr := container.PlanExecutor.Execute(ctx, plan)
 
-	// Output
 	if ciFlag {
 		return handleCIOutput(plan, execErr)
 	}
@@ -128,7 +120,6 @@ func executeRun(taskInput, planID string) error {
 	fmt.Println("\n✅ [SYSTEM] Task Completed Successfully.")
 	return nil
 }
-
 func printSafetyBanner(isDryRun bool) {
 	fmt.Println("\n===================================================")
 	fmt.Println("🛡️  CodePicker Safety Guardrails Active")
