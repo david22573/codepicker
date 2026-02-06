@@ -93,7 +93,6 @@ func (o *OpenRouterAdapter) ChatWithUsage(ctx context.Context, systemPrompt, use
 
 		req.Header.Set("Authorization", "Bearer "+o.apiKey)
 		req.Header.Set("Content-Type", "application/json")
-		// Optional: Site URL and Title for OpenRouter rankings
 		req.Header.Set("HTTP-Referer", "https://github.com/david22573/codepicker")
 		req.Header.Set("X-Title", "CodePicker")
 
@@ -103,8 +102,13 @@ func (o *OpenRouterAdapter) ChatWithUsage(ctx context.Context, systemPrompt, use
 		}
 		defer resp.Body.Close()
 
+		// PRODUCTION FIX: Handle reading the body with context awareness
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
+			// Check if we failed because the context (timeout) was exceeded
+			if ctx.Err() == context.DeadlineExceeded {
+				return errors.NewLLM("llm.Chat", fmt.Errorf("read timeout: the model took too long to stream the body"))
+			}
 			return errors.NewSystem("llm.Chat", "failed to read response body", err)
 		}
 

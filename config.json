@@ -1,7 +1,7 @@
 {
   "llm": {
     "model": "moonshotai/kimi-k2.5",
-    "timeout_seconds": 120,
+    "timeout_seconds": 300,
     "max_tokens": 16000,
     "temperature": 0.1,
     "input_cost_per_1m": 0.30,

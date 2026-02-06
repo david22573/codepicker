@@ -1,4 +1,4 @@
-Project Context Dump (06 Feb 26 10:34 UTC)
+Project Context Dump (06 Feb 26 10:44 UTC)
 Format: xml
 Total Files: 75
 
@@ -838,6 +838,7 @@ FORMAT RULES:
 4. STRICTLY FORBIDDEN: Do not use XML tags like <invoke> or <function_calls>.
 5. Do NOT output Markdown code blocks for the whole response.
 6. Wait for the [SYSTEM] Observation before proceeding.
+
 EXAMPLE INTERACTION:
 Thought: I need to read the main file to understand the entry point.
 Action: read_file
@@ -875,16 +876,13 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 	// FIX: Ensure audit trail is saved even if we panic or error out early
 	defer func() {
 		savePath := filepath.Join(".codepicker", "audit", fmt.Sprintf("%s.json", execID))
-		// Ensure dir exists
 		_ = os.MkdirAll(filepath.Dir(savePath), 0755)
 		if err := auditTrail.Save(savePath); err != nil {
 			a.logger.Error("Failed to save audit trail", zap.Error(err))
 		}
 	}()
 
-	// Create a context-aware logger
 	logger := a.logger.WithContext(ctx)
-
 	execution := agent.NewExecution(execID, "adhoc-plan")
 	logger.Info("Agent Run Started", zap.String("task", taskInput), zap.String("execution_id", execID))
 
@@ -897,12 +895,9 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 
 	for i := 0; i < a.maxTurn; i++ {
 		logger.Debug("Starting Turn", zap.Int("turn", i+1))
-
-		// Record LLM Request start
 		auditTrail.Record("llm_request", map[string]interface{}{"turn": i + 1})
 
 		// Phase 3: Cost Tracking Integration
-		// We use type assertion to check if the model supports usage tracking
 		var response string
 		var err error
 		var usage domainContext.TokenUsage
@@ -916,7 +911,6 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 				logger.Debug("LLM Cost", zap.Float64("cost", cost))
 			}
 		} else {
-			// Fallback for models without usage support
 			response, err = a.model.Chat(ctx, a.sysMsg, currentContext)
 		}
 
@@ -939,10 +933,7 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 		if toolName == "" {
 			execution.Finish()
 			_ = a.repo.SaveExecution(ctx, execution)
-
-			// Record success before saving in defer
 			auditTrail.Record("finish", map[string]interface{}{"result": response, "status": "success"})
-
 			return response, nil
 		}
 
@@ -951,7 +942,6 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 		if !allowed {
 			toolOut := fmt.Sprintf("Error: Policy Violation: %s", reason)
 			logger.Warn("Guardrail Blocked Action", zap.String("tool", toolName), zap.String("reason", reason))
-
 			auditTrail.Record("policy_block", map[string]interface{}{"tool": toolName, "reason": reason})
 
 			currentContext += fmt.Sprintf("\nThought: %s\nAction: %s\nInput: %s\nObservation: %s\n", thought, toolName, toolArgs, toolOut)
@@ -981,10 +971,19 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 			}
 		}
 
+		// Record the full output in the DB for audit
 		execution.RecordTurn(thought, toolName, toolArgs, toolOut)
 		_ = a.repo.SaveExecution(ctx, execution)
 
-		currentContext += fmt.Sprintf("\nThought: %s\nAction: %s\nInput: %s\nObservation: %s\n", thought, toolName, toolArgs, toolOut)
+		// TRUNCATION FIX: Cap the observation size added to LLM context to stop Turn 2 freezes.
+		// We use a 2000 character limit to keep the prompt size manageable while keeping full logs in the DB.
+		contextObservation := toolOut
+		if len(contextObservation) > 2000 {
+			contextObservation = contextObservation[:2000] + "... (truncated for context safety)"
+		}
+
+		currentContext += fmt.Sprintf("\nThought: %s\nAction: %s\nInput: %s\nObservation: %s\n",
+			thought, toolName, toolArgs, contextObservation)
 	}
 
 	auditTrail.Record("timeout", map[string]interface{}{"max_turns": a.maxTurn})
