@@ -2,88 +2,84 @@ package llm
 
 import (
 	"bytes"
-	"context"
+	"context" // Standard library context (REQUIRED)
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 
+	domainContext "github.com/david22573/codepicker/domain/context" // Aliased to prevent collision
 	"github.com/david22573/codepicker/domain/errors"
 )
 
 const openRouterURL = "https://openrouter.ai/api/v1/chat/completions"
 
-// OpenRouterAdapter implements domain.agent.LLMClient
+// OpenRouterAdapter implements domain.agent.LLMClient with reliability features.
 type OpenRouterAdapter struct {
-	apiKey string
-	model  string
-	client *http.Client
+	apiKey         string
+	model          string
+	client         *http.Client
+	circuitBreaker *CircuitBreaker
 }
 
-// NewOpenRouterAdapter creates a new client instance
+// NewOpenRouterAdapter creates a client with a circuit breaker configuration.
 func NewOpenRouterAdapter(apiKey, model string) *OpenRouterAdapter {
 	return &OpenRouterAdapter{
 		apiKey: apiKey,
 		model:  model,
-		// Increased timeout to 120s because "thinking" models (like Nemotron/Llama-3)
-		// take longer to generate the first token.
+		// Increased timeout to 120s for "reasoning" models that take longer to start
 		client: &http.Client{Timeout: 120 * time.Second},
+		// Circuit breaker trips after 5 failures, resets after 1 minute of probation
+		circuitBreaker: NewCircuitBreaker(5, 1*time.Minute),
 	}
 }
 
-// Chat fulfills the domain.agent.LLMClient interface with retries
+// ChatWithUsage returns the response text along with token metrics for cost tracking.
+func (c *OpenRouterAdapter) ChatWithUsage(ctx context.Context, systemPrompt, userMsg string) (string, domainContext.TokenUsage, error) {
+	var result string
+	var usage domainContext.TokenUsage
+
+	// Execute the request inside the circuit breaker
+	err := c.circuitBreaker.Execute(func() error {
+		// Use a closure to capture the return values
+		resp, use, err := c.doChat(ctx, systemPrompt, userMsg)
+		if err != nil {
+			return err
+		}
+		result = resp
+		usage = use
+		return nil
+	})
+
+	return result, usage, err
+}
+
+// Chat fulfills the standard interface, discarding usage metrics.
 func (c *OpenRouterAdapter) Chat(ctx context.Context, systemPrompt, userMsg string) (string, error) {
-	// Simple retry logic (3 attempts)
-	maxRetries := 3
-	var lastErr error
-
-	for i := 0; i < maxRetries; i++ {
-		response, err := c.doChat(ctx, systemPrompt, userMsg)
-		if err == nil {
-			return response, nil
-		}
-
-		// If it's a context cancellation (user pressed Ctrl+C), stop immediately
-		if ctx.Err() != nil {
-			return "", ctx.Err()
-		}
-
-		lastErr = err
-		// Exponential backoff: 1s, 2s, 4s
-		time.Sleep(time.Duration(1<<i) * time.Second)
-	}
-
-	return "", lastErr
+	resp, _, err := c.ChatWithUsage(ctx, systemPrompt, userMsg)
+	return resp, err
 }
 
-func (c *OpenRouterAdapter) doChat(ctx context.Context, systemPrompt, userMsg string) (string, error) {
-	// Prepare the request payload
+// doChat performs the actual HTTP request logic.
+func (c *OpenRouterAdapter) doChat(ctx context.Context, systemPrompt, userMsg string) (string, domainContext.TokenUsage, error) {
 	reqBody := map[string]interface{}{
 		"model": c.model,
 		"messages": []map[string]string{
 			{"role": "system", "content": systemPrompt},
 			{"role": "user", "content": userMsg},
 		},
-		"temperature": 0.1, // Slight temp often helps avoid "stuck" loops better than 0.0
-		// Optional: Add OpenRouter specific provider preferences if needed
-		// "provider": map[string]string{"order": "Liquid,DeepInfra"},
-	}
-
-	// Specific tweak for models that support/require "reasoning" parameter
-	if strings.Contains(c.model, "nemotron") || strings.Contains(c.model, "thinking") {
-		reqBody["include_reasoning"] = true
+		"temperature": 0.1, // Low temp for deterministic code generation
 	}
 
 	jsonBytes, err := json.Marshal(reqBody)
 	if err != nil {
-		return "", errors.NewSystem("llm.Chat", "failed to marshal request", err)
+		return "", domainContext.TokenUsage{}, errors.NewSystem("llm.Chat", "failed to marshal request", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", openRouterURL, bytes.NewBuffer(jsonBytes))
 	if err != nil {
-		return "", errors.NewSystem("llm.Chat", "failed to create request", err)
+		return "", domainContext.TokenUsage{}, errors.NewSystem("llm.Chat", "failed to create request", err)
 	}
 
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
@@ -93,47 +89,41 @@ func (c *OpenRouterAdapter) doChat(ctx context.Context, systemPrompt, userMsg st
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return "", errors.NewLLM("llm.Chat", err)
+		return "", domainContext.TokenUsage{}, errors.NewLLM("llm.Chat", err)
 	}
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
 
-	// IMPROVEMENT: Handle non-200 status codes gracefully
+	// Handle non-200 status codes
 	if resp.StatusCode != http.StatusOK {
-		return "", errors.NewLLM("llm.Chat", fmt.Errorf("API error %d: %s", resp.StatusCode, string(body)))
-	}
-
-	// IMPROVEMENT: Handle empty bodies which cause "unexpected end of JSON"
-	if len(body) == 0 {
-		return "", errors.NewLLM("llm.Chat", fmt.Errorf("received empty response body from API"))
+		return "", domainContext.TokenUsage{}, errors.NewLLM("llm.Chat", fmt.Errorf("API error %d: %s", resp.StatusCode, string(body)))
 	}
 
 	// Parse the response
-	var result struct {
+	var apiResp struct {
 		Choices []struct {
 			Message struct {
 				Content string `json:"content"`
 			} `json:"message"`
-			FinishReason string `json:"finish_reason"` // Useful for debugging
 		} `json:"choices"`
-		Error *struct { // Capture API-level errors that return 200 OK (rare but possible)
+		Usage domainContext.TokenUsage `json:"usage"` // Capture token usage
+		Error *struct {
 			Message string `json:"message"`
 		} `json:"error,omitempty"`
 	}
 
-	if err := json.Unmarshal(body, &result); err != nil {
-		// Log the raw body for debugging if parsing fails
-		return "", errors.NewSystem("llm.Chat", fmt.Sprintf("failed to parse response: %s", string(body)), err)
+	if err := json.Unmarshal(body, &apiResp); err != nil {
+		return "", domainContext.TokenUsage{}, errors.NewSystem("llm.Chat", fmt.Sprintf("failed to parse response: %s", string(body)), err)
 	}
 
-	if result.Error != nil {
-		return "", errors.NewLLM("llm.Chat", fmt.Errorf("provider error: %s", result.Error.Message))
+	if apiResp.Error != nil {
+		return "", domainContext.TokenUsage{}, errors.NewLLM("llm.Chat", fmt.Errorf("provider error: %s", apiResp.Error.Message))
 	}
 
-	if len(result.Choices) == 0 {
-		return "", errors.NewLLM("llm.Chat", fmt.Errorf("empty response choices from API"))
+	if len(apiResp.Choices) == 0 {
+		return "", domainContext.TokenUsage{}, errors.NewLLM("llm.Chat", fmt.Errorf("received empty choices from API"))
 	}
 
-	return result.Choices[0].Message.Content, nil
+	return apiResp.Choices[0].Message.Content, apiResp.Usage, nil
 }

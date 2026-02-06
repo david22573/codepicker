@@ -29,9 +29,10 @@ type Container struct {
 	Git              *git.Client
 	ContextBuilder   *context.SliceBasedBuilder
 	WorkspaceManager *fs.WorkspaceManager
-	Repository       *storage.SQLiteRepository // Changed to pointer to avoid lock copy
+	Repository       *storage.SQLiteRepository
 	SliceStore       contextDomain.SliceStore
 	Logger           *logging.Logger
+	CostTracker      *llm.CostTracker // Phase 3: Exposed for CLI summaries
 }
 
 func NewContainer(apiKey, projectRoot, llmModel string, isDryRun, isCI bool) (*Container, error) {
@@ -46,7 +47,6 @@ func NewContainer(apiKey, projectRoot, llmModel string, isDryRun, isCI bool) (*C
 		return nil, err
 	}
 
-	// Fixed: Use zap fields instead of map
 	logger.Info("Initializing CodePicker Container",
 		zap.String("mode", logEnv),
 		zap.String("root", projectRoot))
@@ -56,47 +56,65 @@ func NewContainer(apiKey, projectRoot, llmModel string, isDryRun, isCI bool) (*C
 
 	repo, err := storage.NewSQLiteRepository(dbPath)
 	if err != nil {
-		// Fixed: Use zap fields
 		logger.Error("Database initialization failed", zap.Error(err))
 		return nil, err
 	}
 
 	workspaceMgr := fs.NewWorkspaceManager(projectRoot)
-	_ = git.NewClient(projectRoot)
+	gitClient := git.NewClient(projectRoot)
 
+	// 2. Initialize LLM & Cost Tracker
 	selectedModel := "moonshotai/kimi-k2.5"
 	if llmModel != "" {
 		selectedModel = llmModel
 	}
 	llmClient := llm.NewOpenRouterAdapter(apiKey, selectedModel)
 
+	// Phase 3: Initialize Cost Tracker (Estimates for Kimi/Moonshot: ~$0.30 input / $0.60 output)
+	costTracker := llm.NewCostTracker(0.3, 0.6)
+
+	// 3. Initialize Infrastructure
 	shadowMgr := fs.NewShadowManager(projectRoot)
 	shellExec := shell.NewExecutor(30*time.Second, 5000)
 	allTools := tools.DefaultSet(shadowMgr, shellExec, projectRoot)
 
+	// 4. Initialize Security Policy
 	policyPath := filepath.Join(projectRoot, "policy.json")
 	policyConfig, _ := policy.LoadPolicy(policyPath)
 	guardRail := policy.NewEnforcer(*policyConfig, isDryRun)
 
 	ctxBuilder := context.NewSliceBasedBuilder(repo, 16000)
 
-	// Updated to pass logger
-	worker := agent.NewReActAgent(llmClient, allTools, guardRail, repo, logger)
+	// 5. Initialize Agents with Dependencies
+	// Note: We inject costTracker into the worker so it can record usage per turn
+	worker := agent.NewReActAgent(llmClient, allTools, guardRail, repo, logger, costTracker)
 	planner := agent.NewPlanner(llmClient, repo)
-	executor := agent.NewPlanExecutor(worker, repo)
+
+	// Note: We inject workspaceMgr into the executor to enable Transaction/Rollback support
+	executor := agent.NewPlanExecutor(worker, repo, workspaceMgr)
+
+	auditor := agent.NewAuditor(llmClient, repo, allTools, guardRail)
+	explainer := agent.NewExplainer(llmClient, repo)
+	twoPass := agent.NewTwoPassEngine(llmClient, repo, allTools, guardRail)
+	verifier := verifier.NewPipeline(projectRoot)
 
 	return &Container{
 		Planner:          planner,
 		PlanExecutor:     executor,
+		Auditor:          auditor,
+		Explainer:        explainer,
+		TwoPassEngine:    twoPass,
+		Verifier:         verifier,
+		Git:              gitClient,
 		ContextBuilder:   ctxBuilder,
 		WorkspaceManager: workspaceMgr,
-		Repository:       repo, // Pass pointer, do not dereference
+		Repository:       repo,
 		SliceStore:       repo,
 		Logger:           logger,
+		CostTracker:      costTracker,
 	}, nil
 }
 
-// Close ensures all resources (DB, Logger) are flushed and closed properly
 func (c *Container) Close() {
 	if c.Logger != nil {
 		c.Logger.Info("Shutting down container...")

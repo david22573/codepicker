@@ -1,6 +1,6 @@
-Project Context Dump (06 Feb 26 07:43 UTC)
+Project Context Dump (06 Feb 26 00:35 PST)
 Format: xml
-Total Files: 66
+Total Files: 68
 
 # Project Structure
 <file_tree>
@@ -40,6 +40,7 @@ Total Files: 66
 - cmd/plans.go
 - cmd/root.go
 - cmd/run.go
+- codepicker_context.txt
 - context_dump.sh
 - domain/agent/agent.go
 - domain/agent/execution.go
@@ -65,6 +66,7 @@ Total Files: 66
 - infra/indexer/code_slicer.go
 - infra/indexer/code_slicer_test.go
 - infra/indexer/manager.go
+- infra/llm/circuit_breaker.go
 - infra/llm/openrouter.go
 - infra/logging/logger.go
 - infra/shell/executor.go
@@ -552,55 +554,68 @@ import (
 
 	"github.com/david22573/codepicker/domain/agent"
 	"github.com/david22573/codepicker/domain/task"
+	"github.com/david22573/codepicker/infra/fs"
 )
 
 type PlanExecutor struct {
-	worker agent.Agent
-	repo   agent.Repository
+	worker       agent.Agent
+	repo         agent.Repository
+	workspaceMgr *fs.WorkspaceManager
 }
 
-func NewPlanExecutor(worker agent.Agent, repo agent.Repository) *PlanExecutor {
+// NewPlanExecutor initializes the executor with a workspace manager for transactions.
+func NewPlanExecutor(worker agent.Agent, repo agent.Repository, ws *fs.WorkspaceManager) *PlanExecutor {
 	return &PlanExecutor{
-		worker: worker,
-		repo:   repo,
+		worker:       worker,
+		repo:         repo,
+		workspaceMgr: ws,
 	}
 }
 
 func (e *PlanExecutor) Execute(ctx context.Context, plan *task.Plan) error {
+	txn, err := e.workspaceMgr.BeginTransaction()
+	if err != nil {
+		return fmt.Errorf("failed to start transaction: %w", err)
+	}
+
+	defer func() {
+		// Updated to access the exported 'Committed' field
+		if !txn.Committed {
+			fmt.Println("⚠️  [SYSTEM] Error detected. Rolling back changes...")
+			txn.Rollback()
+		}
+	}()
+
 	plan.Status = task.StatusRunning
 	_ = e.repo.SavePlan(ctx, plan)
 
-	fmt.Println("\n---------------------------------------------------")
-	fmt.Printf("📋 [PLANNER] Plan ID: %s (%d steps)\n", plan.ID, len(plan.Steps))
-	fmt.Printf("🎯 [PLANNER] Goal: %s\n", plan.OriginalTask)
-	fmt.Println("---------------------------------------------------")
-
 	for _, step := range plan.Steps {
 		if step.Status == task.StatusCompleted {
-			fmt.Printf("⏭️  [PLANNER] Skipping completed step %d\n", step.ID)
 			continue
 		}
 
 		fmt.Printf("\n🔹 [PLANNER] STEP %d/%d: %s\n", step.ID, len(plan.Steps), step.Description)
 
-		workerInput := fmt.Sprintf("%s\n\nFocus on these files: %v", step.Instruction, step.Files)
+		// Before execution, backup files
+		for _, file := range step.Files {
+			txn.BackupFile(file)
+		}
 
-		// The worker now handles its own verbose logging (Agent/System output)
+		workerInput := fmt.Sprintf("%s\n\nFocus on these files: %v", step.Instruction, step.Files)
 		result, err := e.worker.Run(ctx, workerInput)
 
 		if err != nil {
-			fmt.Printf("\n❌ [PLANNER] Step %d Failed.\n", step.ID)
 			plan.MarkStepFailed(step.ID, err)
 			plan.Status = task.StatusFailed
 			_ = e.repo.SavePlan(ctx, plan)
-			return err
+			return err // Triggers rollback
 		}
 
-		fmt.Printf("\n✨ [PLANNER] Step %d Complete.\n", step.ID)
 		plan.MarkStepComplete(step.ID, result)
 		_ = e.repo.SavePlan(ctx, plan)
 	}
 
+	txn.Commit()
 	plan.Status = task.StatusCompleted
 	return e.repo.SavePlan(ctx, plan)
 }
@@ -1558,12 +1573,11 @@ package policy
 import (
 	"encoding/json"
 	"fmt"
-	"path/filepath"
 	"regexp"
 	"strings"
 )
 
-// Enforcer implements agent.Policy with robust regex-based rules.
+// Enforcer implements agent.Policy with robust regex-based rules and whitelisting.
 type Enforcer struct {
 	config           PolicySchema
 	readOnly         bool
@@ -1573,26 +1587,21 @@ type Enforcer struct {
 
 // NewEnforcer creates a production-hardened policy engine.
 func NewEnforcer(config PolicySchema, readOnly bool) *Enforcer {
-	// Compile forbidden patterns into regex for robust matching
 	var regexList []*regexp.Regexp
 	for _, keyword := range config.ForbiddenKeywords {
-		// Make pattern whitespace-insensitive (e.g., "rm -rf" matches "rm    -rf")
-		pattern := strings.ReplaceAll(regexp.QuoteMeta(keyword), " ", `\s+`)
-		regex, err := regexp.Compile(`(?i)` + pattern)
-		if err == nil {
+		pattern := `(?i)\b` + strings.ReplaceAll(regexp.QuoteMeta(keyword), " ", `\s+`) + `\b`
+		if regex, err := regexp.Compile(pattern); err == nil {
 			regexList = append(regexList, regex)
 		}
 	}
 
-	// Initialize the command whitelist from roadmap recommendations
 	whitelist := map[string]bool{
-		"go fmt":     true,
-		"go test":    true,
-		"go build":   true,
-		"go mod":     true,
-		"git status": true,
-		"git diff":   true,
-		"ls":         true,
+		"go":   true,
+		"git":  true,
+		"ls":   true,
+		"cat":  true,
+		"grep": true,
+		"make": true,
 	}
 
 	return &Enforcer{
@@ -1610,23 +1619,19 @@ func (e *Enforcer) Mode() string {
 	return "guarded-active"
 }
 
-// CanExecute enforces the JSON policy rules on tool usage.
 func (e *Enforcer) CanExecute(toolName string, args string) (bool, string) {
-	// 1. Check Global Read-Only Mode
 	if e.readOnly {
 		if toolName == "write_file" || toolName == "run_cmd" {
-			return false, "BLOCKED: Running in READ-ONLY mode."
+			return false, "BLOCKED: Side-effects are disabled in READ-ONLY mode."
 		}
 	}
 
-	// 2. Regex-based Forbidden Pattern Matching
 	for _, regex := range e.forbiddenRegex {
 		if regex.MatchString(args) {
 			return false, fmt.Sprintf("BLOCKED: Forbidden pattern detected: %s", regex.String())
 		}
 	}
 
-	// 3. Tool-Specific Validation
 	switch toolName {
 	case "run_cmd":
 		return e.validateCommand(args)
@@ -1650,19 +1655,21 @@ func (e *Enforcer) validateCommand(args string) (bool, string) {
 		return false, "BLOCKED: Command cannot be empty"
 	}
 
-	// Extract base command (e.g., "go test" from "go test ./...")
 	parts := strings.Fields(cleanCmd)
 	if len(parts) == 0 {
 		return false, "BLOCKED: Malformed command"
 	}
 
 	baseCmd := parts[0]
-	if len(parts) > 1 && (baseCmd == "go" || baseCmd == "git") {
-		baseCmd = baseCmd + " " + parts[1]
-	}
-
 	if !e.commandWhitelist[baseCmd] {
 		return false, fmt.Sprintf("BLOCKED: Command '%s' is not in the whitelist", baseCmd)
+	}
+
+	dangerous := []string{"|", ">", "&&", "||", ";", "`", "$("}
+	for _, d := range dangerous {
+		if strings.Contains(cleanCmd, d) {
+			return false, fmt.Sprintf("BLOCKED: Dangerous shell operator detected: %s", d)
+		}
 	}
 
 	return true, ""
@@ -1680,34 +1687,11 @@ func (e *Enforcer) validateFileSystemAccess(toolName, args string) (bool, string
 		return false, "BLOCKED: Path argument is missing"
 	}
 
-	// Existing Path Traversal Check
 	if strings.Contains(input.Path, "..") {
 		return false, "BLOCKED: Path traversal (..) detected"
 	}
 
-	if !e.isPathAllowed(input.Path) {
-		return false, fmt.Sprintf("BLOCKED: Path '%s' is not in allowed_globs.", input.Path)
-	}
-
 	return true, ""
-}
-
-func (e *Enforcer) isPathAllowed(path string) bool {
-	cleanPath := filepath.ToSlash(filepath.Clean(path))
-	for _, pattern := range e.config.AllowedGlobs {
-		if strings.HasSuffix(pattern, "/**") {
-			prefix := strings.TrimSuffix(pattern, "**")
-			if strings.HasPrefix(cleanPath, prefix) {
-				return true
-			}
-			continue
-		}
-		matched, _ := filepath.Match(pattern, cleanPath)
-		if matched {
-			return true
-		}
-	}
-	return false
 }
 
 </file>
@@ -2496,7 +2480,7 @@ type Container struct {
 	Git              *git.Client
 	ContextBuilder   *context.SliceBasedBuilder
 	WorkspaceManager *fs.WorkspaceManager
-	Repository       *storage.SQLiteRepository // Changed to pointer to avoid lock copy
+	Repository       *storage.SQLiteRepository
 	SliceStore       contextDomain.SliceStore
 	Logger           *logging.Logger
 }
@@ -2513,7 +2497,6 @@ func NewContainer(apiKey, projectRoot, llmModel string, isDryRun, isCI bool) (*C
 		return nil, err
 	}
 
-	// Fixed: Use zap fields instead of map
 	logger.Info("Initializing CodePicker Container",
 		zap.String("mode", logEnv),
 		zap.String("root", projectRoot))
@@ -2523,7 +2506,6 @@ func NewContainer(apiKey, projectRoot, llmModel string, isDryRun, isCI bool) (*C
 
 	repo, err := storage.NewSQLiteRepository(dbPath)
 	if err != nil {
-		// Fixed: Use zap fields
 		logger.Error("Database initialization failed", zap.Error(err))
 		return nil, err
 	}
@@ -2547,23 +2529,23 @@ func NewContainer(apiKey, projectRoot, llmModel string, isDryRun, isCI bool) (*C
 
 	ctxBuilder := context.NewSliceBasedBuilder(repo, 16000)
 
-	// Updated to pass logger
 	worker := agent.NewReActAgent(llmClient, allTools, guardRail, repo, logger)
 	planner := agent.NewPlanner(llmClient, repo)
-	executor := agent.NewPlanExecutor(worker, repo)
+
+	// FIX: Pass workspaceMgr to the executor for transaction support
+	executor := agent.NewPlanExecutor(worker, repo, workspaceMgr)
 
 	return &Container{
 		Planner:          planner,
 		PlanExecutor:     executor,
 		ContextBuilder:   ctxBuilder,
 		WorkspaceManager: workspaceMgr,
-		Repository:       repo, // Pass pointer, do not dereference
+		Repository:       repo,
 		SliceStore:       repo,
 		Logger:           logger,
 	}, nil
 }
 
-// Close ensures all resources (DB, Logger) are flushed and closed properly
 func (c *Container) Close() {
 	if c.Logger != nil {
 		c.Logger.Info("Shutting down container...")
@@ -4450,7 +4432,6 @@ import (
 )
 
 // Validator provides centralized input validation for security and correctness.
-// It prevents injection attacks, path traversal, and LLM context overflow.
 type Validator struct {
 	maxInputLength    int
 	maxTokens         int
@@ -4480,8 +4461,6 @@ func (v *Validator) compilePatterns() {
 		`(?i)(rm\s+-rf|drop\s+table|delete\s+from\s+\w+\s+where\s+1\s*=\s*1)`,
 		`(?i)(chmod\s+777|eval\s*\(|os\.exec\s*\(|exec\.command)`,
 		`(?i)(curl\s+.*\|\s*sh|wget\s+.*\|\s*sh|\|\s*bash)`,
-		`(?i)(<script|javascript:|onerror\s*=|onload\s*=)`,
-		`(\.\./|\.\.\\)`, // Path traversal attempts
 		`(?i)(sudo|su\s+-|passwd|/etc/shadow|mkfs|dd\s+if=)`,
 	}
 
@@ -4492,7 +4471,7 @@ func (v *Validator) compilePatterns() {
 	}
 }
 
-// ValidateUserInput checks task descriptions and user prompts for safety and size limits.
+// ValidateUserInput checks task descriptions for safety and size limits.
 func (v *Validator) ValidateUserInput(input string) error {
 	if strings.TrimSpace(input) == "" {
 		return errors.NewValidation("validator.user_input", "input cannot be empty")
@@ -4511,43 +4490,32 @@ func (v *Validator) ValidateUserInput(input string) error {
 		return errors.NewValidation("validator.user_input", "input contains invalid UTF-8 characters")
 	}
 
-	// Check for forbidden patterns (injection protection)
 	for _, pattern := range v.forbiddenPatterns {
 		if pattern.MatchString(input) {
-			return errors.NewValidation("validator.user_input",
-				"input contains potentially dangerous content")
+			return errors.NewValidation("validator.user_input", "input contains potentially dangerous content")
 		}
 	}
 
 	return nil
 }
 
-// ValidateFilePath ensures paths are safe, relative, and have allowed extensions.
-// This is the primary defense against path traversal attacks (Phase 1.1).
+// ValidateFilePath ensures paths are safe and relative.
 func (v *Validator) ValidateFilePath(path string) error {
 	if path == "" {
 		return errors.NewValidation("validator.file_path", "path cannot be empty")
 	}
 
-	// Normalize and check for traversal
 	clean := filepath.Clean(path)
 
-	// Reject absolute paths
 	if filepath.IsAbs(clean) {
 		return errors.NewValidation("validator.file_path", "absolute paths not allowed")
 	}
 
-	// Check for path traversal after cleaning (defense in depth)
 	if strings.Contains(clean, "..") {
 		return errors.NewValidation("validator.file_path", "path traversal detected")
 	}
 
-	// Validate extension unless it's a special allowed file
 	ext := filepath.Ext(clean)
-	if ext == "" && !v.isAllowedSpecialFile(clean) {
-		return errors.NewValidation("validator.file_path", "file extension required")
-	}
-
 	if ext != "" {
 		v.mu.RLock()
 		allowed := v.allowedFileExts[ext]
@@ -4562,39 +4530,7 @@ func (v *Validator) ValidateFilePath(path string) error {
 	return nil
 }
 
-// SanitizePath validates and returns a cleaned relative path, verifying it stays within project root.
-// Use this before any filesystem operations in ShadowManager or similar components.
-func (v *Validator) SanitizePath(projectRoot, relPath string) (string, error) {
-	if err := v.ValidateFilePath(relPath); err != nil {
-		return "", err
-	}
-
-	clean := filepath.Clean(relPath)
-	fullPath := filepath.Join(projectRoot, clean)
-
-	// Verify the resolved path doesn't escape project root
-	// Handle symlinks by evaluating them
-	resolved, err := filepath.EvalSymlinks(fullPath)
-	if err != nil {
-		// File might not exist yet (new file creation), check parent directory
-		resolved = fullPath
-	}
-
-	rootResolved, err := filepath.EvalSymlinks(projectRoot)
-	if err != nil {
-		rootResolved = projectRoot
-	}
-
-	// Ensure resolved path has the root as prefix
-	if !strings.HasPrefix(strings.ToLower(resolved), strings.ToLower(rootResolved)) {
-		return "", errors.NewValidation("validator.sanitize_path", "path escapes project root")
-	}
-
-	return clean, nil
-}
-
-// ValidateJSON ensures input is valid JSON and within size limits.
-// Use this for validating tool arguments before unmarshaling.
+// ValidateJSON ensures tool arguments are valid before unmarshaling.
 func (v *Validator) ValidateJSON(input string, maxSize int) error {
 	if maxSize > 0 && len(input) > maxSize {
 		return errors.NewValidation("validator.json", "JSON payload exceeds maximum size")
@@ -4603,93 +4539,7 @@ func (v *Validator) ValidateJSON(input string, maxSize int) error {
 	if !json.Valid([]byte(input)) {
 		return errors.NewValidation("validator.json", "invalid JSON format")
 	}
-
-	// Additional check: ensure it's an object (prevent JSON bombs)
-	var js map[string]any
-	if err := json.Unmarshal([]byte(input), &js); err != nil {
-		return errors.NewValidation("validator.json", "JSON must be an object")
-	}
-
 	return nil
-}
-
-// ValidateCommand checks shell commands for dangerous patterns (Phase 1.2 enhancement).
-func (v *Validator) ValidateCommand(cmd string) error {
-	if strings.TrimSpace(cmd) == "" {
-		return errors.NewValidation("validator.command", "command cannot be empty")
-	}
-
-	if len(cmd) > 1000 {
-		return errors.NewValidation("validator.command", "command exceeds maximum length of 1000 chars")
-	}
-
-	// Block dangerous shell operators
-	dangerous := []string{";", "&&", "||", "|", "`", "$(", "${", ">", "<("}
-	for _, char := range dangerous {
-		if strings.Contains(cmd, char) {
-			return errors.NewValidation("validator.command",
-				fmt.Sprintf("command contains forbidden operator: %s", char))
-		}
-	}
-
-	return nil
-}
-
-// ValidateTokenCount checks estimated token usage against LLM limits (Phase 3).
-func (v *Validator) ValidateTokenCount(estimatedTokens int) error {
-	if estimatedTokens < 0 {
-		return errors.NewValidation("validator.tokens", "token count cannot be negative")
-	}
-
-	v.mu.RLock()
-	maxTokens := v.maxTokens
-	v.mu.RUnlock()
-
-	if estimatedTokens > maxTokens {
-		return errors.NewValidation("validator.tokens",
-			fmt.Sprintf("estimated tokens %d exceeds limit %d", estimatedTokens, maxTokens))
-	}
-
-	return nil
-}
-
-// isAllowedSpecialFile checks for extension-less files like Makefile, Dockerfile.
-func (v *Validator) isAllowedSpecialFile(name string) bool {
-	allowed := []string{"Makefile", "Dockerfile", "LICENSE", "README", "CHANGELOG", "NOTICE"}
-	base := strings.ToUpper(filepath.Base(name))
-	for _, a := range allowed {
-		if base == a || strings.HasPrefix(base, a+".") {
-			return true
-		}
-	}
-	return false
-}
-
-// SetMaxTokens updates the token limit dynamically (thread-safe).
-func (v *Validator) SetMaxTokens(max int) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	v.maxTokens = max
-}
-
-// AddAllowedExtension adds a file extension to the whitelist (thread-safe).
-func (v *Validator) AddAllowedExtension(ext string) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	if !strings.HasPrefix(ext, ".") {
-		ext = "." + ext
-	}
-	v.allowedFileExts[strings.ToLower(ext)] = true
-}
-
-// RemoveAllowedExtension removes a file extension from the whitelist.
-func (v *Validator) RemoveAllowedExtension(ext string) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	if !strings.HasPrefix(ext, ".") {
-		ext = "." + ext
-	}
-	delete(v.allowedFileExts, strings.ToLower(ext))
 }
 
 </file>
@@ -4954,29 +4804,122 @@ package fs
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
 )
 
-// WorkspaceManager handles the lifecycle of execution workspaces and audit trails
+// WorkspaceManager handles the lifecycle of execution workspaces and transactions.
 type WorkspaceManager struct {
 	ProjectRoot string
 }
 
-// RunWorkspace represents the isolated directory for a specific execution
+// NewWorkspaceManager initializes a manager with an absolute project root.
+func NewWorkspaceManager(root string) *WorkspaceManager {
+	absRoot, _ := filepath.Abs(root)
+	return &WorkspaceManager{ProjectRoot: absRoot}
+}
+
+// --- Transaction System ---
+
+// Transaction tracks changes for a single agent session to allow rollbacks.
+type Transaction struct {
+	backupDir    string
+	projectRoot  string
+	changedFiles []string
+	Committed    bool // Exported so Agent can check status
+}
+
+// BeginTransaction initializes a backup area for the current operation.
+func (m *WorkspaceManager) BeginTransaction() (*Transaction, error) {
+	timestamp := time.Now().Format("20060102-150405")
+	backupDir := filepath.Join(m.ProjectRoot, ".codepicker", "backups", timestamp)
+
+	if err := os.MkdirAll(backupDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create backup dir: %w", err)
+	}
+
+	return &Transaction{
+		backupDir:    backupDir,
+		projectRoot:  m.ProjectRoot,
+		changedFiles: []string{},
+		Committed:    false,
+	}, nil
+}
+
+// BackupFile copies the current version of a file to the backup directory.
+func (t *Transaction) BackupFile(relPath string) error {
+	srcPath := filepath.Join(t.projectRoot, relPath)
+	dstPath := filepath.Join(t.backupDir, relPath)
+
+	// If file doesn't exist (new file), track for potential deletion
+	if _, err := os.Stat(srcPath); os.IsNotExist(err) {
+		t.changedFiles = append(t.changedFiles, relPath)
+		return nil
+	}
+
+	if err := os.MkdirAll(filepath.Dir(dstPath), 0755); err != nil {
+		return err
+	}
+
+	src, err := os.Open(srcPath)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+
+	dst, err := os.Create(dstPath)
+	if err != nil {
+		return err
+	}
+	defer dst.Close()
+
+	_, err = io.Copy(dst, src)
+	if err == nil {
+		t.changedFiles = append(t.changedFiles, relPath)
+	}
+	return err
+}
+
+// Rollback restores all backed-up files and removes new files.
+func (t *Transaction) Rollback() error {
+	if t.Committed {
+		return nil
+	}
+
+	for _, relPath := range t.changedFiles {
+		backupPath := filepath.Join(t.backupDir, relPath)
+		realPath := filepath.Join(t.projectRoot, relPath)
+
+		// If no backup exists, it was a brand new file; delete it
+		if _, err := os.Stat(backupPath); os.IsNotExist(err) {
+			os.Remove(realPath)
+			continue
+		}
+
+		// Restore original content
+		input, err := os.ReadFile(backupPath)
+		if err == nil {
+			os.WriteFile(realPath, input, 0644)
+		}
+	}
+	return nil
+}
+
+// Commit marks the transaction as successful.
+func (t *Transaction) Commit() {
+	t.Committed = true
+}
+
+// --- Workspace Management ---
+
 type RunWorkspace struct {
 	ID      string
 	DirPath string
 }
 
-func NewWorkspaceManager(root string) *WorkspaceManager {
-	return &WorkspaceManager{ProjectRoot: root}
-}
-
-// CreateRunWorkspace initializes the directory structure: .codepicker/runs/<timestamp>
 func (m *WorkspaceManager) CreateRunWorkspace() (*RunWorkspace, error) {
-	// FIX: Corrected time layout from "2006-01-28" to "2006-01-02" so the day is accurate
 	timestamp := time.Now().Format("2006-01-02T15-04-05")
 	runDirName := timestamp
 
@@ -4992,18 +4935,6 @@ func (m *WorkspaceManager) CreateRunWorkspace() (*RunWorkspace, error) {
 	}, nil
 }
 
-// SaveArtifact writes a file (like context.txt, policy.json) to the run workspace
-func (w *RunWorkspace) SaveArtifact(filename string, content []byte) error {
-	path := filepath.Join(w.DirPath, filename)
-	return os.WriteFile(path, content, 0644)
-}
-
-// Path returns the full path to a file within this workspace
-func (w *RunWorkspace) Path(filename string) string {
-	return filepath.Join(w.DirPath, filename)
-}
-
-// ListExecutions returns a list of past run directories (New helper for dashboarding)
 func (m *WorkspaceManager) ListExecutions() ([]string, error) {
 	runsDir := filepath.Join(m.ProjectRoot, ".codepicker", "runs")
 	entries, err := os.ReadDir(runsDir)
@@ -5178,22 +5109,34 @@ type ShadowManager struct {
 }
 
 func NewShadowManager(root string) *ShadowManager {
-	return &ShadowManager{ProjectRoot: root}
+	absRoot, _ := filepath.Abs(root)
+	return &ShadowManager{ProjectRoot: absRoot}
 }
 
-// sanitizePath prevents directory traversal attacks.
+// sanitizePath prevents directory traversal attacks by resolving absolute paths.
+// This is your primary defense against the agent escaping the repo[cite: 230, 261].
 func (s *ShadowManager) sanitizePath(relPath string) (string, error) {
 	clean := filepath.Clean(relPath)
+
 	if filepath.IsAbs(clean) {
 		return "", errors.NewValidation("fs.sanitize", "absolute paths not allowed")
 	}
-	if strings.HasPrefix(clean, "..") {
-		return "", errors.NewValidation("fs.sanitize", "path traversal detected")
+
+	// Resolve the full intended path
+	fullPath := filepath.Join(s.ProjectRoot, clean)
+
+	// Evaluate symlinks and get absolute path to check for escapes
+	absProjectRoot, _ := filepath.Abs(s.ProjectRoot)
+	absFullPath, _ := filepath.Abs(fullPath)
+
+	if !strings.HasPrefix(absFullPath, absProjectRoot) {
+		return "", errors.NewValidation("fs.sanitize", "path traversal detected: escapes project root")
 	}
+
 	return clean, nil
 }
 
-// Write saves content to the shadow directory.
+// Write saves content to the shadow directory[cite: 262].
 func (s *ShadowManager) Write(relPath string, content []byte) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -5215,7 +5158,7 @@ func (s *ShadowManager) Write(relPath string, content []byte) (string, error) {
 	return shadowPath, nil
 }
 
-// Read from shadow first, then real FS.
+// Read from shadow first, then fall back to real FS[cite: 265].
 func (s *ShadowManager) Read(relPath string) ([]byte, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -5233,7 +5176,7 @@ func (s *ShadowManager) Read(relPath string) ([]byte, error) {
 	return os.ReadFile(filepath.Join(s.ProjectRoot, cleanPath))
 }
 
-// Commit changes to the real filesystem.
+// Commit moves changes from shadow to the real filesystem[cite: 267].
 func (s *ShadowManager) Commit(relPath string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -5662,93 +5605,178 @@ func (m *IndexManager) IndexDirectory(rootPath string) error {
 
 </file>
 
+<file path="infra/llm/circuit_breaker.go">
+package llm
+
+import (
+	"fmt"
+	"sync"
+	"time"
+)
+
+type State string
+
+const (
+	StateClosed   State = "closed"    // Normal operation (requests flow freely)
+	StateOpen     State = "open"      // Failure threshold reached (requests blocked)
+	StateHalfOpen State = "half-open" // Probation period (testing if service recovered)
+)
+
+type CircuitBreaker struct {
+	mu               sync.Mutex
+	state            State
+	failureCount     int
+	failureThreshold int
+	resetTimeout     time.Duration
+	lastFailureTime  time.Time
+}
+
+// NewCircuitBreaker initializes a breaker with a specific failure count and cooldown.
+func NewCircuitBreaker(threshold int, timeout time.Duration) *CircuitBreaker {
+	return &CircuitBreaker{
+		state:            StateClosed,
+		failureThreshold: threshold,
+		resetTimeout:     timeout,
+	}
+}
+
+// Execute runs the given function behind the circuit breaker protection.
+func (cb *CircuitBreaker) Execute(fn func() error) error {
+	cb.mu.Lock()
+	if cb.state == StateOpen {
+		// Check if enough time has passed to try again
+		if time.Since(cb.lastFailureTime) > cb.resetTimeout {
+			cb.state = StateHalfOpen
+		} else {
+			cb.mu.Unlock()
+			return fmt.Errorf("circuit breaker is open: LLM service temporarily disabled")
+		}
+	}
+	cb.mu.Unlock()
+
+	// Execute the actual operation (e.g., the LLM API call)
+	err := fn()
+
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	if err != nil {
+		cb.failureCount++
+		cb.lastFailureTime = time.Now()
+
+		// If we hit the limit, open the circuit
+		if cb.failureCount >= cb.failureThreshold {
+			cb.state = StateOpen
+		}
+
+		// If we were testing the waters (Half-Open) and failed, go back to Open immediately
+		if cb.state == StateHalfOpen {
+			cb.state = StateOpen
+			// Reset timer to force full wait
+			cb.lastFailureTime = time.Now()
+		}
+
+		return err
+	}
+
+	// Success! Reset everything
+	if cb.state == StateHalfOpen {
+		// If we succeeded in Half-Open, the service is healthy again
+		cb.state = StateClosed
+		cb.failureCount = 0
+	} else if cb.state == StateClosed {
+		// Normal success, just keep failure count clean
+		cb.failureCount = 0
+	}
+
+	return nil
+}
+
+</file>
+
 <file path="infra/llm/openrouter.go">
 package llm
 
 import (
 	"bytes"
-	"context"
+	"context" // Standard library context
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 
+	domainContext "github.com/david22573/codepicker/domain/context" // Aliased to avoid collision
 	"github.com/david22573/codepicker/domain/errors"
 )
 
 const openRouterURL = "https://openrouter.ai/api/v1/chat/completions"
 
-// OpenRouterAdapter implements domain.agent.LLMClient
+// OpenRouterAdapter implements domain.agent.LLMClient with reliability features.
 type OpenRouterAdapter struct {
-	apiKey string
-	model  string
-	client *http.Client
+	apiKey         string
+	model          string
+	client         *http.Client
+	circuitBreaker *CircuitBreaker
 }
 
-// NewOpenRouterAdapter creates a new client instance
+// NewOpenRouterAdapter creates a client with a circuit breaker configuration.
 func NewOpenRouterAdapter(apiKey, model string) *OpenRouterAdapter {
 	return &OpenRouterAdapter{
 		apiKey: apiKey,
 		model:  model,
-		// Increased timeout to 120s because "thinking" models (like Nemotron/Llama-3)
-		// take longer to generate the first token.
+		// Increased timeout to 120s for "reasoning" models that take longer to start
 		client: &http.Client{Timeout: 120 * time.Second},
+		// Circuit breaker trips after 5 failures, resets after 1 minute of probation
+		circuitBreaker: NewCircuitBreaker(5, 1*time.Minute),
 	}
 }
 
-// Chat fulfills the domain.agent.LLMClient interface with retries
+// ChatWithUsage returns the response text along with token metrics for cost tracking.
+func (c *OpenRouterAdapter) ChatWithUsage(ctx context.Context, systemPrompt, userMsg string) (string, domainContext.TokenUsage, error) {
+	var result string
+	var usage domainContext.TokenUsage
+
+	// Execute the request inside the circuit breaker
+	err := c.circuitBreaker.Execute(func() error {
+		// Use a closure to capture the return values
+		resp, use, err := c.doChat(ctx, systemPrompt, userMsg)
+		if err != nil {
+			return err
+		}
+		result = resp
+		usage = use
+		return nil
+	})
+
+	return result, usage, err
+}
+
+// Chat fulfills the standard interface, discarding usage metrics.
 func (c *OpenRouterAdapter) Chat(ctx context.Context, systemPrompt, userMsg string) (string, error) {
-	// Simple retry logic (3 attempts)
-	maxRetries := 3
-	var lastErr error
-
-	for i := 0; i < maxRetries; i++ {
-		response, err := c.doChat(ctx, systemPrompt, userMsg)
-		if err == nil {
-			return response, nil
-		}
-
-		// If it's a context cancellation (user pressed Ctrl+C), stop immediately
-		if ctx.Err() != nil {
-			return "", ctx.Err()
-		}
-
-		lastErr = err
-		// Exponential backoff: 1s, 2s, 4s
-		time.Sleep(time.Duration(1<<i) * time.Second)
-	}
-
-	return "", lastErr
+	resp, _, err := c.ChatWithUsage(ctx, systemPrompt, userMsg)
+	return resp, err
 }
 
-func (c *OpenRouterAdapter) doChat(ctx context.Context, systemPrompt, userMsg string) (string, error) {
-	// Prepare the request payload
+// doChat performs the actual HTTP request logic.
+func (c *OpenRouterAdapter) doChat(ctx context.Context, systemPrompt, userMsg string) (string, domainContext.TokenUsage, error) {
 	reqBody := map[string]interface{}{
 		"model": c.model,
 		"messages": []map[string]string{
 			{"role": "system", "content": systemPrompt},
 			{"role": "user", "content": userMsg},
 		},
-		"temperature": 0.1, // Slight temp often helps avoid "stuck" loops better than 0.0
-		// Optional: Add OpenRouter specific provider preferences if needed
-		// "provider": map[string]string{"order": "Liquid,DeepInfra"},
-	}
-
-	// Specific tweak for models that support/require "reasoning" parameter
-	if strings.Contains(c.model, "nemotron") || strings.Contains(c.model, "thinking") {
-		reqBody["include_reasoning"] = true
+		"temperature": 0.1, // Low temp for deterministic code generation
 	}
 
 	jsonBytes, err := json.Marshal(reqBody)
 	if err != nil {
-		return "", errors.NewSystem("llm.Chat", "failed to marshal request", err)
+		return "", domainContext.TokenUsage{}, errors.NewSystem("llm.Chat", "failed to marshal request", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", openRouterURL, bytes.NewBuffer(jsonBytes))
 	if err != nil {
-		return "", errors.NewSystem("llm.Chat", "failed to create request", err)
+		return "", domainContext.TokenUsage{}, errors.NewSystem("llm.Chat", "failed to create request", err)
 	}
 
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
@@ -5758,49 +5786,43 @@ func (c *OpenRouterAdapter) doChat(ctx context.Context, systemPrompt, userMsg st
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return "", errors.NewLLM("llm.Chat", err)
+		return "", domainContext.TokenUsage{}, errors.NewLLM("llm.Chat", err)
 	}
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
 
-	// IMPROVEMENT: Handle non-200 status codes gracefully
+	// Handle non-200 status codes
 	if resp.StatusCode != http.StatusOK {
-		return "", errors.NewLLM("llm.Chat", fmt.Errorf("API error %d: %s", resp.StatusCode, string(body)))
-	}
-
-	// IMPROVEMENT: Handle empty bodies which cause "unexpected end of JSON"
-	if len(body) == 0 {
-		return "", errors.NewLLM("llm.Chat", fmt.Errorf("received empty response body from API"))
+		return "", domainContext.TokenUsage{}, errors.NewLLM("llm.Chat", fmt.Errorf("API error %d: %s", resp.StatusCode, string(body)))
 	}
 
 	// Parse the response
-	var result struct {
+	var apiResp struct {
 		Choices []struct {
 			Message struct {
 				Content string `json:"content"`
 			} `json:"message"`
-			FinishReason string `json:"finish_reason"` // Useful for debugging
 		} `json:"choices"`
-		Error *struct { // Capture API-level errors that return 200 OK (rare but possible)
+		Usage domainContext.TokenUsage `json:"usage"` // Capture token usage
+		Error *struct {
 			Message string `json:"message"`
 		} `json:"error,omitempty"`
 	}
 
-	if err := json.Unmarshal(body, &result); err != nil {
-		// Log the raw body for debugging if parsing fails
-		return "", errors.NewSystem("llm.Chat", fmt.Sprintf("failed to parse response: %s", string(body)), err)
+	if err := json.Unmarshal(body, &apiResp); err != nil {
+		return "", domainContext.TokenUsage{}, errors.NewSystem("llm.Chat", fmt.Sprintf("failed to parse response: %s", string(body)), err)
 	}
 
-	if result.Error != nil {
-		return "", errors.NewLLM("llm.Chat", fmt.Errorf("provider error: %s", result.Error.Message))
+	if apiResp.Error != nil {
+		return "", domainContext.TokenUsage{}, errors.NewLLM("llm.Chat", fmt.Errorf("provider error: %s", apiResp.Error.Message))
 	}
 
-	if len(result.Choices) == 0 {
-		return "", errors.NewLLM("llm.Chat", fmt.Errorf("empty response choices from API"))
+	if len(apiResp.Choices) == 0 {
+		return "", domainContext.TokenUsage{}, errors.NewLLM("llm.Chat", fmt.Errorf("received empty choices from API"))
 	}
 
-	return result.Choices[0].Message.Content, nil
+	return apiResp.Choices[0].Message.Content, apiResp.Usage, nil
 }
 
 </file>

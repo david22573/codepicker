@@ -6,55 +6,68 @@ import (
 
 	"github.com/david22573/codepicker/domain/agent"
 	"github.com/david22573/codepicker/domain/task"
+	"github.com/david22573/codepicker/infra/fs"
 )
 
 type PlanExecutor struct {
-	worker agent.Agent
-	repo   agent.Repository
+	worker       agent.Agent
+	repo         agent.Repository
+	workspaceMgr *fs.WorkspaceManager
 }
 
-func NewPlanExecutor(worker agent.Agent, repo agent.Repository) *PlanExecutor {
+// NewPlanExecutor initializes the executor with a workspace manager for transactions.
+func NewPlanExecutor(worker agent.Agent, repo agent.Repository, ws *fs.WorkspaceManager) *PlanExecutor {
 	return &PlanExecutor{
-		worker: worker,
-		repo:   repo,
+		worker:       worker,
+		repo:         repo,
+		workspaceMgr: ws,
 	}
 }
 
 func (e *PlanExecutor) Execute(ctx context.Context, plan *task.Plan) error {
+	txn, err := e.workspaceMgr.BeginTransaction()
+	if err != nil {
+		return fmt.Errorf("failed to start transaction: %w", err)
+	}
+
+	defer func() {
+		// Updated to access the exported 'Committed' field
+		if !txn.Committed {
+			fmt.Println("⚠️  [SYSTEM] Error detected. Rolling back changes...")
+			txn.Rollback()
+		}
+	}()
+
 	plan.Status = task.StatusRunning
 	_ = e.repo.SavePlan(ctx, plan)
 
-	fmt.Println("\n---------------------------------------------------")
-	fmt.Printf("📋 [PLANNER] Plan ID: %s (%d steps)\n", plan.ID, len(plan.Steps))
-	fmt.Printf("🎯 [PLANNER] Goal: %s\n", plan.OriginalTask)
-	fmt.Println("---------------------------------------------------")
-
 	for _, step := range plan.Steps {
 		if step.Status == task.StatusCompleted {
-			fmt.Printf("⏭️  [PLANNER] Skipping completed step %d\n", step.ID)
 			continue
 		}
 
 		fmt.Printf("\n🔹 [PLANNER] STEP %d/%d: %s\n", step.ID, len(plan.Steps), step.Description)
 
-		workerInput := fmt.Sprintf("%s\n\nFocus on these files: %v", step.Instruction, step.Files)
+		// Before execution, backup files
+		for _, file := range step.Files {
+			txn.BackupFile(file)
+		}
 
-		// The worker now handles its own verbose logging (Agent/System output)
+		workerInput := fmt.Sprintf("%s\n\nFocus on these files: %v", step.Instruction, step.Files)
 		result, err := e.worker.Run(ctx, workerInput)
 
 		if err != nil {
-			fmt.Printf("\n❌ [PLANNER] Step %d Failed.\n", step.ID)
 			plan.MarkStepFailed(step.ID, err)
 			plan.Status = task.StatusFailed
 			_ = e.repo.SavePlan(ctx, plan)
-			return err
+			return err // Triggers rollback
 		}
 
-		fmt.Printf("\n✨ [PLANNER] Step %d Complete.\n", step.ID)
 		plan.MarkStepComplete(step.ID, result)
 		_ = e.repo.SavePlan(ctx, plan)
 	}
 
+	txn.Commit()
 	plan.Status = task.StatusCompleted
 	return e.repo.SavePlan(ctx, plan)
 }

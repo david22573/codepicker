@@ -8,6 +8,7 @@ import (
 
 	"github.com/david22573/codepicker/app"
 	"github.com/david22573/codepicker/domain/task"
+	"github.com/david22573/codepicker/infra/ui"
 	"github.com/spf13/cobra"
 )
 
@@ -22,7 +23,7 @@ var runCmd = &cobra.Command{
 	Short: "Execute a coding task (via plan)",
 	Run: func(cmd *cobra.Command, args []string) {
 		if planIDFlag == "" && len(args) < 1 {
-			fmt.Println("Error: You must provide a task string OR a --plan <id>")
+			ui.PrintError("You must provide a task string OR a --plan <id>")
 			_ = cmd.Usage()
 			os.Exit(1)
 		}
@@ -42,7 +43,7 @@ var runCmd = &cobra.Command{
 				json.NewEncoder(os.Stdout).Encode(res)
 				os.Exit(1)
 			}
-			fmt.Printf("\n❌ EXECUTION FAILED: %v\n", err)
+			ui.PrintError(fmt.Sprintf("EXECUTION FAILED: %v", err))
 			os.Exit(1)
 		}
 	},
@@ -56,10 +57,12 @@ func executeRun(taskInput, planID string) error {
 
 	cwd, _ := os.Getwd()
 
+	// Initialize Container
 	container, err := app.NewContainer(apiKey, cwd, "", dryRunFlag, ciFlag)
 	if err != nil {
 		return err
 	}
+	defer container.Close()
 
 	if !ciFlag {
 		printSafetyBanner(dryRunFlag)
@@ -68,9 +71,10 @@ func executeRun(taskInput, planID string) error {
 	ctx := context.Background()
 	var plan *task.Plan
 
+	// --- Step 1: Planning ---
 	if planID != "" {
 		if !ciFlag {
-			fmt.Printf("📂 [SYSTEM] Loading Plan %s...\n", planID)
+			ui.PrintInfo(fmt.Sprintf("Loading Plan %s...", planID))
 		}
 		p, err := container.Repository.GetPlan(ctx, planID)
 		if err != nil {
@@ -78,64 +82,94 @@ func executeRun(taskInput, planID string) error {
 		}
 		plan = p
 		if plan.Status == task.StatusCompleted && !ciFlag {
-			fmt.Println("⚠️  [SYSTEM] Warning: This plan is already marked as completed.")
+			ui.PrintWarning("This plan is already marked as completed.")
 		}
 	} else {
 		if !ciFlag {
-			fmt.Printf("🚀 [SYSTEM] Initializing task: %s\n", taskInput)
-			fmt.Println("🧠 [AGENT] Generating plan...")
-		}
+			ui.PrintHeader("Planning Phase")
 
-		// FIX: Use BuildForTask(taskInput) instead of Build()
-		// The new builder returns a string (markdown context), not an object.
-		fileContext, err := container.ContextBuilder.BuildForTask(taskInput)
-		if err != nil {
-			fmt.Printf("⚠️  Warning: Context generation incomplete: %v\n", err)
-		}
+			// Use Bubble Tea Spinner for the heavy lifting
+			var fileContext string
 
-		// Pass the generated string context to the planner
-		p, err := container.Planner.CreatePlan(ctx, taskInput, fileContext)
-		if err != nil {
-			return err
-		}
-		plan = p
-		if !ciFlag {
-			fmt.Printf("✅ [SYSTEM] Plan Generated (ID: %s)\n", plan.ID)
+			err := ui.RunSpinner("Analyzing project context...", func() error {
+				var innerErr error
+				fileContext, innerErr = container.ContextBuilder.BuildForTask(taskInput)
+				return innerErr
+			})
+			if err != nil {
+				ui.PrintWarning(fmt.Sprintf("Context generation partial: %v", err))
+			}
+
+			err = ui.RunSpinner("Generating implementation plan...", func() error {
+				var innerErr error
+				plan, innerErr = container.Planner.CreatePlan(ctx, taskInput, fileContext)
+				return innerErr
+			})
+
+			if err != nil {
+				return err
+			}
+
+			ui.PrintSuccess(fmt.Sprintf("Plan Generated (ID: %s)", plan.ID))
+
+			// Display Plan Summary using Lipgloss style
+			fmt.Printf("\n%s\n", ui.InfoStyle.Render("Strategy: "+plan.Reasoning))
+			for i, step := range plan.Steps {
+				fmt.Printf("   %d. %s\n", i+1, step.Description)
+			}
+			fmt.Println()
+		} else {
+			// CI Mode - Silent
+			fileContext, _ := container.ContextBuilder.BuildForTask(taskInput)
+			p, err := container.Planner.CreatePlan(ctx, taskInput, fileContext)
+			if err != nil {
+				return err
+			}
+			plan = p
 		}
 	}
 
+	// --- Step 2: Execution ---
 	if !ciFlag {
-		fmt.Println("▶️  [SYSTEM] Starting Execution Phase...")
+		ui.PrintHeader("Execution Phase")
 	}
 
+	// We don't use a spinner here because the agent logs real-time steps to stdout
 	execErr := container.PlanExecutor.Execute(ctx, plan)
 
+	// --- Step 3: Reporting ---
 	if ciFlag {
 		return handleCIOutput(plan, execErr)
+	}
+
+	// Print Cost Summary
+	if container.CostTracker != nil {
+		container.CostTracker.PrintSummary()
 	}
 
 	if execErr != nil {
 		return execErr
 	}
-	fmt.Println("\n✅ [SYSTEM] Task Completed Successfully.")
+
+	ui.PrintSuccess("Task Completed Successfully.")
 	return nil
 }
-func printSafetyBanner(isDryRun bool) {
-	fmt.Println("\n===================================================")
-	fmt.Println("🛡️  CodePicker Safety Guardrails Active")
-	fmt.Println("===================================================")
 
+func printSafetyBanner(isDryRun bool) {
 	if isDryRun {
-		fmt.Println("🔒 MODE: DRY-RUN (Read-Only)")
-		fmt.Println("   • File system writes are DISABLED")
-		fmt.Println("   • Shell commands are DISABLED")
+		fmt.Println(ui.BoxStyle.Render(
+			ui.InfoStyle.Render("🔒 MODE: DRY-RUN (Read-Only)\n") +
+				"• File system writes are DISABLED\n" +
+				"• Shell commands are DISABLED",
+		))
 	} else {
-		fmt.Println("⚡ MODE: LIVE EXECUTION (Write-Enabled)")
-		fmt.Println("   ⚠️  The agent has permission to modify files.")
-		fmt.Println("   ⚠️  Shadow filesystem is ACTIVE for safety rollback.")
-		fmt.Println("   • Monitor the '🤖 [AGENT]' logs below closely.")
+		fmt.Println(ui.BoxStyle.Render(
+			ui.WarningStyle.Render("⚡ MODE: LIVE EXECUTION (Write-Enabled)\n") +
+				"• The agent has permission to modify files.\n" +
+				"• Shadow filesystem is ACTIVE for safety rollback.",
+		))
 	}
-	fmt.Println("===================================================\n")
+	fmt.Println()
 }
 
 func handleCIOutput(plan *task.Plan, execErr error) error {

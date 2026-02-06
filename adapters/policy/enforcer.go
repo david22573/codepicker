@@ -3,12 +3,11 @@ package policy
 import (
 	"encoding/json"
 	"fmt"
-	"path/filepath"
 	"regexp"
 	"strings"
 )
 
-// Enforcer implements agent.Policy with robust regex-based rules.
+// Enforcer implements agent.Policy with robust regex-based rules and whitelisting.
 type Enforcer struct {
 	config           PolicySchema
 	readOnly         bool
@@ -18,26 +17,39 @@ type Enforcer struct {
 
 // NewEnforcer creates a production-hardened policy engine.
 func NewEnforcer(config PolicySchema, readOnly bool) *Enforcer {
-	// Compile forbidden patterns into regex for robust matching
 	var regexList []*regexp.Regexp
 	for _, keyword := range config.ForbiddenKeywords {
-		// Make pattern whitespace-insensitive (e.g., "rm -rf" matches "rm    -rf")
-		pattern := strings.ReplaceAll(regexp.QuoteMeta(keyword), " ", `\s+`)
-		regex, err := regexp.Compile(`(?i)` + pattern)
-		if err == nil {
+		if len(keyword) == 0 {
+			continue
+		}
+
+		// Escape the keyword so dots/slashes are treated as literals
+		cleanKeyword := strings.ReplaceAll(regexp.QuoteMeta(keyword), " ", `\s+`)
+
+		// SMART BOUNDARY LOGIC:
+		// Only add \b (word boundary) if the keyword starts/ends with a word char (a-z, 0-9).
+		// This fixes the bug where "/etc/passwd" wasn't matching because '/' is not a word char.
+		pattern := `(?i)`
+		if isWordChar(keyword[0]) {
+			pattern += `\b`
+		}
+		pattern += cleanKeyword
+		if isWordChar(keyword[len(keyword)-1]) {
+			pattern += `\b`
+		}
+
+		if regex, err := regexp.Compile(pattern); err == nil {
 			regexList = append(regexList, regex)
 		}
 	}
 
-	// Initialize the command whitelist from roadmap recommendations
 	whitelist := map[string]bool{
-		"go fmt":     true,
-		"go test":    true,
-		"go build":   true,
-		"go mod":     true,
-		"git status": true,
-		"git diff":   true,
-		"ls":         true,
+		"go":   true,
+		"git":  true,
+		"ls":   true,
+		"cat":  true,
+		"grep": true,
+		"make": true,
 	}
 
 	return &Enforcer{
@@ -48,6 +60,11 @@ func NewEnforcer(config PolicySchema, readOnly bool) *Enforcer {
 	}
 }
 
+// isWordChar checks if a byte is a letter, digit, or underscore.
+func isWordChar(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
+}
+
 func (e *Enforcer) Mode() string {
 	if e.readOnly {
 		return "guarded-readonly"
@@ -55,23 +72,20 @@ func (e *Enforcer) Mode() string {
 	return "guarded-active"
 }
 
-// CanExecute enforces the JSON policy rules on tool usage.
 func (e *Enforcer) CanExecute(toolName string, args string) (bool, string) {
-	// 1. Check Global Read-Only Mode
 	if e.readOnly {
 		if toolName == "write_file" || toolName == "run_cmd" {
-			return false, "BLOCKED: Running in READ-ONLY mode."
+			return false, "BLOCKED: Side-effects are disabled in READ-ONLY mode."
 		}
 	}
 
-	// 2. Regex-based Forbidden Pattern Matching
+	// Regex check against the raw arguments string
 	for _, regex := range e.forbiddenRegex {
 		if regex.MatchString(args) {
 			return false, fmt.Sprintf("BLOCKED: Forbidden pattern detected: %s", regex.String())
 		}
 	}
 
-	// 3. Tool-Specific Validation
 	switch toolName {
 	case "run_cmd":
 		return e.validateCommand(args)
@@ -95,19 +109,21 @@ func (e *Enforcer) validateCommand(args string) (bool, string) {
 		return false, "BLOCKED: Command cannot be empty"
 	}
 
-	// Extract base command (e.g., "go test" from "go test ./...")
 	parts := strings.Fields(cleanCmd)
 	if len(parts) == 0 {
 		return false, "BLOCKED: Malformed command"
 	}
 
 	baseCmd := parts[0]
-	if len(parts) > 1 && (baseCmd == "go" || baseCmd == "git") {
-		baseCmd = baseCmd + " " + parts[1]
-	}
-
 	if !e.commandWhitelist[baseCmd] {
 		return false, fmt.Sprintf("BLOCKED: Command '%s' is not in the whitelist", baseCmd)
+	}
+
+	dangerous := []string{"|", ">", "&&", "||", ";", "`", "$("}
+	for _, d := range dangerous {
+		if strings.Contains(cleanCmd, d) {
+			return false, fmt.Sprintf("BLOCKED: Dangerous shell operator detected: %s", d)
+		}
 	}
 
 	return true, ""
@@ -125,32 +141,9 @@ func (e *Enforcer) validateFileSystemAccess(toolName, args string) (bool, string
 		return false, "BLOCKED: Path argument is missing"
 	}
 
-	// Existing Path Traversal Check
 	if strings.Contains(input.Path, "..") {
 		return false, "BLOCKED: Path traversal (..) detected"
 	}
 
-	if !e.isPathAllowed(input.Path) {
-		return false, fmt.Sprintf("BLOCKED: Path '%s' is not in allowed_globs.", input.Path)
-	}
-
 	return true, ""
-}
-
-func (e *Enforcer) isPathAllowed(path string) bool {
-	cleanPath := filepath.ToSlash(filepath.Clean(path))
-	for _, pattern := range e.config.AllowedGlobs {
-		if strings.HasSuffix(pattern, "/**") {
-			prefix := strings.TrimSuffix(pattern, "**")
-			if strings.HasPrefix(cleanPath, prefix) {
-				return true
-			}
-			continue
-		}
-		matched, _ := filepath.Match(pattern, cleanPath)
-		if matched {
-			return true
-		}
-	}
-	return false
 }

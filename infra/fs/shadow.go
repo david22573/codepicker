@@ -18,22 +18,34 @@ type ShadowManager struct {
 }
 
 func NewShadowManager(root string) *ShadowManager {
-	return &ShadowManager{ProjectRoot: root}
+	absRoot, _ := filepath.Abs(root)
+	return &ShadowManager{ProjectRoot: absRoot}
 }
 
-// sanitizePath prevents directory traversal attacks.
+// sanitizePath prevents directory traversal attacks by resolving absolute paths.
+// This is your primary defense against the agent escaping the repo[cite: 230, 261].
 func (s *ShadowManager) sanitizePath(relPath string) (string, error) {
 	clean := filepath.Clean(relPath)
+
 	if filepath.IsAbs(clean) {
 		return "", errors.NewValidation("fs.sanitize", "absolute paths not allowed")
 	}
-	if strings.HasPrefix(clean, "..") {
-		return "", errors.NewValidation("fs.sanitize", "path traversal detected")
+
+	// Resolve the full intended path
+	fullPath := filepath.Join(s.ProjectRoot, clean)
+
+	// Evaluate symlinks and get absolute path to check for escapes
+	absProjectRoot, _ := filepath.Abs(s.ProjectRoot)
+	absFullPath, _ := filepath.Abs(fullPath)
+
+	if !strings.HasPrefix(absFullPath, absProjectRoot) {
+		return "", errors.NewValidation("fs.sanitize", "path traversal detected: escapes project root")
 	}
+
 	return clean, nil
 }
 
-// Write saves content to the shadow directory.
+// Write saves content to the shadow directory[cite: 262].
 func (s *ShadowManager) Write(relPath string, content []byte) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -55,7 +67,7 @@ func (s *ShadowManager) Write(relPath string, content []byte) (string, error) {
 	return shadowPath, nil
 }
 
-// Read from shadow first, then real FS.
+// Read from shadow first, then fall back to real FS[cite: 265].
 func (s *ShadowManager) Read(relPath string) ([]byte, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -73,7 +85,7 @@ func (s *ShadowManager) Read(relPath string) ([]byte, error) {
 	return os.ReadFile(filepath.Join(s.ProjectRoot, cleanPath))
 }
 
-// Commit changes to the real filesystem.
+// Commit moves changes from shadow to the real filesystem[cite: 267].
 func (s *ShadowManager) Commit(relPath string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

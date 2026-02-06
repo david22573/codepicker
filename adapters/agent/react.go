@@ -3,24 +3,30 @@ package agent
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/david22573/codepicker/domain/agent"
+	"github.com/david22573/codepicker/domain/audit"
+	domainContext "github.com/david22573/codepicker/domain/context"
 	"github.com/david22573/codepicker/domain/errors"
+	"github.com/david22573/codepicker/domain/validation"
+	"github.com/david22573/codepicker/infra/llm"
 	"github.com/david22573/codepicker/infra/logging"
 	"go.uber.org/zap"
 )
 
-// ReActAgent implements domain.agent.Agent using the ReAct pattern
+// ReActAgent implements domain.agent.Agent using the ReAct pattern.
 type ReActAgent struct {
-	model   agent.LLMClient
-	tools   map[string]agent.Tool
-	policy  agent.Policy
-	repo    agent.Repository
-	logger  *logging.Logger
-	sysMsg  string
-	maxTurn int
+	model       agent.LLMClient
+	tools       map[string]agent.Tool
+	policy      agent.Policy
+	repo        agent.Repository
+	logger      *logging.Logger
+	costTracker *llm.CostTracker // Phase 3: Cost Tracking
+	sysMsg      string
+	maxTurn     int
 }
 
 func NewReActAgent(
@@ -29,6 +35,7 @@ func NewReActAgent(
 	policy agent.Policy,
 	repo agent.Repository,
 	logger *logging.Logger,
+	costTracker *llm.CostTracker, // Injected dependency
 ) *ReActAgent {
 	toolMap := make(map[string]agent.Tool)
 	var toolDescs strings.Builder
@@ -61,13 +68,14 @@ Input: {"path": "main.go"}
 Begin.`, toolDescs.String())
 
 	return &ReActAgent{
-		model:   model,
-		tools:   toolMap,
-		policy:  policy,
-		repo:    repo,
-		logger:  logger,
-		sysMsg:  systemPrompt,
-		maxTurn: 15,
+		model:       model,
+		tools:       toolMap,
+		policy:      policy,
+		repo:        repo,
+		logger:      logger,
+		costTracker: costTracker,
+		sysMsg:      systemPrompt,
+		maxTurn:     15,
 	}
 }
 
@@ -76,80 +84,97 @@ func (a *ReActAgent) Name() string {
 }
 
 func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) {
-	// Create a context-aware logger for this run
+	// Phase 1: Validation
+	validator := validation.NewValidator()
+	if err := validator.ValidateTask(taskInput); err != nil {
+		return "", fmt.Errorf("invalid task: %w", err)
+	}
+
+	// Phase 3: Audit Trail Initialization
+	execID := fmt.Sprintf("exec-%d", time.Now().Unix())
+	auditTrail := audit.NewAuditTrail(execID)
+
+	// Create a context-aware logger
 	logger := a.logger.WithContext(ctx)
 
-	execID := fmt.Sprintf("exec-%d", time.Now().Unix())
 	execution := agent.NewExecution(execID, "adhoc-plan")
-
-	// Log the start of the run
-	logger.Info("Agent Run Started",
-		zap.String("task", taskInput),
-		zap.String("execution_id", execID))
+	logger.Info("Agent Run Started", zap.String("task", taskInput), zap.String("execution_id", execID))
 
 	if err := a.repo.SaveExecution(ctx, execution); err != nil {
-		logger.Error("Failed to persist execution start", zap.Error(err))
 		return "", err
 	}
 
+	auditTrail.Record("start", map[string]interface{}{"task": taskInput})
 	currentContext := fmt.Sprintf("TASK: %s\n", taskInput)
 
 	for i := 0; i < a.maxTurn; i++ {
-
-		// Log the turn start
 		logger.Debug("Starting Turn", zap.Int("turn", i+1))
 
-		response, err := a.model.Chat(ctx, a.sysMsg, currentContext)
+		// Phase 3: Cost Tracking Integration
+		// We use type assertion to check if the model supports usage tracking
+		var response string
+		var err error
+		var usage domainContext.TokenUsage
+
+		if usageClient, ok := a.model.(interface {
+			ChatWithUsage(context.Context, string, string) (string, domainContext.TokenUsage, error)
+		}); ok {
+			response, usage, err = usageClient.ChatWithUsage(ctx, a.sysMsg, currentContext)
+			if err == nil {
+				cost := a.costTracker.RecordUsage(usage.PromptTokens, usage.CompletionTokens)
+				logger.Debug("LLM Cost", zap.Float64("cost", cost))
+			}
+		} else {
+			// Fallback for models without usage support
+			response, err = a.model.Chat(ctx, a.sysMsg, currentContext)
+		}
+
 		if err != nil {
-			logger.Error("LLM Chat Failed", zap.Error(err))
 			return "", errors.NewLLM("agent.Run", err)
 		}
 
 		thought, toolName, toolArgs := parseReActResponse(response)
 
-		// Log the Agent's reasoning
+		auditTrail.Record("turn", map[string]interface{}{
+			"turn_id": i + 1,
+			"thought": thought,
+			"tool":    toolName,
+			"args":    toolArgs,
+		})
+
 		logger.Info("Agent Thought", zap.String("thought", thought))
 
 		if toolName == "" {
-			logger.Info("Agent Finished", zap.String("response", response))
 			execution.Finish()
 			_ = a.repo.SaveExecution(ctx, execution)
+
+			// Save Audit Trail to disk
+			auditTrail.Record("finish", map[string]interface{}{"result": response})
+			_ = auditTrail.Save(filepath.Join(".codepicker", "audit", fmt.Sprintf("%s.json", execID)))
+
 			return response, nil
 		}
 
-		// Log the intent to act
-		logger.Info("Tool Request",
-			zap.String("tool", toolName),
-			zap.String("args", toolArgs))
-
-		// 1. Policy Check
+		// Phase 1: Security & Policy Check
 		allowed, reason := a.policy.CanExecute(toolName, toolArgs)
 		if !allowed {
 			toolOut := fmt.Sprintf("Error: Policy Violation: %s", reason)
-
-			// Critical Security Log
-			logger.Warn("Guardrail Blocked Action",
-				zap.String("tool", toolName),
-				zap.String("reason", reason))
+			logger.Warn("Guardrail Blocked Action", zap.String("tool", toolName), zap.String("reason", reason))
 
 			currentContext += fmt.Sprintf("\nThought: %s\nAction: %s\nInput: %s\nObservation: %s\n", thought, toolName, toolArgs, toolOut)
 			continue
 		}
 
-		// 2. Execution
+		// Tool Execution
 		tool, exists := a.tools[toolName]
 		var toolOut string
 		startTime := time.Now()
 
 		if !exists {
 			toolOut = fmt.Sprintf("Error: Tool '%s' not found.", toolName)
-			logger.Warn("Tool Not Found", zap.String("tool", toolName))
 		} else {
-			// Execute and measure
 			toolOut, err = tool.Execute(ctx, toolArgs)
 			duration := time.Since(startTime)
-
-			// Log the result using the standardized helper
 			logger.LogToolExecution(toolName, toolArgs, duration, err)
 
 			if err != nil {
@@ -163,6 +188,5 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 		currentContext += fmt.Sprintf("\nThought: %s\nAction: %s\nInput: %s\nObservation: %s\n", thought, toolName, toolArgs, toolOut)
 	}
 
-	logger.Error("Max Turns Exceeded")
-	return "", errors.NewSystem("agent.Run", fmt.Sprintf("Max turns (%d) exceeded without final answer", a.maxTurn), nil)
+	return "", errors.NewSystem("agent.Run", fmt.Sprintf("Max turns (%d) exceeded", a.maxTurn), nil)
 }
