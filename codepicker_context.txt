@@ -1,11 +1,10 @@
-Project Context Dump (06 Feb 26 01:04 PST)
+Project Context Dump (06 Feb 26 01:29 PST)
 Format: xml
-Total Files: 75
+Total Files: 74
 
 # Project Structure
 <file_tree>
 - Dockerfile
-- LICENSE
 - Makefile
 - action.yml
 - adapters/agent/auditor.go
@@ -41,13 +40,14 @@ Total Files: 75
 - cmd/root.go
 - cmd/run.go
 - codepicker_context.txt
-- context_dump.sh
+- config.json
 - domain/agent/agent.go
 - domain/agent/execution.go
 - domain/agent/planner.go
 - domain/audit/provenance.go
 - domain/audit/report.go
 - domain/audit/trail.go
+- domain/config/config.go
 - domain/context/llmcontext.go
 - domain/context/slice.go
 - domain/errors/errors.go
@@ -78,7 +78,6 @@ Total Files: 75
 - tests/integration/rollback_test.go
 - tests/integration/security_test.go
 - tests/integration/setup_test.go
-- tests/run_tests.sh
 </file_tree>
 
 # File Contents
@@ -120,211 +119,6 @@ ENV OPENROUTER_API_KEY=""
 # Entrypoint to server mode by default, but allow overriding
 ENTRYPOINT ["./codepicker"]
 CMD ["serve"]
-
-</file>
-
-<file path="LICENSE">
-                                 Apache License
-                           Version 2.0, January 2004
-                        http://www.apache.org/licenses/
-
-   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
-
-   1. Definitions.
-
-      "License" shall mean the terms and conditions for use, reproduction,
-      and distribution as defined by Sections 1 through 9 of this document.
-
-      "Licensor" shall mean the copyright owner or entity authorized by
-      the copyright owner that is granting the License.
-
-      "Legal Entity" shall mean the union of the acting entity and all
-      other entities that control, are controlled by, or are under common
-      control with that entity. For the purposes of this definition,
-      "control" means (i) the power, direct or indirect, to cause the
-      direction or management of such entity, whether by contract or
-      otherwise, or (ii) ownership of fifty percent (50%) or more of the
-      outstanding shares, or (iii) beneficial ownership of such entity.
-
-      "You" (or "Your") shall mean an individual or Legal Entity
-      exercising permissions granted by this License.
-
-      "Source" form shall mean the preferred form for making modifications,
-      including but not limited to software source code, documentation
-      source, and configuration files.
-
-      "Object" form shall mean any form resulting from mechanical
-      transformation or translation of a Source form, including but
-      not limited to compiled object code, generated documentation,
-      and conversions to other media types.
-
-      "Work" shall mean the work of authorship, whether in Source or
-      Object form, made available under the License, as indicated by a
-      copyright notice that is included in or attached to the work
-      (an example is provided in the Appendix below).
-
-      "Derivative Works" shall mean any work, whether in Source or Object
-      form, that is based on (or derived from) the Work and for which the
-      editorial revisions, annotations, elaborations, or other modifications
-      represent, as a whole, an original work of authorship. For the purposes
-      of this License, Derivative Works shall not include works that remain
-      separable from, or merely link (or bind by name) to the interfaces of,
-      the Work and Derivative Works thereof.
-
-      "Contribution" shall mean any work of authorship, including
-      the original version of the Work and any modifications or additions
-      to that Work or Derivative Works thereof, that is intentionally
-      submitted to Licensor for inclusion in the Work by the copyright owner
-      or by an individual or Legal Entity authorized to submit on behalf of
-      the copyright owner. For the purposes of this definition, "submitted"
-      means any form of electronic, verbal, or written communication sent
-      to the Licensor or its representatives, including but not limited to
-      communication on electronic mailing lists, source code control systems,
-      and issue tracking systems that are managed by, or on behalf of, the
-      Licensor for the purpose of discussing and improving the Work, but
-      excluding communication that is conspicuously marked or otherwise
-      designated in writing by the copyright owner as "Not a Contribution."
-
-      "Contributor" shall mean Licensor and any individual or Legal Entity
-      on behalf of whom a Contribution has been received by Licensor and
-      subsequently incorporated within the Work.
-
-   2. Grant of Copyright License. Subject to the terms and conditions of
-      this License, each Contributor hereby grants to You a perpetual,
-      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
-      copyright license to reproduce, prepare Derivative Works of,
-      publicly display, publicly perform, sublicense, and distribute the
-      Work and such Derivative Works in Source or Object form.
-
-   3. Grant of Patent License. Subject to the terms and conditions of
-      this License, each Contributor hereby grants to You a perpetual,
-      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
-      (except as stated in this section) patent license to make, have made,
-      use, offer to sell, sell, import, and otherwise transfer the Work,
-      where such license applies only to those patent claims licensable
-      by such Contributor that are necessarily infringed by their
-      Contribution(s) alone or by combination of their Contribution(s)
-      with the Work to which such Contribution(s) was submitted. If You
-      institute patent litigation against any entity (including a
-      cross-claim or counterclaim in a lawsuit) alleging that the Work
-      or a Contribution incorporated within the Work constitutes direct
-      or contributory patent infringement, then any patent licenses
-      granted to You under this License for that Work shall terminate
-      as of the date such litigation is filed.
-
-   4. Redistribution. You may reproduce and distribute copies of the
-      Work or Derivative Works thereof in any medium, with or without
-      modifications, and in Source or Object form, provided that You
-      meet the following conditions:
-
-      (a) You must give any other recipients of the Work or
-          Derivative Works a copy of this License; and
-
-      (b) You must cause any modified files to carry prominent notices
-          stating that You changed the files; and
-
-      (c) You must retain, in the Source form of any Derivative Works
-          that You distribute, all copyright, patent, trademark, and
-          attribution notices from the Source form of the Work,
-          excluding those notices that do not pertain to any part of
-          the Derivative Works; and
-
-      (d) If the Work includes a "NOTICE" text file as part of its
-          distribution, then any Derivative Works that You distribute must
-          include a readable copy of the attribution notices contained
-          within such NOTICE file, excluding those notices that do not
-          pertain to any part of the Derivative Works, in at least one
-          of the following places: within a NOTICE text file distributed
-          as part of the Derivative Works; within the Source form or
-          documentation, if provided along with the Derivative Works; or,
-          within a display generated by the Derivative Works, if and
-          wherever such third-party notices normally appear. The contents
-          of the NOTICE file are for informational purposes only and
-          do not modify the License. You may add Your own attribution
-          notices within Derivative Works that You distribute, alongside
-          or as an addendum to the NOTICE text from the Work, provided
-          that such additional attribution notices cannot be construed
-          as modifying the License.
-
-      You may add Your own copyright statement to Your modifications and
-      may provide additional or different license terms and conditions
-      for use, reproduction, or distribution of Your modifications, or
-      for any such Derivative Works as a whole, provided Your use,
-      reproduction, and distribution of the Work otherwise complies with
-      the conditions stated in this License.
-
-   5. Submission of Contributions. Unless You explicitly state otherwise,
-      any Contribution intentionally submitted for inclusion in the Work
-      by You to the Licensor shall be under the terms and conditions of
-      this License, without any additional terms or conditions.
-      Notwithstanding the above, nothing herein shall supersede or modify
-      the terms of any separate license agreement you may have executed
-      with Licensor regarding such Contributions.
-
-   6. Trademarks. This License does not grant permission to use the trade
-      names, trademarks, service marks, or product names of the Licensor,
-      except as required for reasonable and customary use in describing the
-      origin of the Work and reproducing the content of the NOTICE file.
-
-   7. Disclaimer of Warranty. Unless required by applicable law or
-      agreed to in writing, Licensor provides the Work (and each
-      Contributor provides its Contributions) on an "AS IS" BASIS,
-      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-      implied, including, without limitation, any warranties or conditions
-      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
-      PARTICULAR PURPOSE. You are solely responsible for determining the
-      appropriateness of using or redistributing the Work and assume any
-      risks associated with Your exercise of permissions under this License.
-
-   8. Limitation of Liability. In no event and under no legal theory,
-      whether in tort (including negligence), contract, or otherwise,
-      unless required by applicable law (such as deliberate and grossly
-      negligent acts) or agreed to in writing, shall any Contributor be
-      liable to You for damages, including any direct, indirect, special,
-      incidental, or consequential damages of any character arising as a
-      result of this License or out of the use or inability to use the
-      Work (including but not limited to damages for loss of goodwill,
-      work stoppage, computer failure or malfunction, or any and all
-      other commercial damages or losses), even if such Contributor
-      has been advised of the possibility of such damages.
-
-   9. Accepting Warranty or Additional Liability. While redistributing
-      the Work or Derivative Works thereof, You may choose to offer,
-      and charge a fee for, acceptance of support, warranty, indemnity,
-      or other liability obligations and/or rights consistent with this
-      License. However, in accepting such obligations, You may act only
-      on Your own behalf and on Your sole responsibility, not on behalf
-      of any other Contributor, and only if You agree to indemnify,
-      defend, and hold each Contributor harmless for any liability
-      incurred by, or claims asserted against, such Contributor by reason
-      of your accepting any such warranty or additional liability.
-
-   END OF TERMS AND CONDITIONS
-
-   APPENDIX: How to apply the Apache License to your work.
-
-      To apply the Apache License to your work, attach the following
-      boilerplate notice, with the fields enclosed by brackets "[]"
-      replaced with your own identifying information. (Don't include
-      the brackets!)  The text should be enclosed in the appropriate
-      comment syntax for the file format. We also recommend that a
-      file or class name and description of purpose be included on the
-      same "printed page" as the copyright notice for easier
-      identification within third-party archives.
-
-   Copyright [yyyy] [name of copyright owner]
-
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
-
-       http://www.apache.org/licenses/LICENSE-2.0
-
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
 
 </file>
 
@@ -580,16 +374,22 @@ func NewPlanExecutor(worker agent.Agent, repo agent.Repository, ws *fs.Workspace
 }
 
 func (e *PlanExecutor) Execute(ctx context.Context, plan *task.Plan) error {
+	// Start Transaction
 	txn, err := e.workspaceMgr.BeginTransaction()
 	if err != nil {
 		return fmt.Errorf("failed to start transaction: %w", err)
 	}
 
+	// FIX: Robust rollback defer
+	// If Execute returns before txn.Commit(), this will automatically rollback changes.
 	defer func() {
-		// Updated to access the exported 'Committed' field
 		if !txn.Committed {
-			fmt.Println("⚠️  [SYSTEM] Error detected. Rolling back changes...")
-			txn.Rollback()
+			fmt.Println("⚠️  [SYSTEM] Plan execution failed or interrupted. Rolling back filesystem changes...")
+			if err := txn.Rollback(); err != nil {
+				fmt.Printf("❌ [CRITICAL] Rollback failed: %v\n", err)
+			} else {
+				fmt.Println("✅ [SYSTEM] Rollback complete. Filesystem restored.")
+			}
 		}
 	}()
 
@@ -603,9 +403,14 @@ func (e *PlanExecutor) Execute(ctx context.Context, plan *task.Plan) error {
 
 		fmt.Printf("\n🔹 [PLANNER] STEP %d/%d: %s\n", step.ID, len(plan.Steps), step.Description)
 
-		// Before execution, backup files
+		// Backup relevant files before the agent touches them
+		// FIX: We now check errors here. If backup fails, we abort immediately to be safe.
 		for _, file := range step.Files {
-			txn.BackupFile(file)
+			if err := txn.BackupFile(file); err != nil {
+				plan.Status = task.StatusFailed
+				_ = e.repo.SavePlan(ctx, plan)
+				return fmt.Errorf("backup failed for %s: %w", file, err)
+			}
 		}
 
 		workerInput := fmt.Sprintf("%s\n\nFocus on these files: %v", step.Instruction, step.Files)
@@ -615,13 +420,14 @@ func (e *PlanExecutor) Execute(ctx context.Context, plan *task.Plan) error {
 			plan.MarkStepFailed(step.ID, err)
 			plan.Status = task.StatusFailed
 			_ = e.repo.SavePlan(ctx, plan)
-			return err // Triggers rollback
+			return err // Triggers rollback via defer
 		}
 
 		plan.MarkStepComplete(step.ID, result)
 		_ = e.repo.SavePlan(ctx, plan)
 	}
 
+	// Success! Commit the transaction.
 	txn.Commit()
 	plan.Status = task.StatusCompleted
 	return e.repo.SavePlan(ctx, plan)
@@ -931,6 +737,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -987,7 +794,6 @@ FORMAT RULES:
 4. STRICTLY FORBIDDEN: Do not use XML tags like <invoke> or <function_calls>.
 5. Do NOT output Markdown code blocks for the whole response.
 6. Wait for the [SYSTEM] Observation before proceeding.
-
 EXAMPLE INTERACTION:
 Thought: I need to read the main file to understand the entry point.
 Action: read_file
@@ -1022,6 +828,16 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 	execID := fmt.Sprintf("exec-%d", time.Now().Unix())
 	auditTrail := audit.NewAuditTrail(execID)
 
+	// FIX: Ensure audit trail is saved even if we panic or error out early
+	defer func() {
+		savePath := filepath.Join(".codepicker", "audit", fmt.Sprintf("%s.json", execID))
+		// Ensure dir exists
+		_ = os.MkdirAll(filepath.Dir(savePath), 0755)
+		if err := auditTrail.Save(savePath); err != nil {
+			a.logger.Error("Failed to save audit trail", zap.Error(err))
+		}
+	}()
+
 	// Create a context-aware logger
 	logger := a.logger.WithContext(ctx)
 
@@ -1037,6 +853,9 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 
 	for i := 0; i < a.maxTurn; i++ {
 		logger.Debug("Starting Turn", zap.Int("turn", i+1))
+
+		// Record LLM Request start
+		auditTrail.Record("llm_request", map[string]interface{}{"turn": i + 1})
 
 		// Phase 3: Cost Tracking Integration
 		// We use type assertion to check if the model supports usage tracking
@@ -1058,12 +877,13 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 		}
 
 		if err != nil {
+			auditTrail.Record("error", map[string]interface{}{"phase": "llm_chat", "error": err.Error()})
 			return "", errors.NewLLM("agent.Run", err)
 		}
 
 		thought, toolName, toolArgs := parseReActResponse(response)
 
-		auditTrail.Record("turn", map[string]interface{}{
+		auditTrail.Record("turn_decision", map[string]interface{}{
 			"turn_id": i + 1,
 			"thought": thought,
 			"tool":    toolName,
@@ -1076,9 +896,8 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 			execution.Finish()
 			_ = a.repo.SaveExecution(ctx, execution)
 
-			// Save Audit Trail to disk
-			auditTrail.Record("finish", map[string]interface{}{"result": response})
-			_ = auditTrail.Save(filepath.Join(".codepicker", "audit", fmt.Sprintf("%s.json", execID)))
+			// Record success before saving in defer
+			auditTrail.Record("finish", map[string]interface{}{"result": response, "status": "success"})
 
 			return response, nil
 		}
@@ -1088,6 +907,8 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 		if !allowed {
 			toolOut := fmt.Sprintf("Error: Policy Violation: %s", reason)
 			logger.Warn("Guardrail Blocked Action", zap.String("tool", toolName), zap.String("reason", reason))
+
+			auditTrail.Record("policy_block", map[string]interface{}{"tool": toolName, "reason": reason})
 
 			currentContext += fmt.Sprintf("\nThought: %s\nAction: %s\nInput: %s\nObservation: %s\n", thought, toolName, toolArgs, toolOut)
 			continue
@@ -1105,6 +926,12 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 			duration := time.Since(startTime)
 			logger.LogToolExecution(toolName, toolArgs, duration, err)
 
+			auditTrail.Record("tool_execution", map[string]interface{}{
+				"tool":        toolName,
+				"duration_ms": duration.Milliseconds(),
+				"success":     err == nil,
+			})
+
 			if err != nil {
 				toolOut = fmt.Sprintf("Error: %v", err)
 			}
@@ -1116,6 +943,7 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 		currentContext += fmt.Sprintf("\nThought: %s\nAction: %s\nInput: %s\nObservation: %s\n", thought, toolName, toolArgs, toolOut)
 	}
 
+	auditTrail.Record("timeout", map[string]interface{}{"max_turns": a.maxTurn})
 	return "", errors.NewSystem("agent.Run", fmt.Sprintf("Max turns (%d) exceeded", a.maxTurn), nil)
 }
 
@@ -2515,6 +2343,7 @@ import (
 	"github.com/david22573/codepicker/adapters/policy"
 	"github.com/david22573/codepicker/adapters/tools"
 	"github.com/david22573/codepicker/adapters/verifier"
+	"github.com/david22573/codepicker/domain/config" // Import Config
 	contextDomain "github.com/david22573/codepicker/domain/context"
 	"github.com/david22573/codepicker/infra/fs"
 	"github.com/david22573/codepicker/infra/git"
@@ -2538,7 +2367,8 @@ type Container struct {
 	Repository       *storage.SQLiteRepository
 	SliceStore       contextDomain.SliceStore
 	Logger           *logging.Logger
-	CostTracker      *llm.CostTracker // Phase 3: Exposed for CLI summaries
+	CostTracker      *llm.CostTracker
+	Config           *config.AppConfig // Exposed for CLI usage
 }
 
 func NewContainer(apiKey, projectRoot, llmModel string, isDryRun, isCI bool) (*Container, error) {
@@ -2553,9 +2383,24 @@ func NewContainer(apiKey, projectRoot, llmModel string, isDryRun, isCI bool) (*C
 		return nil, err
 	}
 
+	// 2. Load Configuration
+	configPath := filepath.Join(projectRoot, "config.json")
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		logger.Warn("Failed to load config.json, using defaults", zap.Error(err))
+		cfg = config.DefaultConfig()
+	}
+
+	// Override model if provided via CLI
+	if llmModel != "" {
+		cfg.LLM.Model = llmModel
+	}
+
 	logger.Info("Initializing CodePicker Container",
 		zap.String("mode", logEnv),
-		zap.String("root", projectRoot))
+		zap.String("root", projectRoot),
+		zap.String("model", cfg.LLM.Model),
+		zap.Bool("dry_run", isDryRun))
 
 	hiddenDir := filepath.Join(projectRoot, ".codepicker")
 	dbPath := filepath.Join(hiddenDir, "state.db")
@@ -2567,38 +2412,33 @@ func NewContainer(apiKey, projectRoot, llmModel string, isDryRun, isCI bool) (*C
 	}
 
 	workspaceMgr := fs.NewWorkspaceManager(projectRoot)
-	gitClient := git.NewClient(projectRoot)
+	gitClient := git.NewClient(projectRoot, isDryRun)
 
-	// 2. Initialize LLM & Cost Tracker
-	selectedModel := "moonshotai/kimi-k2.5"
-	if llmModel != "" {
-		selectedModel = llmModel
-	}
-	llmClient := llm.NewOpenRouterAdapter(apiKey, selectedModel)
+	// 3. Initialize LLM & Cost Tracker with Config
+	// Note: You'll need to update NewOpenRouterAdapter signature in infra/llm next!
+	llmClient := llm.NewOpenRouterAdapter(apiKey, cfg.LLM.Model, time.Duration(cfg.LLM.TimeoutSeconds)*time.Second)
 
-	// Phase 3: Initialize Cost Tracker (Estimates for Kimi/Moonshot: ~$0.30 input / $0.60 output)
-	costTracker := llm.NewCostTracker(0.3, 0.6)
+	// Initialize Cost Tracker with limits
+	costTracker := llm.NewCostTracker(cfg.LLM.InputCostPer1M, cfg.LLM.OutputCostPer1M)
 
-	// 3. Initialize Infrastructure
+	// 4. Initialize Infrastructure
 	shadowMgr := fs.NewShadowManager(projectRoot)
-	shellExec := shell.NewExecutor(30*time.Second, 5000)
+	shellExec := shell.NewExecutor(30*time.Second, 5000, isDryRun)
 	allTools := tools.DefaultSet(shadowMgr, shellExec, projectRoot)
 
-	// 4. Initialize Security Policy
+	// 5. Initialize Security Policy
 	policyPath := filepath.Join(projectRoot, "policy.json")
 	policyConfig, _ := policy.LoadPolicy(policyPath)
 	guardRail := policy.NewEnforcer(*policyConfig, isDryRun)
 
-	ctxBuilder := context.NewSliceBasedBuilder(repo, 16000)
+	ctxBuilder := context.NewSliceBasedBuilder(repo, cfg.Agent.MaxContextSize)
 
-	// 5. Initialize Agents with Dependencies
-	// Note: We inject costTracker into the worker so it can record usage per turn
+	// 6. Initialize Agents
+	// We inject costTracker into the worker so it can record usage per turn
 	worker := agent.NewReActAgent(llmClient, allTools, guardRail, repo, logger, costTracker)
 	planner := agent.NewPlanner(llmClient, repo)
 
-	// Note: We inject workspaceMgr into the executor to enable Transaction/Rollback support
 	executor := agent.NewPlanExecutor(worker, repo, workspaceMgr)
-
 	auditor := agent.NewAuditor(llmClient, repo, allTools, guardRail)
 	explainer := agent.NewExplainer(llmClient, repo)
 	twoPass := agent.NewTwoPassEngine(llmClient, repo, allTools, guardRail)
@@ -2618,6 +2458,7 @@ func NewContainer(apiKey, projectRoot, llmModel string, isDryRun, isCI bool) (*C
 		SliceStore:       repo,
 		Logger:           logger,
 		CostTracker:      costTracker,
+		Config:           cfg,
 	}, nil
 }
 
@@ -3590,15 +3431,15 @@ func shouldPack(path string, d fs.DirEntry, limit int64) bool {
 	allowed := map[string]bool{
 		".go": true, ".mod": true, ".sum": true,
 		".md": false, ".json": true, ".yaml": true, ".yml": true,
-		".sql": true, ".sh": true, ".txt": true, ".toml": true,
+		".sql": true, ".sh": false, ".txt": true, ".toml": true,
 		".html": true, ".css": true, ".js": true, ".ts": true,
 		".tsx": true, ".jsx": true, ".py": true, ".c": true, ".h": true,
 		".dockerfile": false,
 	}
 
 	specialFiles := map[string]bool{
-		"makefile": true, "dockerfile": true, "license": true,
-		"readme": true, "changelog": true, "notice": true,
+		"makefile": true, "dockerfile": true, "license": false,
+		"readme": false, "changelog": true, "notice": false,
 	}
 
 	if allowed[ext] {
@@ -3943,53 +3784,23 @@ func init() {
 
 </file>
 
-<file path="context_dump.sh">
-#!/bin/bash
-
-# Output file
-OUTPUT="full_context.md"
-
-# Clear previous run
-echo "# Project Dump $(date)" > "$OUTPUT"
-
-# Define what to ignore
-# Add any other folders you want to skip here
-IGNORE_DIRS="-not -path '*/.git/*' -not -path '*/vendor/*' -not -path '*/bin/*' -not -path '*/.codepicker/*'"
-
-echo "👀 Scanning directory... dumping to $OUTPUT"
-
-# Find files
-# We focus on .go, .mod, .sum, .json, .sql, .md, etc.
-# You can tweak the extensions below.
-find . -type f \( -name "*.go" -o -name "go.mod" -o -name "go.sum" -o -name "*.json" \) \
-    $IGNORE_DIRS \
-    | sort | while read -r file; do
-
-    # Skip the output file itself and this script
-    if [[ "$file" == "./$OUTPUT" || "$file" == "./$0" ]]; then continue; fi
-
-    # Get relative path for the header
-    clean_path=${file#./}
-    
-    # Get extension for syntax highlighting
-    ext="${file##*.}"
-    
-    echo "Processing: $clean_path"
-
-    # Append to the markdown file
-    {
-        echo "## File: $clean_path"
-        echo '```'$ext
-        cat "$file"
-        echo '```'
-        echo ""
-        echo "---"
-        echo ""
-    } >> "$OUTPUT"
-
-done
-
-echo "✅ Done! Upload '$OUTPUT' to the chat."
+<file path="config.json">
+{
+  "llm": {
+    "model": "moonshotai/kimi-k2.5",
+    "timeout_seconds": 120,
+    "max_tokens": 16000,
+    "temperature": 0.1,
+    "input_cost_per_1m": 0.30,
+    "output_cost_per_1m": 0.60,
+    "budget_cap": 2.00
+  },
+  "agent": {
+    "max_turns": 20,
+    "use_reflexion": true,
+    "max_context_size": 128000
+  }
+}
 
 </file>
 
@@ -4273,6 +4084,74 @@ func (at *AuditTrail) Save(filePath string) error {
 	}
 
 	return os.WriteFile(filePath, data, 0644)
+}
+
+</file>
+
+<file path="domain/config/config.go">
+package config
+
+import (
+	"encoding/json"
+	"os"
+)
+
+type LLMConfig struct {
+	Model           string  `json:"model"`
+	TimeoutSeconds  int     `json:"timeout_seconds"`
+	MaxTokens       int     `json:"max_tokens"`
+	Temperature     float64 `json:"temperature"`
+	InputCostPer1M  float64 `json:"input_cost_per_1m"`
+	OutputCostPer1M float64 `json:"output_cost_per_1m"`
+	BudgetCap       float64 `json:"budget_cap"` // Max $ per session
+}
+
+type AgentConfig struct {
+	MaxTurns       int  `json:"max_turns"`
+	UseReflexion   bool `json:"use_reflexion"`
+	MaxContextSize int  `json:"max_context_size"` // Tokens
+}
+
+type AppConfig struct {
+	LLM   LLMConfig   `json:"llm"`
+	Agent AgentConfig `json:"agent"`
+}
+
+// DefaultConfig provides safe values if config.json is missing
+func DefaultConfig() *AppConfig {
+	return &AppConfig{
+		LLM: LLMConfig{
+			Model:           "moonshotai/kimi-k2.5", // Default logic/coding model
+			TimeoutSeconds:  120,
+			MaxTokens:       16000,
+			Temperature:     0.1,
+			InputCostPer1M:  0.30, // Approximate Kimi pricing
+			OutputCostPer1M: 0.60,
+			BudgetCap:       1.00, // Safety stop at $1.00
+		},
+		Agent: AgentConfig{
+			MaxTurns:       15,
+			UseReflexion:   true,
+			MaxContextSize: 128000,
+		},
+	}
+}
+
+// LoadConfig reads from config.json or returns default
+func LoadConfig(path string) (*AppConfig, error) {
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return DefaultConfig(), nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	cfg := DefaultConfig() // Start with defaults
+	if err := json.Unmarshal(data, cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
 }
 
 </file>
@@ -5349,7 +5228,6 @@ func NewShadowManager(root string) *ShadowManager {
 }
 
 // sanitizePath prevents directory traversal attacks by resolving absolute paths.
-// This is your primary defense against the agent escaping the repo[cite: 230, 261].
 func (s *ShadowManager) sanitizePath(relPath string) (string, error) {
 	clean := filepath.Clean(relPath)
 
@@ -5360,18 +5238,27 @@ func (s *ShadowManager) sanitizePath(relPath string) (string, error) {
 	// Resolve the full intended path
 	fullPath := filepath.Join(s.ProjectRoot, clean)
 
-	// Evaluate symlinks and get absolute path to check for escapes
-	absProjectRoot, _ := filepath.Abs(s.ProjectRoot)
-	absFullPath, _ := filepath.Abs(fullPath)
+	// FIX: Handle errors from Abs() to prevent silent security failures
+	absProjectRoot, err := filepath.Abs(s.ProjectRoot)
+	if err != nil {
+		return "", errors.NewSystem("fs.sanitize", "failed to resolve project root", err)
+	}
 
-	if !strings.HasPrefix(absFullPath, absProjectRoot) {
+	absFullPath, err := filepath.Abs(fullPath)
+	if err != nil {
+		return "", errors.NewSystem("fs.sanitize", "failed to resolve target path", err)
+	}
+
+	// Ensure the path is actually inside the project root
+	// We add the separator to prevent partial matching (e.g. /opt/app vs /opt/apple)
+	if !strings.HasPrefix(absFullPath, absProjectRoot+string(filepath.Separator)) && absFullPath != absProjectRoot {
 		return "", errors.NewValidation("fs.sanitize", "path traversal detected: escapes project root")
 	}
 
 	return clean, nil
 }
 
-// Write saves content to the shadow directory[cite: 262].
+// Write saves content to the shadow directory.
 func (s *ShadowManager) Write(relPath string, content []byte) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -5393,7 +5280,7 @@ func (s *ShadowManager) Write(relPath string, content []byte) (string, error) {
 	return shadowPath, nil
 }
 
-// Read from shadow first, then fall back to real FS[cite: 265].
+// Read from shadow first, then fall back to real FS.
 func (s *ShadowManager) Read(relPath string) ([]byte, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -5411,7 +5298,7 @@ func (s *ShadowManager) Read(relPath string) ([]byte, error) {
 	return os.ReadFile(filepath.Join(s.ProjectRoot, cleanPath))
 }
 
-// Commit moves changes from shadow to the real filesystem[cite: 267].
+// Commit moves changes from shadow to the real filesystem.
 func (s *ShadowManager) Commit(relPath string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -5500,14 +5387,23 @@ import (
 // Client wraps git command line operations.
 type Client struct {
 	ProjectRoot string
+	DryRun      bool
 }
 
-func NewClient(root string) *Client {
-	return &Client{ProjectRoot: root}
+func NewClient(root string, dryRun bool) *Client {
+	return &Client{
+		ProjectRoot: root,
+		DryRun:      dryRun,
+	}
 }
 
 // StageAll runs 'git add .' to stage all changes.
 func (c *Client) StageAll() error {
+	if c.DryRun {
+		fmt.Println("🔒 [DRY-RUN] Skipping 'git add .'")
+		return nil
+	}
+
 	cmd := exec.Command("git", "add", ".")
 	cmd.Dir = c.ProjectRoot
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -5519,6 +5415,11 @@ func (c *Client) StageAll() error {
 // Commit creates a new commit with the provenance message.
 func (c *Client) Commit(p *audit.Provenance) (string, error) {
 	msg := p.FormatCommitMessage()
+
+	if c.DryRun {
+		fmt.Printf("🔒 [DRY-RUN] Would commit with message:\n%s\n", msg)
+		return "dry-run-hash", nil
+	}
 
 	// We use the -m flag. For very large messages, passing via stdin is safer,
 	// but for metadata this is sufficient.
@@ -5877,11 +5778,13 @@ func NewCircuitBreaker(threshold int, timeout time.Duration) *CircuitBreaker {
 
 // Execute runs the given function behind the circuit breaker protection.
 func (cb *CircuitBreaker) Execute(fn func() error) error {
+	// 1. Check State (Hold Lock briefly)
 	cb.mu.Lock()
-	if cb.state == StateOpen {
-		// Check if enough time has passed to try again
+	currentState := cb.state
+	if currentState == StateOpen {
 		if time.Since(cb.lastFailureTime) > cb.resetTimeout {
 			cb.state = StateHalfOpen
+			currentState = StateHalfOpen
 		} else {
 			cb.mu.Unlock()
 			return fmt.Errorf("circuit breaker is open: LLM service temporarily disabled")
@@ -5889,9 +5792,11 @@ func (cb *CircuitBreaker) Execute(fn func() error) error {
 	}
 	cb.mu.Unlock()
 
-	// Execute the actual operation (e.g., the LLM API call)
+	// 2. Execute Operation (NO LOCK - Concurrency allowed!)
+	// This was the critical fix: previously the lock was held here.
 	err := fn()
 
+	// 3. Update State based on result (Hold Lock briefly)
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
 
@@ -5905,22 +5810,17 @@ func (cb *CircuitBreaker) Execute(fn func() error) error {
 		}
 
 		// If we were testing the waters (Half-Open) and failed, go back to Open immediately
-		if cb.state == StateHalfOpen {
+		if currentState == StateHalfOpen {
 			cb.state = StateOpen
-			// Reset timer to force full wait
 			cb.lastFailureTime = time.Now()
 		}
 
 		return err
 	}
 
-	// Success! Reset everything
-	if cb.state == StateHalfOpen {
-		// If we succeeded in Half-Open, the service is healthy again
+	// Success! Reset everything if we were shaky or just keep clean
+	if currentState == StateHalfOpen || currentState == StateClosed {
 		cb.state = StateClosed
-		cb.failureCount = 0
-	} else if cb.state == StateClosed {
-		// Normal success, just keep failure count clean
 		cb.failureCount = 0
 	}
 
@@ -6008,20 +5908,20 @@ package llm
 
 import (
 	"bytes"
-	"context" // Standard library context (REQUIRED)
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"time"
 
-	domainContext "github.com/david22573/codepicker/domain/context" // Aliased to prevent collision
+	domainContext "github.com/david22573/codepicker/domain/context"
 	"github.com/david22573/codepicker/domain/errors"
 )
 
 const openRouterURL = "https://openrouter.ai/api/v1/chat/completions"
 
-// OpenRouterAdapter implements domain.agent.LLMClient with reliability features.
+// OpenRouterAdapter implements agent.LLMClient using OpenRouter API.
 type OpenRouterAdapter struct {
 	apiKey         string
 	model          string
@@ -6029,109 +5929,125 @@ type OpenRouterAdapter struct {
 	circuitBreaker *CircuitBreaker
 }
 
-// NewOpenRouterAdapter creates a client with a circuit breaker configuration.
-func NewOpenRouterAdapter(apiKey, model string) *OpenRouterAdapter {
+// NewOpenRouterAdapter initializes the client with config-defined timeout and a standard circuit breaker.
+func NewOpenRouterAdapter(apiKey, model string, timeout time.Duration) *OpenRouterAdapter {
 	return &OpenRouterAdapter{
 		apiKey: apiKey,
 		model:  model,
-		// Increased timeout to 120s for "reasoning" models that take longer to start
-		client: &http.Client{Timeout: 120 * time.Second},
-		// Circuit breaker trips after 5 failures, resets after 1 minute of probation
-		circuitBreaker: NewCircuitBreaker(5, 1*time.Minute),
+		client: &http.Client{
+			Timeout: timeout,
+		},
+		// Initialize Circuit Breaker: 5 failures allowed, 1 minute reset timeout
+		circuitBreaker: NewCircuitBreaker(5, 60*time.Second),
 	}
 }
 
-// ChatWithUsage returns the response text along with token metrics for cost tracking.
-func (c *OpenRouterAdapter) ChatWithUsage(ctx context.Context, systemPrompt, userMsg string) (string, domainContext.TokenUsage, error) {
-	var result string
-	var usage domainContext.TokenUsage
-
-	// Execute the request inside the circuit breaker
-	err := c.circuitBreaker.Execute(func() error {
-		// Use a closure to capture the return values
-		resp, use, err := c.doChat(ctx, systemPrompt, userMsg)
-		if err != nil {
-			return err
-		}
-		result = resp
-		usage = use
-		return nil
-	})
-
-	return result, usage, err
+type chatRequest struct {
+	Model    string    `json:"model"`
+	Messages []message `json:"messages"`
 }
 
-// Chat fulfills the standard interface, discarding usage metrics.
-func (c *OpenRouterAdapter) Chat(ctx context.Context, systemPrompt, userMsg string) (string, error) {
-	resp, _, err := c.ChatWithUsage(ctx, systemPrompt, userMsg)
+type message struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type chatResponse struct {
+	Choices []struct {
+		Message message `json:"message"`
+	} `json:"choices"`
+	Usage struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
+	} `json:"usage"`
+	Error *struct {
+		Message string `json:"message"`
+	} `json:"error,omitempty"`
+}
+
+// Chat implements the basic LLMClient interface.
+func (o *OpenRouterAdapter) Chat(ctx context.Context, systemPrompt, userPrompt string) (string, error) {
+	resp, _, err := o.ChatWithUsage(ctx, systemPrompt, userPrompt)
 	return resp, err
 }
 
-// doChat performs the actual HTTP request logic.
-func (c *OpenRouterAdapter) doChat(ctx context.Context, systemPrompt, userMsg string) (string, domainContext.TokenUsage, error) {
-	reqBody := map[string]interface{}{
-		"model": c.model,
-		"messages": []map[string]string{
-			{"role": "system", "content": systemPrompt},
-			{"role": "user", "content": userMsg},
+// ChatWithUsage implements the extended interface for cost tracking.
+func (o *OpenRouterAdapter) ChatWithUsage(ctx context.Context, systemPrompt, userPrompt string) (string, domainContext.TokenUsage, error) {
+	reqBody := chatRequest{
+		Model: o.model,
+		Messages: []message{
+			{Role: "system", Content: systemPrompt},
+			{Role: "user", Content: userPrompt},
 		},
-		"temperature": 0.1, // Low temp for deterministic code generation
 	}
 
-	jsonBytes, err := json.Marshal(reqBody)
+	jsonBody, err := json.Marshal(reqBody)
 	if err != nil {
 		return "", domainContext.TokenUsage{}, errors.NewSystem("llm.Chat", "failed to marshal request", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", openRouterURL, bytes.NewBuffer(jsonBytes))
-	if err != nil {
-		return "", domainContext.TokenUsage{}, errors.NewSystem("llm.Chat", "failed to create request", err)
+	var responseContent string
+	var usage domainContext.TokenUsage
+
+	// Wrap the network call in the Circuit Breaker
+	opErr := o.circuitBreaker.Execute(func() error {
+		req, err := http.NewRequestWithContext(ctx, "POST", openRouterURL, bytes.NewBuffer(jsonBody))
+		if err != nil {
+			return errors.NewSystem("llm.Chat", "failed to create request", err)
+		}
+
+		req.Header.Set("Authorization", "Bearer "+o.apiKey)
+		req.Header.Set("Content-Type", "application/json")
+		// Optional: Site URL and Title for OpenRouter rankings
+		req.Header.Set("HTTP-Referer", "https://github.com/david22573/codepicker")
+		req.Header.Set("X-Title", "CodePicker")
+
+		resp, err := o.client.Do(req)
+		if err != nil {
+			return errors.NewLLM("llm.Chat", fmt.Errorf("network request failed: %w", err))
+		}
+		defer resp.Body.Close()
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return errors.NewSystem("llm.Chat", "failed to read response body", err)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			return errors.NewLLM("llm.Chat", fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body)))
+		}
+
+		var chatResp chatResponse
+		if err := json.Unmarshal(body, &chatResp); err != nil {
+			return errors.NewSystem("llm.Chat", "failed to parse response json", err)
+		}
+
+		if chatResp.Error != nil {
+			return errors.NewLLM("llm.Chat", fmt.Errorf("api returned error: %s", chatResp.Error.Message))
+		}
+
+		if len(chatResp.Choices) == 0 {
+			return errors.NewLLM("llm.Chat", fmt.Errorf("received empty choices from API"))
+		}
+
+		responseContent = chatResp.Choices[0].Message.Content
+
+		// Capture usage stats
+		usage = domainContext.TokenUsage{
+			PromptTokens:     chatResp.Usage.PromptTokens,
+			CompletionTokens: chatResp.Usage.CompletionTokens,
+			TotalTokens:      chatResp.Usage.TotalTokens,
+		}
+
+		return nil
+	})
+
+	if opErr != nil {
+		return "", domainContext.TokenUsage{}, opErr
 	}
 
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("HTTP-Referer", "https://github.com/david22573/codepicker")
-	req.Header.Set("X-Title", "CodePicker")
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return "", domainContext.TokenUsage{}, errors.NewLLM("llm.Chat", err)
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-
-	// Handle non-200 status codes
-	if resp.StatusCode != http.StatusOK {
-		return "", domainContext.TokenUsage{}, errors.NewLLM("llm.Chat", fmt.Errorf("API error %d: %s", resp.StatusCode, string(body)))
-	}
-
-	// Parse the response
-	var apiResp struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-		Usage domainContext.TokenUsage `json:"usage"` // Capture token usage
-		Error *struct {
-			Message string `json:"message"`
-		} `json:"error,omitempty"`
-	}
-
-	if err := json.Unmarshal(body, &apiResp); err != nil {
-		return "", domainContext.TokenUsage{}, errors.NewSystem("llm.Chat", fmt.Sprintf("failed to parse response: %s", string(body)), err)
-	}
-
-	if apiResp.Error != nil {
-		return "", domainContext.TokenUsage{}, errors.NewLLM("llm.Chat", fmt.Errorf("provider error: %s", apiResp.Error.Message))
-	}
-
-	if len(apiResp.Choices) == 0 {
-		return "", domainContext.TokenUsage{}, errors.NewLLM("llm.Chat", fmt.Errorf("received empty choices from API"))
-	}
-
-	return apiResp.Choices[0].Message.Content, apiResp.Usage, nil
+	return responseContent, usage, nil
 }
 
 </file>
@@ -6303,16 +6219,23 @@ import (
 type Executor struct {
 	Timeout   time.Duration
 	MaxOutput int
+	DryRun    bool
 }
 
-func NewExecutor(timeout time.Duration, maxOutput int) *Executor {
+func NewExecutor(timeout time.Duration, maxOutput int, dryRun bool) *Executor {
 	return &Executor{
 		Timeout:   timeout,
 		MaxOutput: maxOutput,
+		DryRun:    dryRun,
 	}
 }
 
 func (e *Executor) Run(ctx context.Context, command string, args ...string) (string, error) {
+	// Safety Check: Dry Run
+	if e.DryRun {
+		return fmt.Sprintf("[DRY-RUN] Would execute: %s %v", command, args), nil
+	}
+
 	// Create a context with timeout if one isn't already set
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
@@ -7090,29 +7013,6 @@ func (r *TestRepo) WriteFile(t *testing.T, relPath, content string) {
 		t.Fatalf("Failed to write file: %v", err)
 	}
 }
-
-</file>
-
-<file path="tests/run_tests.sh">
-#!/bin/bash
-
-echo "🧪 Starting CodePicker Integration Suite..."
-echo "=========================================="
-
-# Run tests with verbose output to see the checks passing
-# -count=1 disables caching so we always run fresh
-go test -v -count=1 ./tests/integration/...
-
-EXIT_CODE=$?
-
-echo "=========================================="
-if [ $EXIT_CODE -eq 0 ]; then
-    echo "✅ ALL SYSTEMS GREEN. RELEASE CANDIDATE READY."
-else
-    echo "❌ TESTS FAILED. DO NOT DEPLOY."
-fi
-
-exit $EXIT_CODE
 
 </file>
 
