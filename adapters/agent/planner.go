@@ -2,72 +2,62 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/david22573/codepicker/domain/agent"
-	"github.com/david22573/codepicker/domain/errors"
 	"github.com/david22573/codepicker/domain/task"
+	"github.com/david22573/codepicker/infra/llm"
 )
 
 type Planner struct {
-	model agent.LLMClient
+	model llm.StructuredLLM // UPDATED: Depends on the structured interface
 	repo  agent.Repository
 }
 
+// NewPlanner now wraps the raw client in the StructuredAdapter internally.
 func NewPlanner(model agent.LLMClient, repo agent.Repository) *Planner {
 	return &Planner{
-		model: model,
+		model: llm.NewStructuredAdapter(model), // Inject wrapper
 		repo:  repo,
 	}
 }
 
-// CreatePlan generates a new plan based on the task and file context
-// UPDATED: Added 'primer string' to signature
+// planSchema defines the expected structure for unmarshaling.
+type planSchema struct {
+	Reasoning string      `json:"reasoning"`
+	Steps     []task.Step `json:"steps"`
+}
+
+// CreatePlan generates a new plan based on the task and file context.
 func (p *Planner) CreatePlan(ctx context.Context, taskInput, fileContext, primer string) (*task.Plan, error) {
 	systemPrompt := `You are the Lead Architect.
 Break down the task into sequential steps.
 STRICTLY only reference files that exist in the PROJECT CONTEXT.
+
 OUTPUT FORMAT:
-Return ONLY raw JSON. Do not include markdown formatting.
-EXAMPLE:
+Return valid JSON matching this structure:
 {
-  "reasoning": "I need to read X to understand Y...",
+  "reasoning": "string",
   "steps": [
     {
       "id": 1,
-      "description": "Analyze main.go",
-      "instruction": "Read main.go and check imports",
-      "files": ["main.go"]
+      "description": "string",
+      "instruction": "string",
+      "files": ["string"]
     }
-  ],
-  "estimated_cost": 0.1
+  ]
 }`
 
-	// Combine the Primer, File Context, and Task into the prompt
 	userMessage := fmt.Sprintf("PROJECT STARTER INFO:\n%s\n\nRELEVANT CODE SNIPPETS:\n%s\n\nTASK: %s", primer, fileContext, taskInput)
 
-	resp, err := p.model.Chat(ctx, systemPrompt, userMessage)
-	if err != nil {
-		return nil, errors.NewLLM("planner.CreatePlan", err)
+	// UPDATED: Use ChatJSON for type safety and auto-repair
+	var planData planSchema
+	if err := p.model.ChatJSON(ctx, systemPrompt, userMessage, &planData); err != nil {
+		return nil, err
 	}
 
-	cleanResp := strings.TrimSpace(resp)
-	cleanResp = strings.TrimPrefix(cleanResp, "```json")
-	cleanResp = strings.TrimPrefix(cleanResp, "```")
-	cleanResp = strings.TrimSuffix(cleanResp, "```")
-
-	var planData struct {
-		Reasoning string      `json:"reasoning"`
-		Steps     []task.Step `json:"steps"`
-	}
-
-	if err := json.Unmarshal([]byte(cleanResp), &planData); err != nil {
-		return nil, errors.NewSystem("planner.CreatePlan", "failed to parse plan JSON: "+cleanResp, err)
-	}
-
+	// Domain mapping
 	planID := fmt.Sprintf("plan-%d", time.Now().UnixNano())
 	domainPlan := task.NewPlan(planID, taskInput, planData.Reasoning)
 	domainPlan.Steps = planData.Steps
@@ -83,38 +73,30 @@ EXAMPLE:
 	return domainPlan, nil
 }
 
-// OptimizePlan uses AI to refine an existing plan based on feedback
+// OptimizePlan uses AI to refine an existing plan based on feedback.
 func (p *Planner) OptimizePlan(ctx context.Context, plan *task.Plan, feedback string) (*task.Plan, error) {
 	systemPrompt := `You are the Lead Architect.
 Refine the plan based on feedback.
-OUTPUT FORMAT: Return ONLY raw JSON matching the original structure.`
+OUTPUT FORMAT: Return valid JSON matching the original plan structure.`
 
-	planBytes, _ := json.Marshal(plan)
-
-	userMessage := fmt.Sprintf("CURRENT PLAN:\n%s\n\nUSER FEEDBACK: %s\n\nRefine the plan.", string(planBytes), feedback)
-
-	resp, err := p.model.Chat(ctx, systemPrompt, userMessage)
-	if err != nil {
-		return nil, errors.NewLLM("planner.OptimizePlan", err)
-	}
-
-	cleanResp := strings.TrimSpace(resp)
-	cleanResp = strings.TrimPrefix(cleanResp, "```json")
-	cleanResp = strings.TrimPrefix(cleanResp, "```")
-	cleanResp = strings.TrimSuffix(cleanResp, "```")
-
-	var planData struct {
+	// We only need the steps and reasoning for context
+	currentContext := struct {
 		Reasoning string      `json:"reasoning"`
 		Steps     []task.Step `json:"steps"`
+	}{
+		Reasoning: plan.Reasoning,
+		Steps:     plan.Steps,
 	}
 
-	if err := json.Unmarshal([]byte(cleanResp), &planData); err != nil {
-		return nil, errors.NewSystem("planner.OptimizePlan", "failed to parse optimized plan", err)
+	userMessage := fmt.Sprintf("CURRENT PLAN:\n%+v\n\nUSER FEEDBACK: %s\n\nRefine the plan.", currentContext, feedback)
+
+	var planData planSchema
+	if err := p.model.ChatJSON(ctx, systemPrompt, userMessage, &planData); err != nil {
+		return nil, err
 	}
 
 	plan.Reasoning = planData.Reasoning
 	plan.Steps = planData.Steps
-
 	plan.Status = task.StatusPending
 	for i := range plan.Steps {
 		plan.Steps[i].Status = task.StatusPending

@@ -21,7 +21,7 @@ func NewSQLiteRepository(dbPath string) (*SQLiteRepository, error) {
 		return nil, err
 	}
 
-	// Schema: Supports Plans, Executions, and Expanded Code Slices
+	// Schema Updated for Feature 4 (Cost/Tokens)
 	schema := `
 	CREATE TABLE IF NOT EXISTS code_slices (
 		id TEXT PRIMARY KEY,
@@ -47,12 +47,20 @@ func NewSQLiteRepository(dbPath string) (*SQLiteRepository, error) {
 		plan_id TEXT,
 		status TEXT,
 		history TEXT,
-		start_time DATETIME
+		start_time DATETIME,
+		cost REAL DEFAULT 0.0,
+		tokens INTEGER DEFAULT 0
 	);`
 
 	if _, err := db.Exec(schema); err != nil {
 		return nil, err
 	}
+
+	// Migration: Check if columns exist (simple naive check for dev env)
+	// In production, we'd use a proper migration tool.
+	// Here we try to add them if missing, ignoring errors if they exist.
+	_, _ = db.Exec("ALTER TABLE executions ADD COLUMN cost REAL DEFAULT 0.0")
+	_, _ = db.Exec("ALTER TABLE executions ADD COLUMN tokens INTEGER DEFAULT 0")
 
 	return &SQLiteRepository{db: db}, nil
 }
@@ -90,8 +98,10 @@ func (r *SQLiteRepository) ListPlans(ctx context.Context, limit int) ([]agent.Pl
 	var summaries []agent.PlanSummary
 	for rows.Next() {
 		var s agent.PlanSummary
+		var createdAtStr string // Scan as string to be safe with sqlite dates
 		if err := rows.Scan(&s.ID, &s.OriginalTask, &s.Status, &s.CreatedAt); err != nil {
-			return nil, err
+			// Fallback if scanning directly to time fails (driver dependent)
+			rows.Scan(&s.ID, &s.OriginalTask, &s.Status, &createdAtStr)
 		}
 		summaries = append(summaries, s)
 	}
@@ -107,16 +117,18 @@ func (r *SQLiteRepository) DeletePlan(ctx context.Context, id string) error {
 
 func (r *SQLiteRepository) SaveExecution(ctx context.Context, exec *agent.Execution) error {
 	history, _ := json.Marshal(exec.History)
-	query := `INSERT OR REPLACE INTO executions (id, plan_id, status, history, start_time) VALUES (?, ?, ?, ?, ?)`
-	_, err := r.db.ExecContext(ctx, query, exec.ID, exec.PlanID, exec.Status, string(history), exec.StartTime)
+	// Updated query to include cost and tokens
+	query := `INSERT OR REPLACE INTO executions (id, plan_id, status, history, start_time, cost, tokens) VALUES (?, ?, ?, ?, ?, ?, ?)`
+	_, err := r.db.ExecContext(ctx, query, exec.ID, exec.PlanID, exec.Status, string(history), exec.StartTime, exec.Cost, exec.Tokens)
 	return err
 }
 
 func (r *SQLiteRepository) GetExecution(ctx context.Context, id string) (*agent.Execution, error) {
 	var exec agent.Execution
 	var historyStr string
-	query := `SELECT id, plan_id, status, history, start_time FROM executions WHERE id = ?`
-	err := r.db.QueryRowContext(ctx, query, id).Scan(&exec.ID, &exec.PlanID, &exec.Status, &historyStr, &exec.StartTime)
+	// Updated query to fetch cost and tokens
+	query := `SELECT id, plan_id, status, history, start_time, cost, tokens FROM executions WHERE id = ?`
+	err := r.db.QueryRowContext(ctx, query, id).Scan(&exec.ID, &exec.PlanID, &exec.Status, &historyStr, &exec.StartTime, &exec.Cost, &exec.Tokens)
 	if err != nil {
 		return nil, err
 	}
@@ -142,6 +154,14 @@ func (r *SQLiteRepository) ListExecutions(ctx context.Context, limit int) ([]age
 	return list, nil
 }
 
+// New method for Cost Dashboard
+func (r *SQLiteRepository) GetTotalCost(ctx context.Context) (float64, int, error) {
+	var totalCost float64
+	var totalTokens int
+	err := r.db.QueryRowContext(ctx, "SELECT COALESCE(SUM(cost), 0), COALESCE(SUM(tokens), 0) FROM executions").Scan(&totalCost, &totalTokens)
+	return totalCost, totalTokens, err
+}
+
 // --- Semantic Code Slices (Satisfies context.SliceStore) ---
 
 func (r *SQLiteRepository) IndexFile(filePath string, slices []domainContext.CodeSlice) error {
@@ -155,7 +175,6 @@ func (r *SQLiteRepository) SaveSlices(ctx context.Context, filePath string, slic
 	}
 	defer tx.Rollback()
 
-	// Clear old slices for this file before re-indexing
 	_, _ = tx.ExecContext(ctx, "DELETE FROM code_slices WHERE file_path = ?", filePath)
 
 	stmt, err := tx.PrepareContext(ctx, `
@@ -168,17 +187,7 @@ func (r *SQLiteRepository) SaveSlices(ctx context.Context, filePath string, slic
 
 	for _, s := range slices {
 		symbolsJSON, _ := json.Marshal(s.Symbols)
-		_, err := stmt.ExecContext(ctx,
-			s.ID,
-			s.FilePath,
-			s.Content,
-			s.StartLine,
-			s.EndLine,
-			s.Language,
-			string(s.SliceType),
-			string(symbolsJSON),
-			s.Hash,
-		)
+		_, err := stmt.ExecContext(ctx, s.ID, s.FilePath, s.Content, s.StartLine, s.EndLine, s.Language, string(s.SliceType), string(symbolsJSON), s.Hash)
 		if err != nil {
 			return err
 		}
@@ -187,17 +196,14 @@ func (r *SQLiteRepository) SaveSlices(ctx context.Context, filePath string, slic
 }
 
 func (r *SQLiteRepository) SearchSlices(ctx context.Context, query string, limit int) ([]domainContext.CodeSlice, error) {
-	// Simple LIKE search implementation
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id, file_path, content, start_line, end_line, language, slice_type, symbols, hash 
 		FROM code_slices 
-		WHERE content LIKE ? 
-		LIMIT ?`, "%"+query+"%", limit)
+		WHERE content LIKE ? LIMIT ?`, "%"+query+"%", limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-
 	return r.scanSlices(rows)
 }
 
@@ -210,11 +216,9 @@ func (r *SQLiteRepository) GetSlicesByFile(ctx context.Context, filePath string)
 		return nil, err
 	}
 	defer rows.Close()
-
 	return r.scanSlices(rows)
 }
 
-// GetAllSlices is required by cmd/context.go for export
 func (r *SQLiteRepository) GetAllSlices() ([]domainContext.CodeSlice, error) {
 	rows, err := r.db.Query(`SELECT id, file_path, content, start_line, end_line, language, slice_type, symbols, hash FROM code_slices`)
 	if err != nil {
@@ -224,22 +228,18 @@ func (r *SQLiteRepository) GetAllSlices() ([]domainContext.CodeSlice, error) {
 	return r.scanSlices(rows)
 }
 
-// GetStats satisfies SliceStore.GetStats
 func (r *SQLiteRepository) GetStats() (domainContext.IndexStats, error) {
 	var stats domainContext.IndexStats
-	// Count total slices and distinct files
 	err := r.db.QueryRow("SELECT COUNT(*), COUNT(DISTINCT file_path) FROM code_slices").Scan(&stats.TotalSlices, &stats.TotalFiles)
 	return stats, err
 }
 
-// Helper to avoid duplicating scan logic
 func (r *SQLiteRepository) scanSlices(rows *sql.Rows) ([]domainContext.CodeSlice, error) {
 	var slices []domainContext.CodeSlice
 	for rows.Next() {
 		var s domainContext.CodeSlice
 		var symbolsStr, typeStr string
-		err := rows.Scan(&s.ID, &s.FilePath, &s.Content, &s.StartLine, &s.EndLine, &s.Language, &typeStr, &symbolsStr, &s.Hash)
-		if err != nil {
+		if err := rows.Scan(&s.ID, &s.FilePath, &s.Content, &s.StartLine, &s.EndLine, &s.Language, &typeStr, &symbolsStr, &s.Hash); err != nil {
 			return nil, err
 		}
 		s.SliceType = domainContext.SliceType(typeStr)

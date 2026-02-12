@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/david22573/codepicker/app"
 	"github.com/david22573/codepicker/domain/task"
+	"github.com/david22573/codepicker/infra/metrics" // <--- CRITICAL IMPORT
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
@@ -27,7 +29,7 @@ var agentCmd = &cobra.Command{
 
 		cwd, _ := os.Getwd()
 
-		// CI is false for interactive mode [cite: 128]
+		// 1. Initialize Container
 		container, err := app.NewContainer(apiKey, cwd, "", agentDryRun, false)
 		if err != nil {
 			fmt.Printf("❌ Container Init Failed: %v\n", err)
@@ -35,17 +37,36 @@ var agentCmd = &cobra.Command{
 		}
 		defer container.Close()
 
+		// 2. Start Metrics & Health Server
+		metricsPort := 9090
+		if container.Config != nil && container.Config.Server.MetricsPort != 0 {
+			metricsPort = container.Config.Server.MetricsPort
+		}
+
+		metricsSrv := metrics.NewServer(metricsPort)
+		metricsSrv.Start()
+
+		// Ensure graceful shutdown of metrics server
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := metricsSrv.Shutdown(ctx); err != nil {
+				fmt.Printf("⚠️ Metrics server shutdown error: %v\n", err)
+			}
+		}()
+
 		fmt.Println(color.CyanString("🤖 CodePicker Agent initialized."))
 		fmt.Println(color.HiBlackString("Type 'exit' or 'quit' to stop."))
 
-		// 1. Generate the Primer (Project Map)
+		// 3. Generate the Primer (Project Map)
 		fmt.Print("🗺️  Loading project context... ")
-		primer := container.ProjectPrimer.Generate() // Now correctly defined [cite: 128]
+		primer := container.ProjectPrimer.Generate()
 		fmt.Println("Done.")
 
 		reader := bufio.NewReader(os.Stdin)
 		ctx := context.Background()
 
+		// 4. Main Interactive Loop
 		for {
 			fmt.Print(color.GreenString("\n> "))
 			input, _ := reader.ReadString('\n')
@@ -62,7 +83,7 @@ var agentCmd = &cobra.Command{
 				continue
 			}
 
-			// 2. Prepend Primer to the input for immediate context
+			// Prepend Primer to the input for immediate context
 			enhancedInput := fmt.Sprintf("PROJECT CONTEXT:\n%s\n\nUSER REQUEST:\n%s", primer, input)
 			fmt.Println(color.HiBlackString("Thinking..."))
 
@@ -81,7 +102,7 @@ var agentCmd = &cobra.Command{
 				},
 			}
 
-			// 3. Execute returns error; results are stored in the plan steps [cite: 130]
+			// Execute returns error; results are stored in the plan steps
 			err := container.PlanExecutor.Execute(ctx, syntheticPlan)
 
 			if err != nil {

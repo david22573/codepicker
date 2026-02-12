@@ -34,3 +34,8 @@ go.work.sum
 codepicker
 codepicker_context.md
 .codepicker/
+
+# CodePicker
+.codepicker/
+codepicker.yaml
+policy.json

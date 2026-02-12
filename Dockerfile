@@ -26,8 +26,10 @@ RUN apk add --no-cache git ca-certificates
 
 COPY --from=builder /app/codepicker .
 
-# Expose server port
+# Expose server port (API)
 EXPOSE 22573
+# Expose metrics/health port (Prometheus/K8s)
+EXPOSE 9090
 
 # Set default env
 ENV OPENROUTER_API_KEY=""

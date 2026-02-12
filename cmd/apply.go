@@ -25,9 +25,10 @@ var applyCmd = &cobra.Command{
 		relPath := args[0]
 		cwd, _ := os.Getwd()
 
-		shadowMgr := fs.NewShadowManager(cwd)
+		// Initialize ShadowManager with dryRun=false because 'apply' is an explicit write action
+		shadowMgr := fs.NewShadowManager(cwd, false)
 
-		// 1. Validation & Summary (Existing Logic)
+		// 1. Validation & Summary
 		shadowPath := filepath.Join(cwd, ".codepicker/shadow", relPath)
 		if _, err := os.Stat(shadowPath); os.IsNotExist(err) {
 			return fmt.Errorf("no shadow file found for %s", relPath)
@@ -61,7 +62,9 @@ var applyCmd = &cobra.Command{
 
 		// 3. Apply Changes
 		fmt.Printf("Applying changes to %s...\n", relPath)
-		if err := shadowMgr.Apply(relPath); err != nil {
+
+		// Updated to use Commit() instead of Apply() based on recent refactors
+		if err := shadowMgr.Commit(relPath); err != nil {
 			return fmt.Errorf("failed to apply: %w", err)
 		}
 
@@ -71,7 +74,7 @@ var applyCmd = &cobra.Command{
 			// Run formatting in background context
 			if err := hooks.RunFormatter(context.Background(), realPath); err != nil {
 				// Warn but do not fail the command, as the file is already applied
-				fmt.Printf("⚠️  %v\n", err)
+				fmt.Printf("⚠️  Formatting warning: %v\n", err)
 			}
 		}
 

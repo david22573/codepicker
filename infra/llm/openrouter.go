@@ -9,46 +9,53 @@ import (
 	"net/http"
 	"time"
 
-	domainContext "github.com/david22573/codepicker/domain/context"
-	"github.com/david22573/codepicker/domain/errors"
+	domainContext "github.com/david22573/codepicker/domain/context" // [cite: 201]
+	"github.com/david22573/codepicker/domain/errors"                // [cite: 212]
 )
 
-const openRouterURL = "https://openrouter.ai/api/v1/chat/completions"
+const openRouterURL = "https://openrouter.ai/api/v1/chat/completions" // [cite: 329]
 
-// OpenRouterAdapter implements agent.LLMClient using OpenRouter API.
-type OpenRouterAdapter struct {
-	apiKey         string
-	model          string
-	client         *http.Client
-	circuitBreaker *CircuitBreaker
+// --- Native Tool Structures ---
+
+type ToolDefinition struct {
+	Type     string             `json:"type"`
+	Function FunctionDefinition `json:"function"`
 }
 
-// NewOpenRouterAdapter initializes the client with config-defined timeout and a standard circuit breaker.
-func NewOpenRouterAdapter(apiKey, model string, timeout time.Duration) *OpenRouterAdapter {
-	return &OpenRouterAdapter{
-		apiKey: apiKey,
-		model:  model,
-		client: &http.Client{
-			Timeout: timeout,
-		},
-		// Initialize Circuit Breaker: 5 failures allowed, 1 minute reset timeout
-		circuitBreaker: NewCircuitBreaker(5, 60*time.Second),
-	}
+type FunctionDefinition struct {
+	Name        string      `json:"name"`
+	Description string      `json:"description"`
+	Parameters  interface{} `json:"parameters"` // JSON Schema [cite: 101]
 }
+
+type ToolCall struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
+type Message struct {
+	Role       string     `json:"role"`
+	Content    string     `json:"content,omitempty"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+	Name       string     `json:"name,omitempty"`
+}
+
+// --- Request/Response Structures ---
 
 type chatRequest struct {
-	Model    string    `json:"model"`
-	Messages []message `json:"messages"`
-}
-
-type message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Model    string           `json:"model"`
+	Messages []Message        `json:"messages"`
+	Tools    []ToolDefinition `json:"tools,omitempty"`
 }
 
 type chatResponse struct {
 	Choices []struct {
-		Message message `json:"message"`
+		Message Message `json:"message"`
 	} `json:"choices"`
 	Usage struct {
 		PromptTokens     int `json:"prompt_tokens"`
@@ -60,90 +67,93 @@ type chatResponse struct {
 	} `json:"error,omitempty"`
 }
 
-// Chat implements the basic LLMClient interface.
-func (o *OpenRouterAdapter) Chat(ctx context.Context, systemPrompt, userPrompt string) (string, error) {
-	resp, _, err := o.ChatWithUsage(ctx, systemPrompt, userPrompt)
-	return resp, err
+type OpenRouterAdapter struct {
+	apiKey         string
+	model          string
+	client         *http.Client
+	circuitBreaker *CircuitBreaker // [cite: 329]
 }
 
-// ChatWithUsage implements the extended interface for cost tracking.
-func (o *OpenRouterAdapter) ChatWithUsage(ctx context.Context, systemPrompt, userPrompt string) (string, domainContext.TokenUsage, error) {
+func NewOpenRouterAdapter(apiKey, model string, timeout time.Duration) *OpenRouterAdapter {
+	return &OpenRouterAdapter{
+		apiKey:         apiKey,
+		model:          model,
+		client:         &http.Client{Timeout: timeout},
+		circuitBreaker: NewCircuitBreaker(5, 60*time.Second), // [cite: 330]
+	}
+}
+
+// ChatNative implements structured tool calling.
+func (o *OpenRouterAdapter) ChatNative(ctx context.Context, messages []Message, tools []ToolDefinition) (Message, domainContext.TokenUsage, error) {
 	reqBody := chatRequest{
-		Model: o.model,
-		Messages: []message{
-			{Role: "system", Content: systemPrompt},
-			{Role: "user", Content: userPrompt},
-		},
+		Model:    o.model,
+		Messages: messages,
+		Tools:    tools,
 	}
 
 	jsonBody, err := json.Marshal(reqBody)
 	if err != nil {
-		return "", domainContext.TokenUsage{}, errors.NewSystem("llm.Chat", "failed to marshal request", err)
+		return Message{}, domainContext.TokenUsage{}, errors.NewSystem("llm.ChatNative", "failed to marshal request", err)
 	}
 
-	var responseContent string
+	var responseMessage Message
 	var usage domainContext.TokenUsage
 
-	// Wrap the network call in the Circuit Breaker
-	opErr := o.circuitBreaker.Execute(func() error {
+	opErr := o.circuitBreaker.Execute(func() error { // [cite: 332]
 		req, err := http.NewRequestWithContext(ctx, "POST", openRouterURL, bytes.NewBuffer(jsonBody))
 		if err != nil {
-			return errors.NewSystem("llm.Chat", "failed to create request", err)
+			return err
 		}
 
 		req.Header.Set("Authorization", "Bearer "+o.apiKey)
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("HTTP-Referer", "https://github.com/david22573/codepicker")
-		req.Header.Set("X-Title", "CodePicker")
 
 		resp, err := o.client.Do(req)
 		if err != nil {
-			return errors.NewLLM("llm.Chat", fmt.Errorf("network request failed: %w", err))
+			return errors.NewLLM("llm.ChatNative", err)
 		}
 		defer resp.Body.Close()
 
-		// PRODUCTION FIX: Handle reading the body with context awareness
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
-			// Check if we failed because the context (timeout) was exceeded
-			if ctx.Err() == context.DeadlineExceeded {
-				return errors.NewLLM("llm.Chat", fmt.Errorf("read timeout: the model took too long to stream the body"))
-			}
-			return errors.NewSystem("llm.Chat", "failed to read response body", err)
+			return err
 		}
 
 		if resp.StatusCode != http.StatusOK {
-			return errors.NewLLM("llm.Chat", fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body)))
+			return errors.NewLLM("llm.ChatNative", fmt.Errorf("API error (%d): %s", resp.StatusCode, string(body)))
 		}
 
 		var chatResp chatResponse
 		if err := json.Unmarshal(body, &chatResp); err != nil {
-			return errors.NewSystem("llm.Chat", "failed to parse response json", err)
+			return err
 		}
 
 		if chatResp.Error != nil {
-			return errors.NewLLM("llm.Chat", fmt.Errorf("api returned error: %s", chatResp.Error.Message))
+			return errors.NewLLM("llm.ChatNative", fmt.Errorf("api error: %s", chatResp.Error.Message))
 		}
 
-		if len(chatResp.Choices) == 0 {
-			return errors.NewLLM("llm.Chat", fmt.Errorf("received empty choices from API"))
-		}
-
-		responseContent = chatResp.Choices[0].Message.Content
-
-		// Capture usage stats
-		usage = domainContext.TokenUsage{
-			PromptTokens:     chatResp.Usage.PromptTokens,
-			CompletionTokens: chatResp.Usage.CompletionTokens,
-			TotalTokens:      chatResp.Usage.TotalTokens,
+		if len(chatResp.Choices) > 0 {
+			responseMessage = chatResp.Choices[0].Message
+			usage = domainContext.TokenUsage{
+				PromptTokens:     chatResp.Usage.PromptTokens,
+				CompletionTokens: chatResp.Usage.CompletionTokens,
+				TotalTokens:      chatResp.Usage.TotalTokens,
+			}
 		}
 
 		return nil
 	})
 
-	if opErr != nil {
-		return "", domainContext.TokenUsage{}, opErr
-	}
+	return responseMessage, usage, opErr
+}
 
-	return responseContent, usage, nil
+// Chat maintains backward compatibility for simple system/user prompts. [cite: 331]
+func (o *OpenRouterAdapter) Chat(ctx context.Context, systemPrompt, userPrompt string) (string, error) {
+	messages := []Message{
+		{Role: "system", Content: systemPrompt},
+		{Role: "user", Content: userPrompt},
+	}
+	msg, _, err := o.ChatNative(ctx, messages, nil)
+	return msg.Content, err
 }

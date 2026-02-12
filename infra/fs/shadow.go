@@ -1,6 +1,7 @@
 package fs
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,12 +15,17 @@ const ShadowDir = ".codepicker/shadow"
 // ShadowManager handles the safe staging of file changes.
 type ShadowManager struct {
 	ProjectRoot string
+	dryRun      bool // Feature 5: Dry Run Support
 	mu          sync.RWMutex
 }
 
-func NewShadowManager(root string) *ShadowManager {
+// NewShadowManager initializes the manager with dry-run awareness.
+func NewShadowManager(root string, dryRun bool) *ShadowManager {
 	absRoot, _ := filepath.Abs(root)
-	return &ShadowManager{ProjectRoot: absRoot}
+	return &ShadowManager{
+		ProjectRoot: absRoot,
+		dryRun:      dryRun,
+	}
 }
 
 // sanitizePath prevents directory traversal attacks by resolving absolute paths.
@@ -45,7 +51,6 @@ func (s *ShadowManager) sanitizePath(relPath string) (string, error) {
 	}
 
 	// Ensure the path is actually inside the project root
-	// We add the separator to prevent partial matching (e.g. /opt/app vs /opt/apple)
 	if !strings.HasPrefix(absFullPath, absProjectRoot+string(filepath.Separator)) && absFullPath != absProjectRoot {
 		return "", errors.NewValidation("fs.sanitize", "path traversal detected: escapes project root")
 	}
@@ -54,6 +59,7 @@ func (s *ShadowManager) sanitizePath(relPath string) (string, error) {
 }
 
 // Write saves content to the shadow directory.
+// Note: We ALLOW writes to shadow even in dry-run, as it's the simulation environment.
 func (s *ShadowManager) Write(relPath string, content []byte) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -98,6 +104,10 @@ func (s *ShadowManager) Commit(relPath string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.dryRun {
+		return fmt.Errorf("dry-run active: skipping commit for %s", relPath)
+	}
+
 	cleanPath, err := s.sanitizePath(relPath)
 	if err != nil {
 		return err
@@ -120,4 +130,30 @@ func (s *ShadowManager) Commit(relPath string) error {
 	}
 
 	return os.Remove(shadowPath)
+}
+
+// ListChanges returns all files currently staged in the shadow directory.
+func (s *ShadowManager) ListChanges() ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	shadowRoot := filepath.Join(s.ProjectRoot, ShadowDir)
+	var changedFiles []string
+
+	if _, err := os.Stat(shadowRoot); os.IsNotExist(err) {
+		return changedFiles, nil
+	}
+
+	err := filepath.Walk(shadowRoot, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !info.IsDir() {
+			rel, _ := filepath.Rel(shadowRoot, path)
+			changedFiles = append(changedFiles, rel)
+		}
+		return nil
+	})
+
+	return changedFiles, err
 }

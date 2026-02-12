@@ -10,6 +10,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"strings"
 
 	"github.com/david22573/codepicker/domain/context"
 )
@@ -24,14 +25,14 @@ func NewCodeSlicer() *CodeSlicer {
 	}
 }
 
-// SliceFile parses a Go file and breaks it into semantic CodeSlices
+// SliceFile parses a Go file and breaks it into semantic CodeSlices.
+// ENHANCEMENT: Now associates methods with their receiver types.
 func (s *CodeSlicer) SliceFile(filePath string) ([]context.CodeSlice, error) {
 	content, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
 
-	// 1. Parse the file into an AST
 	node, err := parser.ParseFile(s.fset, filePath, content, parser.ParseComments)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse AST: %w", err)
@@ -40,18 +41,52 @@ func (s *CodeSlicer) SliceFile(filePath string) ([]context.CodeSlice, error) {
 	var slices []context.CodeSlice
 	fileHash := computeHash(content)
 
-	// 2. Walk the AST to find top-level declarations
 	for _, decl := range node.Decls {
 		switch d := decl.(type) {
 		case *ast.FuncDecl:
-			// Extract Function/Method
-			slices = append(slices, s.createSlice(filePath, d, context.SliceTypeFunction, d.Name.Name, content, fileHash))
+			// 1. Extract Name
+			name := d.Name.Name
+
+			// 2. Identify Receiver (Method vs Function)
+			var symbols []string
+			sliceType := context.SliceTypeFunction
+
+			if d.Recv != nil && len(d.Recv.List) > 0 {
+				// It's a method. Try to get the receiver type name.
+				recvType := ""
+				switch t := d.Recv.List[0].Type.(type) {
+				case *ast.StarExpr: // e.g. *MyStruct
+					if ident, ok := t.X.(*ast.Ident); ok {
+						recvType = ident.Name
+					}
+				case *ast.Ident: // e.g. MyStruct
+					recvType = t.Name
+				}
+
+				if recvType != "" {
+					// Symbol format: "MyStruct.MethodName"
+					symbols = append(symbols, recvType, fmt.Sprintf("%s.%s", recvType, name))
+					sliceType = context.SliceTypeFunction // Domain doesn't have "Method" type yet, keep as Function
+				} else {
+					symbols = append(symbols, name)
+				}
+			} else {
+				symbols = append(symbols, name)
+			}
+
+			slices = append(slices, s.createSlice(filePath, d, sliceType, symbols, fileHash))
 
 		case *ast.GenDecl:
-			// Extract Types (Structs/Interfaces)
+			// 3. Extract Types (Structs/Interfaces)
 			for _, spec := range d.Specs {
 				if typeSpec, ok := spec.(*ast.TypeSpec); ok {
-					slices = append(slices, s.createSlice(filePath, d, s.getSliceType(typeSpec), typeSpec.Name.Name, content, fileHash))
+					typeName := typeSpec.Name.Name
+					sType := s.getSliceType(typeSpec)
+
+					// Just the type name as symbol
+					symbols := []string{typeName}
+
+					slices = append(slices, s.createSlice(filePath, d, sType, symbols, fileHash))
 				}
 			}
 		}
@@ -60,24 +95,30 @@ func (s *CodeSlicer) SliceFile(filePath string) ([]context.CodeSlice, error) {
 	return slices, nil
 }
 
-// createSlice transforms an AST node into our domain CodeSlice model
-func (s *CodeSlicer) createSlice(path string, node ast.Node, sType context.SliceType, name string, fullContent []byte, fileHash string) context.CodeSlice {
+func (s *CodeSlicer) createSlice(path string, node ast.Node, sType context.SliceType, symbols []string, fileHash string) context.CodeSlice {
 	start := s.fset.Position(node.Pos()).Line
 	end := s.fset.Position(node.End()).Line
 
-	// Extract the actual source code for this node
 	var buf bytes.Buffer
 	format.Node(&buf, s.fset, node)
 
+	// Primary symbol is usually the last one (e.g. "Struct.Method") or just the name
+	primaryName := symbols[0]
+	if len(symbols) > 1 {
+		primaryName = symbols[len(symbols)-1]
+	}
+	// Sanitize ID
+	safeName := strings.ReplaceAll(primaryName, "*", "")
+
 	return context.CodeSlice{
-		ID:        fmt.Sprintf("%s-%s-%d", path, name, start),
+		ID:        fmt.Sprintf("%s-%s-%d", path, safeName, start),
 		FilePath:  path,
 		StartLine: start,
 		EndLine:   end,
 		Content:   buf.String(),
 		Language:  "go",
 		SliceType: sType,
-		Symbols:   []string{name},
+		Symbols:   symbols,
 		Hash:      fileHash,
 	}
 }

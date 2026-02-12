@@ -11,24 +11,27 @@ import (
 	"github.com/david22573/codepicker/domain/audit"
 	"github.com/david22573/codepicker/infra/llm"
 	"github.com/david22573/codepicker/infra/logging"
+	"github.com/david22573/codepicker/infra/ratelimit"
 )
 
 type Auditor struct {
-	model       agent.LLMClient
+	model       *llm.OpenRouterAdapter
 	repo        agent.Repository
 	tools       []agent.Tool
 	policy      agent.Policy
 	logger      *logging.Logger
 	costTracker *llm.CostTracker
+	rateLimiter *ratelimit.ToolRateLimiter // Added for operational safety
 }
 
 func NewAuditor(
-	model agent.LLMClient,
+	model *llm.OpenRouterAdapter,
 	repo agent.Repository,
 	tools []agent.Tool,
 	policy agent.Policy,
 	logger *logging.Logger,
 	costTracker *llm.CostTracker,
+	rateLimiter *ratelimit.ToolRateLimiter, // Injected from container
 ) *Auditor {
 	return &Auditor{
 		model:       model,
@@ -37,72 +40,51 @@ func NewAuditor(
 		policy:      policy,
 		logger:      logger,
 		costTracker: costTracker,
+		rateLimiter: rateLimiter,
 	}
 }
 
-// SuggestImprovements scans the codebase and returns a list of actionable tasks.
-// UPDATED: Now accepts a 'primer' string to give the agent immediate context.
+// SuggestImprovements scans the codebase to identify actionable code quality or security tasks.
 func (a *Auditor) SuggestImprovements(ctx context.Context, primer string) ([]string, error) {
-	// 1. Construct Read-Only Tools
-	toolDescs := ""
-	toolMap := make(map[string]agent.Tool)
-	for _, t := range a.tools {
-		toolMap[t.Name()] = t
-		toolDescs += fmt.Sprintf("- %s: %s\n", t.Name(), t.Description())
-	}
-
-	// 2. Strict System Prompt with Primer
 	systemPrompt := fmt.Sprintf(`%s
 
-You are the CodePicker Scout.
-Your goal is to scan the codebase and identify 3 SAFE, ISOLATED improvements.
-Focus on: Error handling, unused variables, simple refactors, or documentation.
+You are the CodePicker Scout, a specialist in identifying high-impact, low-risk code improvements.
+Your goal is to scan the codebase and identify exactly 3 SAFE, ISOLATED improvements.
 
-AVAILABLE TOOLS:
-%s
+Focus areas:
+1. Error handling (e.g., unhandled errors).
+2. Code hygiene (e.g., unused variables).
+3. Documentation (e.g., missing comments).
+4. Simple refactors.
 
 RULES:
-1. You MUST use tools to see the code. Do not guess.
-2. You MUST follow the ReAct format exactly.
-3. Your Final Answer must ONLY be the list of tasks.
+1. You MUST use tools to see the code.
+2. Your Final Answer must list the improvements, each starting with "TASK: ".`, primer)
 
-FORMAT EXAMPLE (Follow this exactly):
-Thought: I need to see the file structure.
-Action: list_files
-Input: {"path": "."}
-(System adds Observation...)
-Thought: I see main.go. I should check it for errors.
-Action: read_file
-Input: {"path": "main.go"}
-...
-Final Answer:
-TASK: Fix unhandled error in main.go
-TASK: Remove unused import in adapters/parser.go
+	scout := NewReActAgent(
+		a.model,
+		a.tools,
+		nil,
+		a.logger,
+		a.costTracker,
+		a.rateLimiter, // FIX: Pass injected rate limiter
+		0.50,
+	)
 
-Begin.`, primer, toolDescs)
+	// FIX: Apply the specialized persona to the scout
+	scout.UpdateSystemPrompt(systemPrompt)
 
-	// 3. Run the Agent
-	scout := &ReActAgent{
-		model:  a.model,
-		tools:  toolMap,
-		sysMsg: systemPrompt,
-		logger: a.logger, // FIX: Injected Logger
-	}
-
-	fmt.Println("📡 [SCOUT] Scanning for improvements...")
-	result, err := scout.Run(ctx, "Find 3 safe improvements in the current directory.")
+	fmt.Println("📡 [SCOUT] Scanning for improvements using Native Tool Calling...")
+	result, err := scout.Run(ctx, "Analyze the current directory and suggest 3 high-quality improvements.")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("scout scanning failed: %w", err)
 	}
 
-	// 4. Parse the output into a slice
 	var tasks []string
 	lines := strings.Split(result, "\n")
 	for _, line := range lines {
 		clean := strings.TrimSpace(line)
-		// We look for lines starting with TASK: (case insensitive to be safe)
 		if strings.HasPrefix(strings.ToUpper(clean), "TASK:") {
-			// Extract the text after "TASK:"
 			parts := strings.SplitN(clean, ":", 2)
 			if len(parts) == 2 {
 				tasks = append(tasks, strings.TrimSpace(parts[1]))
@@ -113,55 +95,36 @@ Begin.`, primer, toolDescs)
 	return tasks, nil
 }
 
-// RunAudit performs the detailed security/quality analysis.
+// RunAudit performs a comprehensive security and quality analysis.
 func (a *Auditor) RunAudit(ctx context.Context, input string) (*audit.Report, error) {
-	// 1. Construct the Auditor Persona
-	toolDescs := ""
-	toolMap := make(map[string]agent.Tool)
-	for _, t := range a.tools {
-		toolMap[t.Name()] = t
-		toolDescs += fmt.Sprintf("- %s: %s\n", t.Name(), t.Description())
-	}
+	systemPrompt := `You are CodePicker-Auditor, a senior security researcher and software architect.
+Your goal is to AUDIT the codebase for vulnerabilities, technical debt, and architectural drift.
+STRICT READ-ONLY MODE: You cannot modify any files.
+Your Final Answer MUST be a comprehensive Markdown report.`
 
-	systemPrompt := fmt.Sprintf(`You are CodePicker-Auditor, a senior security and code quality specialist.
-Your goal is to AUDIT the codebase based on the user's request.
-You are running in STRICT READ-ONLY MODE. You cannot modify files.
+	auditAgent := NewReActAgent(
+		a.model,
+		a.tools,
+		nil,
+		a.logger,
+		a.costTracker,
+		a.rateLimiter, // FIX: Pass injected rate limiter
+		1.50,
+	)
 
-PROCESS:
-1. Explore the codebase using available read tools to understand the context.
-2. Identify bugs, security vulnerabilities, or architectural issues.
-3. Provide a detailed Markdown report as your Final Answer.
+	// FIX: Apply the specialized persona to the audit agent
+	auditAgent.UpdateSystemPrompt(systemPrompt)
 
-AVAILABLE TOOLS:
-%s
-
-FORMAT:
-Thought: <reasoning>
-Action: <tool_name>
-Input: <json_args>
-
-Begin.`, toolDescs)
-
-	// 2. Create an Ephemeral Agent for this Audit
-	auditAgent := &ReActAgent{
-		model:  a.model,
-		tools:  toolMap,
-		sysMsg: systemPrompt,
-		logger: a.logger, // FIX: Injected Logger
-	}
-
-	// 3. Run the Agent
-	fmt.Println("🔍 Auditor starting analysis...")
+	fmt.Println("🔍 [AUDITOR] Starting comprehensive analysis...")
 	result, err := auditAgent.Run(ctx, input)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("audit failed: %w", err)
 	}
 
-	// 4. Generate Artifact
 	reportID := fmt.Sprintf("audit-%d", time.Now().Unix())
 	fileName := fmt.Sprintf("audit_report_%s.md", reportID)
 	if err := os.WriteFile(fileName, []byte(result), 0644); err != nil {
-		return nil, fmt.Errorf("failed to save audit artifact: %w", err)
+		return nil, fmt.Errorf("failed to save audit report: %w", err)
 	}
 
 	return &audit.Report{
