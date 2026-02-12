@@ -17,13 +17,11 @@ var (
 	ctxExclude []string
 )
 
-// contextCmd represents the base command for context management
 var contextCmd = &cobra.Command{
 	Use:   "context",
 	Short: "Manage the semantic code index and execution context",
 }
 
-// contextIndexCmd triggers the semantic indexing with your ignore logic
 var contextIndexCmd = &cobra.Command{
 	Use:   "index [directory]",
 	Short: "Scan and index the codebase using ignore patterns",
@@ -41,24 +39,11 @@ var contextIndexCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("failed to initialize container: %w", err)
 		}
+		defer container.Close()
 
-		// --- Your Original Ignore Logic ---
-		finalExcludes := []string{".git", ".git/*", ".codepicker/*"}
+		fmt.Printf("🔍 Indexing codebase at: %s\n", targetDir)
 
-		if gitIgnore, err := readIgnoreFile(".gitignore"); err == nil {
-			finalExcludes = append(finalExcludes, gitIgnore...)
-			fmt.Printf("🛡️  Loaded %d patterns from .gitignore\n", len(gitIgnore))
-		}
-
-		if cpIgnore, err := readIgnoreFile(".codepickerignore"); err == nil {
-			finalExcludes = append(finalExcludes, cpIgnore...)
-			fmt.Printf("👁️  Loaded %d patterns from .codepickerignore\n", len(cpIgnore))
-		}
-		finalExcludes = append(finalExcludes, ctxExclude...)
-
-		fmt.Printf("🔍 Indexing codebase at: %s (respecting ignore patterns)\n", targetDir)
-
-		// --- Semantic Indexing (Phase 2 & 5) ---
+		// SliceStore is now available directly in the container
 		slicer := indexer.NewCodeSlicer()
 		manager := indexer.NewIndexManager(slicer, container.SliceStore)
 
@@ -66,7 +51,11 @@ var contextIndexCmd = &cobra.Command{
 			return fmt.Errorf("indexing failed: %w", err)
 		}
 
-		stats, _ := container.SliceStore.GetStats()
+		// Correct usage of GetStats from SliceStore interface
+		stats, err := container.SliceStore.GetStats()
+		if err != nil {
+			return err
+		}
 		fmt.Printf("\n✅ Indexing complete! Total Slices: %d across %d files.\n",
 			stats.TotalSlices, stats.TotalFiles)
 
@@ -74,7 +63,6 @@ var contextIndexCmd = &cobra.Command{
 	},
 }
 
-// contextExportCmd generates a full project markdown like you wanted
 var contextExportCmd = &cobra.Command{
 	Use:   "export [output_file]",
 	Short: "Export the entire semantic index as a single Markdown file",
@@ -90,10 +78,11 @@ var contextExportCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		defer container.Close()
 
 		fmt.Printf("📄 Exporting full index to %s...\n", outFile)
 
-		// Fixed: Pulling everything without FTS5 MATCH syntax
+		// Correct usage: GetAllSlices is a method of the concrete Repository
 		allSlices, err := container.Repository.GetAllSlices()
 		if err != nil {
 			return err
@@ -120,34 +109,7 @@ var contextExportCmd = &cobra.Command{
 	},
 }
 
-// contextBuildCmd previews semantic slices for a specific task
-var contextBuildCmd = &cobra.Command{
-	Use:   "build [task]",
-	Short: "Preview semantic slices that would be sent for a task",
-	Args:  cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		taskInput := args[0]
-		apiKey := os.Getenv("OPENROUTER_API_KEY")
-		cwd, _ := os.Getwd()
-
-		container, err := app.NewContainer(apiKey, cwd, "", false, false)
-		if err != nil {
-			return err
-		}
-
-		// Uses Phase 3 ranking logic
-		output, err := container.ContextBuilder.BuildForTask(taskInput)
-		if err != nil {
-			return err
-		}
-
-		fmt.Println("\n--- SEMANTIC CONTEXT PREVIEW ---")
-		fmt.Println(output)
-		return nil
-	},
-}
-
-// readIgnoreFile is your original helper to parse ignore-style files
+// readIgnoreFile helper to parse .gitignore/.codepickerignore
 func readIgnoreFile(filename string) ([]string, error) {
 	file, err := os.Open(filename)
 	if err != nil {
@@ -172,7 +134,6 @@ func init() {
 	contextIndexCmd.Flags().StringSliceVar(&ctxExclude, "exclude", []string{}, "Exclude patterns")
 
 	contextCmd.AddCommand(contextIndexCmd)
-	contextCmd.AddCommand(contextBuildCmd)
 	contextCmd.AddCommand(contextExportCmd)
 	rootCmd.AddCommand(contextCmd)
 }

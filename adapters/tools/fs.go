@@ -12,9 +12,7 @@ import (
 	"github.com/david22573/codepicker/infra/fs"
 )
 
-// --- WriteFileTool ---
-
-// WriteFileTool allows the agent to write content to the shadow filesystem
+// WriteFileTool allows the agent to write content to the shadow filesystem.
 type WriteFileTool struct {
 	shadow *fs.ShadowManager
 }
@@ -42,7 +40,11 @@ func (t *WriteFileTool) Execute(ctx context.Context, args string) (string, error
 		return "", errors.NewValidation("tool.write_file", "path and content are required")
 	}
 
-	// Writes to the shadow directory to prevent direct unverified modification
+	// Safety Check: Check size of content before writing
+	if len(input.Content) > fs.MaxFileSize {
+		return "", fmt.Errorf("content exceeds maximum file size limit")
+	}
+
 	savedPath, err := t.shadow.Write(input.Path, []byte(input.Content))
 	if err != nil {
 		return "", err
@@ -51,9 +53,7 @@ func (t *WriteFileTool) Execute(ctx context.Context, args string) (string, error
 	return fmt.Sprintf("Success. File written to shadow path: %s", savedPath), nil
 }
 
-// --- ReadFileTool ---
-
-// ReadFileTool allows the agent to read content, prioritizing the shadow filesystem
+// ReadFileTool allows the agent to read content, prioritizing shadow with safety limits.
 type ReadFileTool struct {
 	shadow *fs.ShadowManager
 }
@@ -65,7 +65,7 @@ func NewReadFileTool(s *fs.ShadowManager) *ReadFileTool {
 func (t *ReadFileTool) Name() string { return "read_file" }
 
 func (t *ReadFileTool) Description() string {
-	return `Read file content. Input JSON: {"path": "string"}`
+	return `Read file content safely. Input JSON: {"path": "string"}`
 }
 
 func (t *ReadFileTool) Execute(ctx context.Context, args string) (string, error) {
@@ -76,8 +76,19 @@ func (t *ReadFileTool) Execute(ctx context.Context, args string) (string, error)
 		return "", errors.NewValidation("tool.read_file", "invalid JSON arguments")
 	}
 
-	// Reads from shadow if it exists, otherwise falls back to real file
-	content, err := t.shadow.Read(input.Path)
+	// Use the New SafeReadFile logic from infra/fs/safety.go
+	// We check shadow first, then fallback to SafeReadFile
+	shadowPath := filepath.Join(t.shadow.ProjectRoot, ".codepicker/shadow", input.Path)
+	if _, err := os.Stat(shadowPath); err == nil {
+		content, err := fs.SafeReadFile(ctx, shadowPath)
+		if err != nil {
+			return "", err
+		}
+		return string(content), nil
+	}
+
+	realPath := filepath.Join(t.shadow.ProjectRoot, input.Path)
+	content, err := fs.SafeReadFile(ctx, realPath)
 	if err != nil {
 		return "", err
 	}
@@ -85,9 +96,7 @@ func (t *ReadFileTool) Execute(ctx context.Context, args string) (string, error)
 	return string(content), nil
 }
 
-// --- ListFilesTool ---
-
-// ListFilesTool provides a recursive directory listing
+// ListFilesTool provides a recursive directory listing with a hard item limit.
 type ListFilesTool struct {
 	projectRoot string
 }
@@ -99,29 +108,28 @@ func NewListFilesTool(root string) *ListFilesTool {
 func (t *ListFilesTool) Name() string { return "list_files" }
 
 func (t *ListFilesTool) Description() string {
-	return `List files in a directory (recursive, ignores .git). Input JSON: {"path": "string"}`
+	return `List files in a directory. Input JSON: {"path": "string"}`
 }
 
 func (t *ListFilesTool) Execute(ctx context.Context, args string) (string, error) {
 	var input struct {
 		Path string `json:"path"`
 	}
-	// Default to project root if no path is provided
 	if err := json.Unmarshal([]byte(args), &input); err != nil || input.Path == "" {
 		input.Path = "."
 	}
 
 	targetDir := filepath.Join(t.projectRoot, input.Path)
 	var files []string
+	const maxFiles = 1000 // Acceptance Criteria
 
-	// Walk the directory and capture all non-hidden files
 	err := filepath.Walk(targetDir, func(path string, info os.FileInfo, err error) error {
-		// FIX: We now propagate the error so the agent knows if a directory is inaccessible
 		if err != nil {
-			return fmt.Errorf("access error at %s: %v", path, err)
+			return err
 		}
-
-		// Skip hidden files and directories like .git
+		if len(files) >= maxFiles {
+			return filepath.SkipDir
+		}
 		if strings.Contains(path, "/.") || strings.Contains(path, "\\.") {
 			if info.IsDir() && info.Name() != "." {
 				return filepath.SkipDir
@@ -144,10 +152,10 @@ func (t *ListFilesTool) Execute(ctx context.Context, args string) (string, error
 		return "No files found.", nil
 	}
 
-	// Truncate output for very large projects to avoid token overflow
-	if len(files) > 100 {
-		return fmt.Sprintf("Found %d files. Showing first 100:\n%s\n... (truncated)", len(files), strings.Join(files[:100], "\n")), nil
+	result := strings.Join(files, "\n")
+	if len(files) >= maxFiles {
+		result += "\n... (truncated: reached 1000 file limit)"
 	}
 
-	return strings.Join(files, "\n"), nil
+	return result, nil
 }

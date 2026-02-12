@@ -71,14 +71,10 @@ Input: ...
 When you have found the issue, output your findings as the Final Answer.`, primer, toolDescs.String())
 
 	analyst := &ReActAgent{
-		model:       e.model,
-		tools:       readMap,
-		policy:      e.policy,
-		repo:        e.repo,
-		sysMsg:      systemPrompt,
-		maxTurn:     8,
-		logger:      e.logger,      // FIX: Injected Logger
-		costTracker: e.costTracker, // FIX: Injected CostTracker
+		model:  e.model,
+		tools:  readMap,
+		sysMsg: systemPrompt,
+		logger: e.logger, // FIX: Injected Logger
 	}
 
 	input := fmt.Sprintf("TASK: %s\n\nStart by reading: %s", task, contextFile)

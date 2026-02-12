@@ -13,7 +13,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// Local flag for this command to avoid dependency on run.go's globals
 var agentDryRun bool
 
 var agentCmd = &cobra.Command{
@@ -28,7 +27,7 @@ var agentCmd = &cobra.Command{
 
 		cwd, _ := os.Getwd()
 
-		// FIX 1: Use local dryRun flag and hardcode ci=false (interactive mode)
+		// CI is false for interactive mode [cite: 128]
 		container, err := app.NewContainer(apiKey, cwd, "", agentDryRun, false)
 		if err != nil {
 			fmt.Printf("❌ Container Init Failed: %v\n", err)
@@ -38,11 +37,10 @@ var agentCmd = &cobra.Command{
 
 		fmt.Println(color.CyanString("🤖 CodePicker Agent initialized."))
 		fmt.Println(color.HiBlackString("Type 'exit' or 'quit' to stop."))
-		fmt.Println(color.HiBlackString("Type 'clear' to reset context."))
 
-		// 1. Generate the Primer
+		// 1. Generate the Primer (Project Map)
 		fmt.Print("🗺️  Loading project context... ")
-		primer := container.ProjectPrimer.Generate()
+		primer := container.ProjectPrimer.Generate() // Now correctly defined [cite: 128]
 		fmt.Println("Done.")
 
 		reader := bufio.NewReader(os.Stdin)
@@ -64,11 +62,10 @@ var agentCmd = &cobra.Command{
 				continue
 			}
 
-			// 2. Prepend Primer to the input
+			// 2. Prepend Primer to the input for immediate context
 			enhancedInput := fmt.Sprintf("PROJECT CONTEXT:\n%s\n\nUSER REQUEST:\n%s", primer, input)
 			fmt.Println(color.HiBlackString("Thinking..."))
 
-			// FIX 2: Use 'OriginalTask' instead of 'Goal'
 			syntheticPlan := &task.Plan{
 				ID:           "interactive-chat",
 				OriginalTask: input,
@@ -84,13 +81,12 @@ var agentCmd = &cobra.Command{
 				},
 			}
 
-			// FIX 3: Execute returns only error. Results are updated in the plan struct.
+			// 3. Execute returns error; results are stored in the plan steps [cite: 130]
 			err := container.PlanExecutor.Execute(ctx, syntheticPlan)
 
 			if err != nil {
 				fmt.Printf("❌ Error: %v\n", err)
 			} else {
-				// Read the result from the step
 				for _, step := range syntheticPlan.Steps {
 					if step.Status == task.StatusFailed {
 						fmt.Printf("❌ %s\n", step.Error)

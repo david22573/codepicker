@@ -12,15 +12,7 @@ type Logger struct {
 	zap *zap.Logger
 }
 
-type contextKey string
-
-const (
-	requestIDKey   contextKey = "request_id"
-	executionIDKey contextKey = "execution_id"
-)
-
-// NewLogger initializes the logging system.
-// env: "production" (JSON, Info level) or "development" (Console, Debug level)
+// NewLogger initializes the logging system for dev or prod.
 func NewLogger(env string) (*Logger, error) {
 	var config zap.Config
 
@@ -32,11 +24,9 @@ func NewLogger(env string) (*Logger, error) {
 		config = zap.NewDevelopmentConfig()
 		config.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
 		config.EncoderConfig.EncodeTime = zapcore.TimeEncoderOfLayout("15:04:05")
-		// Shorten caller path to just package/file
 		config.EncoderConfig.EncodeCaller = zapcore.ShortCallerEncoder
 	}
 
-	// Build with stacktrace only for errors
 	logger, err := config.Build(
 		zap.AddCaller(),
 		zap.AddStacktrace(zapcore.ErrorLevel),
@@ -48,16 +38,15 @@ func NewLogger(env string) (*Logger, error) {
 	return &Logger{zap: logger}, nil
 }
 
-// WithContext enriches the logger with trace IDs from the context
+// WithContext enriches the logger with trace IDs from the context.
 func (l *Logger) WithContext(ctx context.Context) *Logger {
 	fields := []zap.Field{}
 
-	// Extract standard tracing keys if they exist
-	if reqID, ok := ctx.Value(requestIDKey).(string); ok {
+	if reqID, ok := ctx.Value(RequestIDKey).(string); ok {
 		fields = append(fields, zap.String("request_id", reqID))
 	}
 
-	if execID, ok := ctx.Value(executionIDKey).(string); ok {
+	if execID, ok := ctx.Value(ExecutionIDKey).(string); ok {
 		fields = append(fields, zap.String("execution_id", execID))
 	}
 
@@ -67,7 +56,6 @@ func (l *Logger) WithContext(ctx context.Context) *Logger {
 	return l
 }
 
-// Core logging methods
 func (l *Logger) Info(msg string, fields ...zap.Field) {
 	l.zap.Info(msg, fields...)
 }
@@ -84,33 +72,10 @@ func (l *Logger) Debug(msg string, fields ...zap.Field) {
 	l.zap.Debug(msg, fields...)
 }
 
-func (l *Logger) Fatal(msg string, fields ...zap.Field) {
-	l.zap.Fatal(msg, fields...)
-}
-
-// Sync flushes any buffered logs (call this on exit)
 func (l *Logger) Sync() error {
 	return l.zap.Sync()
 }
 
-// --- Domain Specific Helpers ---
-
-// LogAgentAction logs high-level agent decisions
-func (l *Logger) LogAgentAction(agentName, action string, metadata map[string]interface{}) {
-	fields := []zap.Field{
-		zap.String("component", "agent"),
-		zap.String("agent_name", agentName),
-		zap.String("action", action),
-	}
-
-	for k, v := range metadata {
-		fields = append(fields, zap.Any(k, v))
-	}
-
-	l.Info("Agent Action", fields...)
-}
-
-// LogToolExecution records the result and duration of a tool call
 func (l *Logger) LogToolExecution(toolName, args string, duration time.Duration, err error) {
 	fields := []zap.Field{
 		zap.String("component", "tool"),
@@ -127,7 +92,6 @@ func (l *Logger) LogToolExecution(toolName, args string, duration time.Duration,
 	}
 }
 
-// LogLLMCall tracks token usage and latency for cost monitoring
 func (l *Logger) LogLLMCall(model string, duration time.Duration, promptTokens, completionTokens int, err error) {
 	fields := []zap.Field{
 		zap.String("component", "llm"),

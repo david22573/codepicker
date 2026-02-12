@@ -83,14 +83,10 @@ Begin.`, primer, toolDescs)
 
 	// 3. Run the Agent
 	scout := &ReActAgent{
-		model:       a.model,
-		tools:       toolMap,
-		policy:      a.policy, // Strict Read-Only
-		repo:        a.repo,
-		sysMsg:      systemPrompt,
-		maxTurn:     8,
-		logger:      a.logger,      // FIX: Injected Logger
-		costTracker: a.costTracker, // FIX: Injected CostTracker
+		model:  a.model,
+		tools:  toolMap,
+		sysMsg: systemPrompt,
+		logger: a.logger, // FIX: Injected Logger
 	}
 
 	fmt.Println("📡 [SCOUT] Scanning for improvements...")
@@ -148,14 +144,10 @@ Begin.`, toolDescs)
 
 	// 2. Create an Ephemeral Agent for this Audit
 	auditAgent := &ReActAgent{
-		model:       a.model,
-		tools:       toolMap,
-		policy:      a.policy, // This must be the ReadOnly policy
-		repo:        a.repo,
-		sysMsg:      systemPrompt,
-		maxTurn:     10,
-		logger:      a.logger,      // FIX: Injected Logger
-		costTracker: a.costTracker, // FIX: Injected CostTracker
+		model:  a.model,
+		tools:  toolMap,
+		sysMsg: systemPrompt,
+		logger: a.logger, // FIX: Injected Logger
 	}
 
 	// 3. Run the Agent

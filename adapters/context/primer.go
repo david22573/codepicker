@@ -2,94 +2,73 @@ package context
 
 import (
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 )
 
-// ProjectPrimer generates a high-level overview of the project structure
-// to "prime" the agent before it starts working.
 type ProjectPrimer struct {
-	ProjectRoot string
+	Root string
 }
 
 func NewProjectPrimer(root string) *ProjectPrimer {
-	return &ProjectPrimer{ProjectRoot: root}
+	return &ProjectPrimer{Root: root}
 }
 
-// Generate builds a prompt-ready summary of the project.
+// Generate provides a safe string wrapper for Prime(), used by CLI commands.
 func (p *ProjectPrimer) Generate() string {
+	res, err := p.Prime()
+	if err != nil {
+		return fmt.Sprintf("Error generating project map: %v", err)
+	}
+	return res
+}
+
+// Prime generates a structured text overview of the repository.
+func (p *ProjectPrimer) Prime() (string, error) {
 	var sb strings.Builder
-	sb.WriteString("## PROJECT STARTER INFO\n")
-	sb.WriteString("You are working in the following project structure:\n\n")
+	sb.WriteString("### PROJECT MAP & STRUCTURE\n")
 
-	sb.WriteString("<file_tree>\n")
-
-	// 1. Walk and generate tree
-	maxDepth := 4 // Don't go too deep to save tokens
-	fileCount := 0
-
-	err := filepath.WalkDir(p.ProjectRoot, func(path string, d fs.DirEntry, err error) error {
+	err := filepath.Walk(p.Root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			return nil
+			return err
 		}
 
-		rel, _ := filepath.Rel(p.ProjectRoot, path)
+		rel, _ := filepath.Rel(p.Root, path)
 		if rel == "." {
 			return nil
 		}
 
-		// Skip hidden/vendor
-		if strings.HasPrefix(d.Name(), ".") || d.Name() == "vendor" || d.Name() == "node_modules" {
-			if d.IsDir() {
+		if info.IsDir() {
+			name := info.Name()
+			if strings.HasPrefix(name, ".") || name == "vendor" || name == "node_modules" || name == "dist" {
 				return filepath.SkipDir
 			}
-			return nil
 		}
 
-		// Check depth
-		if strings.Count(rel, string(os.PathSeparator)) > maxDepth {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
+		depth := strings.Count(rel, string(os.PathSeparator))
+		indent := strings.Repeat("  ", depth)
 
-		// Add to tree
-		if d.IsDir() {
-			sb.WriteString(fmt.Sprintf("- %s/\n", rel))
+		if info.IsDir() {
+			sb.WriteString(fmt.Sprintf("%s- %s/\n", indent, info.Name()))
 		} else {
-			sb.WriteString(fmt.Sprintf("- %s\n", rel))
-			fileCount++
-		}
-
-		if fileCount > 200 {
-			sb.WriteString("... (truncated)\n")
-			return filepath.SkipAll // Stop walking if too huge
+			if depth < 4 {
+				sb.WriteString(fmt.Sprintf("%s- %s\n", indent, info.Name()))
+			}
 		}
 
 		return nil
 	})
 
 	if err != nil {
-		sb.WriteString("(Error generating tree)\n")
-	}
-	sb.WriteString("</file_tree>\n\n")
-
-	// 2. Peek at key config files for context
-	keyFiles := []string{"go.mod", "package.json", "requirements.txt", "Makefile", "Dockerfile"}
-	for _, f := range keyFiles {
-		content, err := os.ReadFile(filepath.Join(p.ProjectRoot, f))
-		if err == nil {
-			// Truncate if too long (e.g., massive package-lock)
-			str := string(content)
-			if len(str) > 500 {
-				str = str[:500] + "\n...(truncated)"
-			}
-			sb.WriteString(fmt.Sprintf("## Content of %s:\n```\n%s\n```\n\n", f, str))
-		}
+		return "", fmt.Errorf("failed to prime project: %w", err)
 	}
 
-	return sb.String()
+	goModPath := filepath.Join(p.Root, "go.mod")
+	if content, err := os.ReadFile(goModPath); err == nil {
+		sb.WriteString("\n### DEPENDENCIES (go.mod)\n")
+		sb.WriteString(string(content))
+	}
+
+	return sb.String(), nil
 }
