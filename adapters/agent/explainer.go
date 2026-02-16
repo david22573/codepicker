@@ -6,17 +6,20 @@ import (
 	"strings"
 
 	"github.com/david22573/codepicker/domain/agent"
+	"github.com/david22573/codepicker/infra/llm"
 )
 
 type Explainer struct {
-	model agent.LLMClient
-	repo  agent.Repository
+	model       agent.LLMClient
+	repo        agent.Repository
+	budgetGuard *llm.BudgetGuard // Added
 }
 
-func NewExplainer(model agent.LLMClient, repo agent.Repository) *Explainer {
+func NewExplainer(model agent.LLMClient, repo agent.Repository, costTracker *llm.CostTracker, budget float64) *Explainer {
 	return &Explainer{
-		model: model,
-		repo:  repo,
+		model:       model,
+		repo:        repo,
+		budgetGuard: llm.NewBudgetGuard(costTracker, budget),
 	}
 }
 
@@ -52,6 +55,15 @@ Explain the agent's strategy, identify any errors in reasoning, and summarize th
 Be concise and objective.`
 
 	userPrompt := fmt.Sprintf("Analyze this execution trace:\n\n%s", trace.String())
+
+	// --- BUDGET PROTECTION ---
+	// Explanations can be long, reserve $0.002
+	estCost := 0.002
+	if err := e.budgetGuard.Reserve(estCost); err != nil {
+		return "", fmt.Errorf("explanation halted by budget: %w", err)
+	}
+	defer e.budgetGuard.Commit(estCost)
+	// -------------------------
 
 	fmt.Println("🤔 Analyzing execution trace...")
 	return e.model.Chat(ctx, systemPrompt, userPrompt)

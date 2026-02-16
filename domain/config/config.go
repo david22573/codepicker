@@ -49,8 +49,8 @@ func DefaultConfig() *AppConfig {
 		Environment: "development",
 		LLM: LLMConfig{
 			// Recommended default: DeepSeek V3 or Claude 3.5 Sonnet for coding
-			Model:           "deepseek/deepseek-chat",
-			TimeoutSeconds:  300, // Increased to 5 minutes for large refactors
+			Model:           "moonshotai/kimi-k2.5",
+			TimeoutSeconds:  3000, // Increased to 5 minutes for large refactors
 			MaxTokens:       8000,
 			Temperature:     0.0,
 			InputCostPer1M:  0.14,
@@ -66,7 +66,7 @@ func DefaultConfig() *AppConfig {
 			CostPer1M: 0.02,
 		},
 		Agent: AgentConfig{
-			MaxTurns:       30, // Slight bump to allow for more complex reasoning loops
+			MaxTurns:       2000, // Slight bump to allow for more complex reasoning loops
 			UseReflexion:   true,
 			MaxContextSize: 200000, // Modern models handle 200k easily
 		},

@@ -84,6 +84,7 @@ RULES:
 		a.costTracker,
 		a.rateLimiter,
 		scoutBudget,
+		20,
 	)
 
 	scout.UpdateSystemPrompt(systemPrompt)
@@ -131,6 +132,7 @@ Your Final Answer MUST be a comprehensive Markdown report.`
 		a.costTracker,
 		a.rateLimiter,
 		auditBudget,
+		200,
 	)
 
 	auditAgent.UpdateSystemPrompt(systemPrompt)

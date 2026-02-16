@@ -11,12 +11,14 @@ import (
 )
 
 type Reranker struct {
-	model llm.StructuredLLM
+	model       llm.StructuredLLM
+	budgetGuard *llm.BudgetGuard
 }
 
-func NewReranker(client agent.LLMClient) *Reranker {
+func NewReranker(client agent.LLMClient, costTracker *llm.CostTracker, budget float64) *Reranker {
 	return &Reranker{
-		model: llm.NewStructuredAdapter(client),
+		model:       llm.NewStructuredAdapter(client),
+		budgetGuard: llm.NewBudgetGuard(costTracker, budget),
 	}
 }
 
@@ -37,8 +39,6 @@ func (r *Reranker) Rank(ctx context.Context, task string, candidates []domainCtx
 
 	sliceMap := make(map[string]domainCtx.CodeSlice)
 	for _, s := range candidates {
-		// Provide minimal context to save tokens during ranking
-		// Only Header + First 3 lines
 		preview := s.Content
 		lines := strings.Split(preview, "\n")
 		if len(lines) > 3 {
@@ -56,11 +56,20 @@ Example: {"ranked_ids": ["main.go-Func-10", "utils.go-Struct-5"]}`
 
 	user := fmt.Sprintf("TASK: %s\n\n%s", task, sb.String())
 
+	// --- BUDGET PROTECTION ---
+	// Ranking is cheap ($0.001) but frequent
+	estCost := 0.001
+	if err := r.budgetGuard.Reserve(estCost); err != nil {
+		// Fallback: Return original candidates if budget is tight
+		return candidates, nil
+	}
+	defer r.budgetGuard.Commit(estCost)
+	// -------------------------
+
 	// 2. Call LLM
 	var resp RankResponse
 	err := r.model.ChatJSON(ctx, system, user, &resp)
 	if err != nil {
-		// Fallback: Return original order if LLM fails
 		return candidates, nil
 	}
 

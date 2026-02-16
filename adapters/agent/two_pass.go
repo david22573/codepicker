@@ -19,6 +19,7 @@ type TwoPassEngine struct {
 	policy        agent.Policy
 	logger        *logging.Logger
 	costTracker   *llm.CostTracker
+	budgetGuard   *llm.BudgetGuard // Added Guard
 	rateLimiter   *ratelimit.ToolRateLimiter
 	PackedContext string
 }
@@ -31,8 +32,12 @@ func NewTwoPassEngine(
 	logger *logging.Logger,
 	costTracker *llm.CostTracker,
 	rateLimiter *ratelimit.ToolRateLimiter,
+	budget float64, // Added Budget Cap
 	packedContext string,
 ) *TwoPassEngine {
+	// Create a guard sharing the global cost tracker
+	bg := llm.NewBudgetGuard(costTracker, budget)
+
 	return &TwoPassEngine{
 		model:         model,
 		repo:          repo,
@@ -40,6 +45,7 @@ func NewTwoPassEngine(
 		policy:        policy,
 		logger:        logger,
 		costTracker:   costTracker,
+		budgetGuard:   bg,
 		rateLimiter:   rateLimiter,
 		PackedContext: packedContext,
 	}
@@ -47,7 +53,7 @@ func NewTwoPassEngine(
 
 // RunAnalysis performs Phase 1: The Analyst (Read-Only)
 func (e *TwoPassEngine) RunAnalysis(ctx context.Context, task, contextFile, primer string) (*interaction.Analysis, error) {
-	// ... (Existing implementation, no changes needed) ...
+	// Filter tools for read-only safety
 	var readTools []agent.Tool
 	for _, t := range e.tools {
 		name := t.Name()
@@ -64,7 +70,9 @@ You have READ-ONLY access.
 Locate the specific lines of code that need changing.
 Provide a clear, technical explanation of the bug and the required fix as your Final Answer.`, primer)
 
-	analyst := NewReActAgent(e.model, readTools, nil, e.logger, e.policy, e.costTracker, e.rateLimiter, 1.0)
+	// Analyst uses ReActAgent, which handles its own budget checks internally
+	// We pass the guard's remaining limit or the global cap.
+	analyst := NewReActAgent(e.model, readTools, nil, e.logger, e.policy, e.costTracker, e.rateLimiter, e.budgetGuard.Remaining(), 100)
 	analyst.UpdateSystemPrompt(systemPrompt)
 
 	input := fmt.Sprintf("TASK: %s\nInitial focus file: %s", task, contextFile)
@@ -83,8 +91,6 @@ Provide a clear, technical explanation of the bug and the required fix as your F
 
 // GeneratePatch performs Phase 2: The Engineer
 func (e *TwoPassEngine) GeneratePatch(ctx context.Context, task string, analysis *interaction.Analysis) (*interaction.Patch, error) {
-	// FIX: Explicitly instruct for Diff, but handle fallback logic in the caller (fix command)
-	// For now, we improve the prompt to reduce failure rate.
 	basePrompt := `You are the CodePicker Engineer.
 Write a Git Unified Diff to fix the issue.
 RULES:
@@ -102,6 +108,15 @@ RULES:
 		{Role: "user", Content: fmt.Sprintf("TASK: %s\nANALYSIS:\n%s", task, analysis.Markdown)},
 	}
 
+	// --- BUDGET PROTECTION ---
+	// Patch generation is token-heavy, estimate $0.005
+	estCost := 0.005
+	if err := e.budgetGuard.Reserve(estCost); err != nil {
+		return nil, fmt.Errorf("patch generation halted by budget: %w", err)
+	}
+	defer e.budgetGuard.Commit(estCost)
+	// -------------------------
+
 	fmt.Println("📝 [PHASE 2] Engineer is generating patch...")
 	resp, _, err := e.model.ChatNative(ctx, messages, nil)
 	if err != nil {
@@ -115,7 +130,6 @@ RULES:
 
 // RefinePatch performs Phase 5: Self-Correction
 func (e *TwoPassEngine) RefinePatch(ctx context.Context, task string, analysis *interaction.Analysis, originalDiff string, feedback string) (*interaction.Patch, error) {
-	// ... (Existing implementation) ...
 	systemPrompt := `You are the CodePicker Repair Engineer.
 The previous patch failed. Correct the Git Unified Diff based on the error feedback.
 Output ONLY the raw diff.`
@@ -126,6 +140,14 @@ Output ONLY the raw diff.`
 		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: userPrompt},
 	}
+
+	// --- BUDGET PROTECTION ---
+	estCost := 0.003
+	if err := e.budgetGuard.Reserve(estCost); err != nil {
+		return nil, fmt.Errorf("patch refinement halted by budget: %w", err)
+	}
+	defer e.budgetGuard.Commit(estCost)
+	// -------------------------
 
 	fmt.Println("🩹 [PHASE 5] Refining patch based on feedback...")
 	resp, _, err := e.model.ChatNative(ctx, messages, nil)

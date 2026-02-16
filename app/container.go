@@ -126,10 +126,12 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 		costTracker,
 		rateLimiter,
 		cfg.LLM.BudgetCap,
+		cfg.Agent.MaxTurns,
 	)
 	worker.SetVerbose(verbose)
 
-	planner := agent.NewPlanner(worker)
+	// UPDATE: Planner now takes standard client, but internally uses StructuredAdapter
+	planner := agent.NewPlanner(llmClient)
 
 	executor := agent.NewPlanExecutor(worker, repo, workspaceMgr, shadowMgr)
 
@@ -145,10 +147,12 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 		cfg.LLM.BudgetCap,
 	)
 
-	explainer := agent.NewExplainer(llmClient, repo)
+	// UPDATE: Pass budget and tracker
+	explainer := agent.NewExplainer(llmClient, repo, costTracker, cfg.LLM.BudgetCap)
 
 	// 6. Two-Pass Engine
 	packedContent := ""
+	// UPDATE: Pass budget and tracker
 	twoPass := agent.NewTwoPassEngine(
 		llmClient,
 		repo,
@@ -157,13 +161,17 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 		logger,
 		costTracker,
 		rateLimiter,
+		cfg.LLM.BudgetCap,
 		packedContent,
 	)
 
 	// 7. Context & Verification
 	slicer := indexer.NewCodeSlicer()
 	indexManager := indexer.NewIndexManager(slicer, repo, embedClient)
-	reranker := ctxAdapters.NewReranker(llmClient)
+
+	// UPDATE: Pass budget and tracker
+	reranker := ctxAdapters.NewReranker(llmClient, costTracker, cfg.LLM.BudgetCap)
+
 	ctxBuilder := ctxAdapters.NewSmartBuilder(repo, embedClient, reranker, cfg.Agent.MaxContextSize)
 	primer := ctxAdapters.NewProjectPrimer(rootDir)
 	verifierPipeline := verifier.NewPipeline(rootDir)
@@ -183,8 +191,6 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 				MaxCount: 100,
 			}
 			auditDir := filepath.Join(rootDir, ".codepicker", "audit")
-			// We execute cleanup immediately but check context inside if strictly needed,
-			// or here we rely on the fact that it's a short operation.
 			_ = audit.CleanupAudits(auditDir, cleanupPolicy)
 		}
 	}()
@@ -214,7 +220,6 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 }
 
 func (c *Container) Close() {
-	// Signal background tasks to stop
 	if c.cancel != nil {
 		c.cancel()
 	}

@@ -26,7 +26,8 @@ type ReActAgent struct {
 	controller  *AdaptiveController
 	processor   *ObservationProcessor
 	rateLimiter *ratelimit.ToolRateLimiter
-	budgetGuard *llm.BudgetGuard // FIX: Guard against cost overruns
+	budgetGuard *llm.BudgetGuard
+	costTracker *llm.CostTracker // Added for prediction
 	memory      *TurnMemory
 	history     []llm.Message
 	sysMsg      string
@@ -43,6 +44,7 @@ func NewReActAgent(
 	costTracker *llm.CostTracker,
 	rateLimiter *ratelimit.ToolRateLimiter,
 	budget float64,
+	maxTurns int,
 ) *ReActAgent {
 	toolMap := make(map[string]agent.Tool)
 	var schemas []llm.ToolDefinition
@@ -67,8 +69,12 @@ func NewReActAgent(
 		))
 	}
 
-	// FIX: Initialize BudgetGuard
 	bg := llm.NewBudgetGuard(costTracker, budget)
+
+	baseTurns := maxTurns / 2
+	if baseTurns < 10 {
+		baseTurns = 10
+	}
 
 	return &ReActAgent{
 		model:       model,
@@ -77,7 +83,8 @@ func NewReActAgent(
 		bus:         bus,
 		logger:      logger,
 		policy:      policy,
-		controller:  NewAdaptiveController(10, 30, costTracker, budget),
+		costTracker: costTracker,
+		controller:  NewAdaptiveController(baseTurns, maxTurns, costTracker, budget),
 		budgetGuard: bg,
 		processor:   NewObservationProcessor(4000),
 		rateLimiter: rateLimiter,
@@ -146,18 +153,31 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 			return "", fmt.Errorf("agent cancelled: %w", ctx.Err())
 		}
 
-		// FIX: Check Budget BEFORE calling LLM
-		estimatedInputTokens := a.memory.estimateTokens(a.history)
-		if err := a.budgetGuard.CheckBeforeCall(estimatedInputTokens); err != nil {
+		// --- CRITICAL: Budget Reservation ---
+		// 1. Estimate cost for this turn (Input + Expected Output)
+		inputTokens := a.memory.estimateTokens(a.history)
+		expectedOutputTokens := 1024 // Reserve for a reasonable output size
+		estimatedCost := a.costTracker.PredictCost(inputTokens, expectedOutputTokens)
+
+		// 2. Attempt to reserve funds
+		if err := a.budgetGuard.Reserve(estimatedCost); err != nil {
 			a.bus.Publish(event.Event{Type: event.EventError, Payload: map[string]any{"error": "budget_exceeded"}})
 			return "", fmt.Errorf("halted by budget guard: %w", err)
 		}
 
-		respMsg, _, err := a.model.ChatNative(ctx, a.history, a.toolSchemas)
+		// 3. Defer the commit (release reservation)
+		// We wrap the LLM call in a function to ensure defer runs immediately after the call
+		respMsg, err := func() (llm.Message, error) {
+			defer a.budgetGuard.Commit(estimatedCost)
+			msg, _, err := a.model.ChatNative(ctx, a.history, a.toolSchemas)
+			return msg, err
+		}()
+
 		if err != nil {
 			a.bus.Publish(event.Event{Type: event.EventError, Payload: map[string]any{"error": err.Error()}})
 			return "", err
 		}
+		// ------------------------------------
 
 		a.history = append(a.history, respMsg)
 
@@ -171,13 +191,10 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 		})
 
 		if len(respMsg.ToolCalls) == 0 {
-			// If the model produces a "Final Answer" or we've run at least one turn, accept it.
 			if strings.Contains(respMsg.Content, "Final Answer:") || i > 0 {
 				a.bus.Publish(event.Event{Type: event.EventAgentFinish, Payload: map[string]any{"result": respMsg.Content}})
 				return respMsg.Content, nil
 			}
-			// If no tool calls and no final answer in the very first turn, it's likely a chatty model.
-			// We continue to let it potentially self-correct or receive a prompt to use tools.
 		}
 
 		// Parallel Execution Block
@@ -200,7 +217,6 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 					return
 				}
 
-				// Check Rate Limiter
 				if err := a.rateLimiter.Wait(ctx, call.Function.Name); err != nil {
 					mu.Lock()
 					results = append(results, toolResult{call.ID, call.Function.Name, fmt.Sprintf("Error: %v", err)})
@@ -208,7 +224,6 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 					return
 				}
 
-				// Check Policy
 				if a.policy != nil {
 					allowed, reason := a.policy.CanExecute(call.Function.Name, call.Function.Arguments)
 					if !allowed {
@@ -266,20 +281,15 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 
 		wg.Wait()
 
-		// If no tools were actually executed (e.g. empty list), we skip recording
 		if len(results) > 0 {
 			for _, res := range results {
 				a.recordToolResult(res.callID, res.name, res.content)
 			}
-			// FIX: Prune history here to prevent unbounded growth
 			a.pruneHistory()
 		} else if len(respMsg.ToolCalls) > 0 {
-			// Tool calls existed but failed to produce results (e.g. rate limit/policy block on all)
-			// We must record something or the LLM gets confused waiting for a tool output
 			for _, tc := range respMsg.ToolCalls {
 				a.recordToolResult(tc.ID, tc.Function.Name, "Error: Execution blocked or failed internally.")
 			}
-			// FIX: Prune history here as well
 			a.pruneHistory()
 		}
 	}
@@ -300,33 +310,29 @@ func (a *ReActAgent) pruneHistory() {
 	a.history = a.memory.Prune(a.history)
 }
 
-// Global registry of tool input schemas.
-// keys must match Tool.Name() return values exactly.
 var toolInputRegistry = map[string]any{
 	"read_file": struct {
-		Path string `json:"path" desc:"Relative path to the file"`
+		Path string `json:"path"`
 	}{},
 	"write_file": struct {
-		Path    string `json:"path" desc:"Relative path to the file"`
-		Content string `json:"content" desc:"The complete content to write"`
+		Path, Content string `json:"path,content"`
 	}{},
 	"list_dir": struct {
-		Path string `json:"path" desc:"Directory path to list"`
+		Path string `json:"path"`
 	}{},
 	"search_code": struct {
-		Query string `json:"query" desc:"Natural language query"`
+		Query string `json:"query"`
 	}{},
 	"search_definition": struct {
-		Name string `json:"name" desc:"Symbol name to find"`
+		Name string `json:"name"`
 	}{},
 	"run_cmd": struct {
-		Command string `json:"command" desc:"Shell command to execute"`
+		Command string `json:"command"`
 	}{},
 	"read_skeleton": struct {
-		Path string `json:"path" desc:"File or directory path"`
+		Path string `json:"path"`
 	}{},
-	"git_diff": struct {
-	}{},
+	"git_diff": struct{}{},
 }
 
 func truncate(s string, max int) string {

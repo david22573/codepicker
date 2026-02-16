@@ -29,7 +29,6 @@ func (m *TurnMemory) Prune(history []llm.Message) []llm.Message {
 	}
 
 	// 2. Identify Pinned Messages (System Prompt + User Task)
-	// FIX: Explicitly validate assumptions about history structure
 	var pinned []llm.Message
 	slidingStart := 0
 
@@ -37,7 +36,6 @@ func (m *TurnMemory) Prune(history []llm.Message) []llm.Message {
 		pinned = history[:2]
 		slidingStart = 2
 	} else if len(history) >= 1 && history[0].Role == "system" {
-		// Fallback if structure is unexpected (e.g. just system prompt)
 		pinned = history[:1]
 		slidingStart = 1
 	}
@@ -55,21 +53,40 @@ func (m *TurnMemory) Prune(history []llm.Message) []llm.Message {
 	return append(pinned, sliding...)
 }
 
-// estimateTokens provides a rough char-to-token approximation (4 chars ~= 1 token).
-// This avoids the overhead of a real tokenizer in the hot loop.
+// estimateTokens provides a robust approximation of token usage.
+// OPTIMIZATION: Includes overhead for message structure and JSON tool calls.
 func (m *TurnMemory) estimateTokens(msgs []llm.Message) int {
-	chars := 0
-	for _, msg := range msgs {
-		chars += len(msg.Content)
+	tokens := 0
 
-		// Estimate overhead for tool calls
+	// Base overhead per message (role + formatting)
+	// OpenAI standard is ~3-4 tokens per message
+	const messageOverhead = 4
+
+	for _, msg := range msgs {
+		tokens += messageOverhead
+
+		// Content estimation (approx 3.5 chars per token for code/mixed text)
+		tokens += len(msg.Content) / 3
+
+		// Tool Call Overhead
 		if len(msg.ToolCalls) > 0 {
-			chars += 200 // JSON structure overhead
+			// JSON overhead + array structure
+			tokens += 50
 			for _, tc := range msg.ToolCalls {
-				chars += len(tc.Function.Arguments)
-				chars += len(tc.Function.Name)
+				tokens += len(tc.Function.Name) / 3
+				tokens += len(tc.Function.Arguments) / 3
 			}
 		}
+
+		// Tool Output Overhead (Role: tool)
+		if msg.Role == "tool" {
+			// Add extra buffer for tool output formatting tags
+			tokens += 10
+		}
 	}
-	return chars / 4
+
+	// Reply buffer (safety margin)
+	tokens += 3
+
+	return tokens
 }
