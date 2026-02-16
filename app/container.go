@@ -1,12 +1,13 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"time"
 
 	"github.com/david22573/codepicker/adapters/agent"
-	"github.com/david22573/codepicker/adapters/context"
+	ctxAdapters "github.com/david22573/codepicker/adapters/context"
 	"github.com/david22573/codepicker/adapters/policy"
 	"github.com/david22573/codepicker/adapters/tools"
 	"github.com/david22573/codepicker/adapters/verifier"
@@ -34,8 +35,8 @@ type Container struct {
 	Explainer        *agent.Explainer
 	TwoPassEngine    *agent.TwoPassEngine
 	Verifier         *verifier.Pipeline
-	ContextBuilder   *context.SmartBuilder
-	ProjectPrimer    *context.ProjectPrimer
+	ContextBuilder   *ctxAdapters.SmartBuilder
+	ProjectPrimer    *ctxAdapters.ProjectPrimer
 	Repository       *storage.SQLiteRepository
 	SliceStore       domainCtx.SliceStore
 	WorkspaceManager *fs.WorkspaceManager
@@ -46,10 +47,14 @@ type Container struct {
 	CostTracker      *llm.CostTracker
 	RateLimiter      *ratelimit.ToolRateLimiter
 	Config           *config.AppConfig
+
+	// Lifecycle management
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose bool) (*Container, error) {
-	// 1. Initialize Logger (Correctly handling 2 return values)
+	// 1. Initialize Logger
 	env := "development"
 	if ciMode {
 		env = "production"
@@ -102,7 +107,7 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 	allTools := tools.DefaultSet(shadowMgr, shellExec, rootDir, embedClient, repo)
 	rateLimiter := ratelimit.NewToolRateLimiter(20)
 
-	// 4. Policy (Using correct interface alias)
+	// 4. Policy
 	var guardRail domainAgent.Policy
 	if ciMode {
 		guardRail = policy.NewStrictPolicy(dryRun, ciMode)
@@ -128,7 +133,6 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 
 	executor := agent.NewPlanExecutor(worker, repo, workspaceMgr, shadowMgr)
 
-	// FIX: Pass cfg.LLM.BudgetCap as the 9th argument
 	auditor := agent.NewAuditor(
 		llmClient,
 		repo,
@@ -143,8 +147,8 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 
 	explainer := agent.NewExplainer(llmClient, repo)
 
-	// 6. Two-Pass Engine (Repair)
-	packedContent := "" // Optional pre-loaded context
+	// 6. Two-Pass Engine
+	packedContent := ""
 	twoPass := agent.NewTwoPassEngine(
 		llmClient,
 		repo,
@@ -159,19 +163,30 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 	// 7. Context & Verification
 	slicer := indexer.NewCodeSlicer()
 	indexManager := indexer.NewIndexManager(slicer, repo, embedClient)
-	reranker := context.NewReranker(llmClient)
-	ctxBuilder := context.NewSmartBuilder(repo, embedClient, reranker, cfg.Agent.MaxContextSize)
-	primer := context.NewProjectPrimer(rootDir)
+	reranker := ctxAdapters.NewReranker(llmClient)
+	ctxBuilder := ctxAdapters.NewSmartBuilder(repo, embedClient, reranker, cfg.Agent.MaxContextSize)
+	primer := ctxAdapters.NewProjectPrimer(rootDir)
 	verifierPipeline := verifier.NewPipeline(rootDir)
 
-	// 8. Background Cleanup
+	// Create container context for lifecycle management
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// 8. Background Cleanup (Managed)
 	go func() {
-		cleanupPolicy := audit.CleanupPolicy{
-			MaxAge:   30 * 24 * time.Hour,
-			MaxCount: 100,
+		// Wait for shutdown or run cleanup
+		select {
+		case <-ctx.Done():
+			return // Container closing, skip cleanup
+		default:
+			cleanupPolicy := audit.CleanupPolicy{
+				MaxAge:   30 * 24 * time.Hour,
+				MaxCount: 100,
+			}
+			auditDir := filepath.Join(rootDir, ".codepicker", "audit")
+			// We execute cleanup immediately but check context inside if strictly needed,
+			// or here we rely on the fact that it's a short operation.
+			_ = audit.CleanupAudits(auditDir, cleanupPolicy)
 		}
-		auditDir := filepath.Join(rootDir, ".codepicker", "audit")
-		_ = audit.CleanupAudits(auditDir, cleanupPolicy)
 	}()
 
 	return &Container{
@@ -193,10 +208,17 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 		CostTracker:      costTracker,
 		RateLimiter:      rateLimiter,
 		Config:           cfg,
+		ctx:              ctx,
+		cancel:           cancel,
 	}, nil
 }
 
 func (c *Container) Close() {
+	// Signal background tasks to stop
+	if c.cancel != nil {
+		c.cancel()
+	}
+
 	if c.Logger != nil {
 		_ = c.Logger.Sync()
 	}

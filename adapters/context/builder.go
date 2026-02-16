@@ -37,6 +37,11 @@ func (b *SmartBuilder) BuildContext(ctx context.Context, query string) (string, 
 		return "", errors.NewSystem("context.build", "embedding failed", err)
 	}
 
+	// FIX: Check if we actually got a vector back
+	if len(vectors) == 0 {
+		return "", errors.NewSystem("context.build", "no embedding generated", nil)
+	}
+
 	candidates, err := b.repo.SearchByVector(ctx, vectors[0], 50)
 	if err != nil {
 		return "", errors.NewSystem("context.build", "vector search failed", err)

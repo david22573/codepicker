@@ -23,12 +23,7 @@ func NewEnforcer(config PolicySchema, readOnly bool) *Enforcer {
 			continue
 		}
 
-		// Escape the keyword so dots/slashes are treated as literals
 		cleanKeyword := strings.ReplaceAll(regexp.QuoteMeta(keyword), " ", `\s+`)
-
-		// SMART BOUNDARY LOGIC:
-		// Only add \b (word boundary) if the keyword starts/ends with a word char (a-z, 0-9).
-		// This fixes the bug where "/etc/passwd" wasn't matching because '/' is not a word char.
 		pattern := `(?i)`
 		if isWordChar(keyword[0]) {
 			pattern += `\b`
@@ -60,7 +55,6 @@ func NewEnforcer(config PolicySchema, readOnly bool) *Enforcer {
 	}
 }
 
-// isWordChar checks if a byte is a letter, digit, or underscore.
 func isWordChar(c byte) bool {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
 }
@@ -79,7 +73,6 @@ func (e *Enforcer) CanExecute(toolName string, args string) (bool, string) {
 		}
 	}
 
-	// Regex check against the raw arguments string
 	for _, regex := range e.forbiddenRegex {
 		if regex.MatchString(args) {
 			return false, fmt.Sprintf("BLOCKED: Forbidden pattern detected: %s", regex.String())
@@ -109,6 +102,11 @@ func (e *Enforcer) validateCommand(args string) (bool, string) {
 		return false, "BLOCKED: Command cannot be empty"
 	}
 
+	// FIX 1: Check for path traversal in command arguments
+	if strings.Contains(cleanCmd, "..") {
+		return false, "BLOCKED: Path traversal (..) detected in command"
+	}
+
 	parts := strings.Fields(cleanCmd)
 	if len(parts) == 0 {
 		return false, "BLOCKED: Malformed command"
@@ -119,7 +117,8 @@ func (e *Enforcer) validateCommand(args string) (bool, string) {
 		return false, fmt.Sprintf("BLOCKED: Command '%s' is not in the whitelist", baseCmd)
 	}
 
-	dangerous := []string{"|", ">", "&&", "||", ";", "`", "$("}
+	// FIX 2: Add missing dangerous operators to block list
+	dangerous := []string{"|", ">", "&&", "||", ";", "`", "$(", "<", ">>", "&"}
 	for _, d := range dangerous {
 		if strings.Contains(cleanCmd, d) {
 			return false, fmt.Sprintf("BLOCKED: Dangerous shell operator detected: %s", d)

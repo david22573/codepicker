@@ -27,6 +27,12 @@ func NewAdaptiveController(base, max int, tracker *llm.CostTracker, limit float6
 func (c *AdaptiveController) CalculateAllowedTurns(taskComplexity float64) int {
 	currentCost := c.costTracker.GetMetrics().TotalCost
 
+	// FIX: Hard stop if over budget.
+	// Previously, the ratio calc below would allow 10% turns even when over budget.
+	if c.budgetLimit > 0 && currentCost >= c.budgetLimit {
+		return 0
+	}
+
 	// If we are close to budget, restrict turns
 	budgetFactor := 1.0
 	if currentCost > 0 {

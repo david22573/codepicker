@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -29,11 +30,17 @@ func SafeReadFile(ctx context.Context, path string) ([]byte, error) {
 	}
 
 	// 2. Open the file
-	// We do NOT defer f.Close() here immediately because we might need to close it
-	// asynchronously to interrupt the read on timeout.
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
+	}
+
+	// Synchronization primitive to ensure Close() is called exactly once
+	var closeOnce sync.Once
+	closeFile := func() {
+		closeOnce.Do(func() {
+			_ = f.Close()
+		})
 	}
 
 	// Channel to capture the result or error from the read operation
@@ -46,7 +53,7 @@ func SafeReadFile(ctx context.Context, path string) ([]byte, error) {
 	// 3. Run Read in a separate Goroutine
 	go func() {
 		// Ensure file is closed when this goroutine finishes (normal path)
-		defer f.Close()
+		defer closeFile()
 
 		// A. Read first 512 bytes for MIME sniffing
 		header := make([]byte, 512)
@@ -97,12 +104,12 @@ func SafeReadFile(ctx context.Context, path string) ([]byte, error) {
 		// TIMEOUT/CANCEL: Explicitly Close() the file.
 		// This forces the blocked Read() in the goroutine to error out,
 		// allowing the goroutine to exit and preventing a leak.
-		_ = f.Close()
+		closeFile()
 		return nil, fmt.Errorf("read operation cancelled for %s: %w", path, ctx.Err())
 
 	case <-time.After(MaxReadTimeout):
 		// Internal safety timeout
-		_ = f.Close()
+		closeFile()
 		return nil, fmt.Errorf("read operation timed out (exceeded %s)", MaxReadTimeout)
 	}
 }

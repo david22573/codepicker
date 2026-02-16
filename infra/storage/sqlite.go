@@ -242,9 +242,13 @@ func (r *SQLiteRepository) ListPlans(ctx context.Context, limit int) ([]agent.Pl
 	for rows.Next() {
 		var s agent.PlanSummary
 		var createdAtStr string
-		// Try scanning with time.Time, fallback to string if legacy format
+		// Try scanning with time.Time
 		if err := rows.Scan(&s.ID, &s.OriginalTask, &s.Status, &s.CreatedAt); err != nil {
-			rows.Scan(&s.ID, &s.OriginalTask, &s.Status, &createdAtStr)
+			// Fallback if schema/scan fails, check strict error
+			if err2 := rows.Scan(&s.ID, &s.OriginalTask, &s.Status, &createdAtStr); err2 != nil {
+				// FIX: Don't ignore second failure
+				continue
+			}
 		}
 		summaries = append(summaries, s)
 	}

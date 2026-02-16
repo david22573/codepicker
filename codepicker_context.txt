@@ -1,4 +1,4 @@
-Project Context Dump (16 Feb 26 20:03 UTC)
+Project Context Dump (16 Feb 26 20:36 UTC)
 Format: xml
 Mode: FULL (No Truncation)
 Total Files: 96
@@ -160,8 +160,10 @@ type Auditor struct {
 	costTracker *llm.CostTracker
 	rateLimiter *ratelimit.ToolRateLimiter
 	bus         *event.DataBus
+	budget      float64 // FIX: Store budget to allocate to sub-agents
 }
 
+// NewAuditor initializes the auditor with a budget cap.
 func NewAuditor(
 	model *llm.OpenRouterAdapter,
 	repo agent.Repository,
@@ -171,6 +173,7 @@ func NewAuditor(
 	costTracker *llm.CostTracker,
 	rateLimiter *ratelimit.ToolRateLimiter,
 	bus *event.DataBus,
+	budget float64, // FIX: Added budget argument
 ) *Auditor {
 	return &Auditor{
 		model:       model,
@@ -181,6 +184,7 @@ func NewAuditor(
 		costTracker: costTracker,
 		rateLimiter: rateLimiter,
 		bus:         bus,
+		budget:      budget,
 	}
 }
 
@@ -201,15 +205,21 @@ RULES:
 1. You MUST use tools to see the code.
 2. Your Final Answer must list the improvements, each starting with "TASK: ".`, primer)
 
+	// FIX: Allocate 20% of budget to the Scout (cheap, fast scan)
+	scoutBudget := a.budget * 0.20
+	if scoutBudget < 0.2 {
+		scoutBudget = 0.2 // Minimum floor
+	}
+
 	scout := NewReActAgent(
 		a.model,
 		a.tools,
 		a.bus,
 		a.logger,
-		a.policy, // FIX: Pass policy
+		a.policy,
 		a.costTracker,
 		a.rateLimiter,
-		0.50,
+		scoutBudget,
 	)
 
 	scout.UpdateSystemPrompt(systemPrompt)
@@ -242,15 +252,21 @@ Your goal is to AUDIT the codebase for vulnerabilities, technical debt, and arch
 STRICT READ-ONLY MODE: You cannot modify any files.
 Your Final Answer MUST be a comprehensive Markdown report.`
 
+	// FIX: Allocate 80% of budget to the Auditor (expensive, deep analysis)
+	auditBudget := a.budget * 0.80
+	if auditBudget < 1.0 {
+		auditBudget = 1.0 // Minimum floor
+	}
+
 	auditAgent := NewReActAgent(
 		a.model,
 		a.tools,
 		a.bus,
 		a.logger,
-		a.policy, // FIX: Pass policy
+		a.policy,
 		a.costTracker,
 		a.rateLimiter,
-		1.50,
+		auditBudget,
 	)
 
 	auditAgent.UpdateSystemPrompt(systemPrompt)
@@ -722,7 +738,7 @@ import (
 )
 
 // Regex to catch XML-style tool usage seen in logs (e.g., <invoke name="...">)
-// UPDATED: Added (?s) to allow dot matching newlines for multi-line file content
+// Added (?s) to allow dot matching newlines for multi-line file content
 var xmlToolRegex = regexp.MustCompile(`(?s)<invoke name="(.*?)">(.*?)</invoke>`)
 var xmlArgRegex = regexp.MustCompile(`(?s)<parameter name="(.*?)">(.*?)</parameter>`)
 
@@ -730,21 +746,33 @@ var xmlArgRegex = regexp.MustCompile(`(?s)<parameter name="(.*?)">(.*?)</paramet
 // Matches: <|tool_call_begin|> functions.list_files:0 <|tool_call_argument_begin|> {"path": "."} <|tool_call_end|>
 var kimiToolRegex = regexp.MustCompile(`<\|tool_call_begin\|>\s*(?:functions\.)?([\w_]+)(?::\d+)?\s*<\|tool_call_argument_begin\|>\s*(\{.*?\})\s*<\|tool_call_end\|>`)
 
+// Regex to identify code blocks for masking
+var codeBlockRegex = regexp.MustCompile("(?s)```.*?```")
+
 // parseReActResponse extracts structured components from various LLM output formats.
+// CRITICAL FIX: It masks out code blocks first to prevent "hallucinated" tool calls
+// appearing inside generated code snippets (e.g., if the agent writes a regex parser).
 func parseReActResponse(resp string) (thought, tool, args string) {
+	// 1. Safety Masking: Ignore anything inside ``` code blocks ```
+	// We use the masked response to FIND the tool calls, ensuring we don't
+	// accidentally parse code generation as tool execution.
+	safeResp := maskCodeBlocks(resp)
+
 	// STRATEGY 3: Check for Kimi/Moonshot Special Tokens
 	// We check this first as it is the most specific and rigid format.
-	if kimiToolRegex.MatchString(resp) {
+	if kimiToolRegex.MatchString(safeResp) {
+		// We match against the original resp because we verified the tokens are NOT in a code block
+		// via safeResp, and we need the actual content (which might contain code-like chars).
+		// However, since we know the tokens exist outside blocks, finding them in resp is safe.
 		matches := kimiToolRegex.FindStringSubmatch(resp)
 		if len(matches) > 2 {
 			tool = matches[1] // The function name (e.g. list_files)
 			args = matches[2] // The JSON arguments
 
-			// Attempt to capture thought (text before the tool call)
+			// Capture thought: text appearing before the tool call
 			loc := kimiToolRegex.FindStringIndex(resp)
 			if loc != nil {
 				thought = strings.TrimSpace(resp[:loc[0]])
-				// Clean up the "section begin" token if present in thought
 				thought = strings.ReplaceAll(thought, "<|tool_calls_section_begin|>", "")
 				thought = strings.TrimSpace(thought)
 			}
@@ -754,70 +782,91 @@ func parseReActResponse(resp string) (thought, tool, args string) {
 
 	// STRATEGY 1: Check for XML format
 	// This takes priority if the model has drifted into XML mode.
-	if xmlToolRegex.MatchString(resp) {
-		matches := xmlToolRegex.FindStringSubmatch(resp)
-		if len(matches) > 1 {
-			tool = matches[1]
-			// Parse inner parameters into JSON-like string for the tool executor
-			rawArgs := matches[2]
-			argMatches := xmlArgRegex.FindAllStringSubmatch(rawArgs, -1)
+	if xmlToolRegex.MatchString(safeResp) {
+		// Again, we find the match indices in the SAFE string to ensure validity,
+		// but we extract from the ORIGINAL string to get the content.
+		loc := xmlToolRegex.FindStringIndex(safeResp)
+		if loc != nil {
+			// Extract the full matching string from the ORIGINAL response using the safe indices
+			fullMatch := resp[loc[0]:loc[1]]
+			matches := xmlToolRegex.FindStringSubmatch(fullMatch)
 
-			// Reconstruct simplistic JSON for the existing tool interface
-			jsonBuilder := new(strings.Builder)
-			jsonBuilder.WriteString("{")
-			for i, m := range argMatches {
-				if i > 0 {
-					jsonBuilder.WriteString(", ")
+			if len(matches) > 1 {
+				tool = matches[1]
+				// Parse inner parameters into JSON-like string
+				rawArgs := matches[2]
+				argMatches := xmlArgRegex.FindAllStringSubmatch(rawArgs, -1)
+
+				// Reconstruct simplistic JSON
+				jsonBuilder := new(strings.Builder)
+				jsonBuilder.WriteString("{")
+				for i, m := range argMatches {
+					if i > 0 {
+						jsonBuilder.WriteString(", ")
+					}
+					// key: m[1], value: m[2]
+					jsonBuilder.WriteString(`"`)
+					jsonBuilder.WriteString(m[1])
+					jsonBuilder.WriteString(`": "`)
+					jsonBuilder.WriteString(escapeJSON(m[2])) // Escape quotes in value
+					jsonBuilder.WriteString(`"`)
 				}
-				// key: m[1], value: m[2]
-				jsonBuilder.WriteString(`"`)
-				jsonBuilder.WriteString(m[1])
-				jsonBuilder.WriteString(`": "`)
-				jsonBuilder.WriteString(m[2])
-				jsonBuilder.WriteString(`"`)
-			}
-			jsonBuilder.WriteString("}")
-			args = jsonBuilder.String()
+				jsonBuilder.WriteString("}")
+				args = jsonBuilder.String()
 
-			// Everything before the tag is considered thought
-			loc := xmlToolRegex.FindStringIndex(resp)
-			if loc != nil {
+				// Thought is everything before the tag
 				thought = strings.TrimSpace(resp[:loc[0]])
+				return
 			}
-			return
 		}
 	}
 
 	// STRATEGY 2: Standard ReAct Parsing (Original Logic)
-	lines := strings.Split(resp, "\n")
+	// We run this line-by-line on the SAFE response to avoid picking up "Action:" inside code.
+	lines := strings.Split(safeResp, "\n")
+
+	// We need a map to correlate safe lines back to original lines to recover content
+	// (e.g. if the user wrote "Action: write_file" we need the Input that follows).
+	originalLines := strings.Split(resp, "\n")
+
 	inInput := false
 	var inputBuilder strings.Builder
 
-	for _, line := range lines {
+	for i, line := range lines {
+		if i >= len(originalLines) {
+			break
+		}
+
 		cleanLine := strings.TrimSpace(line)
+		originalLine := originalLines[i]
 
 		// 1. Capture Input (Multi-line handling)
 		if inInput {
-			inputBuilder.WriteString(line + "\n")
+			// We use the original line here because the input ITSELF might be code
+			// and we want that content. We only masked the markers.
+			inputBuilder.WriteString(originalLine + "\n")
 			continue
 		}
 
 		// 2. Detect Keywords
 		if strings.HasPrefix(cleanLine, "Thought:") {
-			val := strings.TrimPrefix(cleanLine, "Thought:")
+			// Use original line to capture the full thought content
+			val := strings.TrimPrefix(originalLine, "Thought:")
 			thought = strings.TrimSpace(val)
 		} else if strings.HasPrefix(cleanLine, "Action:") {
-			val := strings.TrimPrefix(cleanLine, "Action:")
-			// Remove backticks if model adds them (e.g. `read_file`)
+			val := strings.TrimPrefix(originalLine, "Action:")
 			val = strings.Trim(val, "` ")
 			tool = strings.TrimSpace(val)
 		} else if strings.HasPrefix(cleanLine, "Input:") {
-			val := strings.TrimPrefix(cleanLine, "Input:")
+			val := strings.TrimPrefix(originalLine, "Input:")
 			inInput = true
 			inputBuilder.WriteString(val + "\n")
 		} else if !inInput && thought == "" && tool == "" {
 			// If model forgets "Thought:", treat early text as thought
-			thought = cleanLine
+			// Only if it's not a masked blank line
+			if strings.TrimSpace(cleanLine) != "" {
+				thought = strings.TrimSpace(originalLine)
+			}
 		}
 	}
 
@@ -827,14 +876,36 @@ func parseReActResponse(resp string) (thought, tool, args string) {
 	return
 }
 
+// maskCodeBlocks replaces content inside ```...``` with newlines to preserve
+// line counts but hide keywords from the parser.
+func maskCodeBlocks(input string) string {
+	return codeBlockRegex.ReplaceAllStringFunc(input, func(match string) string {
+		// Replace content with newlines to keep line numbers in sync
+		// This ensures "Action:" on line 50 stays on line 50.
+		newlines := strings.Count(match, "\n")
+		return strings.Repeat("\n", newlines)
+	})
+}
+
 // cleanInput removes markdown code blocks and extra whitespace
 func cleanInput(raw string) string {
 	raw = strings.TrimSpace(raw)
 	// Strip markdown code blocks ```json ... ```
-	raw = strings.TrimPrefix(raw, "```json")
-	raw = strings.TrimPrefix(raw, "```")
-	raw = strings.TrimSuffix(raw, "```")
+	if strings.HasPrefix(raw, "```json") {
+		raw = strings.TrimPrefix(raw, "```json")
+		raw = strings.TrimSuffix(raw, "```")
+	} else if strings.HasPrefix(raw, "```") {
+		raw = strings.TrimPrefix(raw, "```")
+		raw = strings.TrimSuffix(raw, "```")
+	}
 	return strings.TrimSpace(raw)
+}
+
+func escapeJSON(val string) string {
+	val = strings.ReplaceAll(val, `\`, `\\`)
+	val = strings.ReplaceAll(val, `"`, `\"`)
+	val = strings.ReplaceAll(val, "\n", `\n`)
+	return val
 }
 
 </file>
@@ -1062,7 +1133,7 @@ type ReActAgent struct {
 	toolSchemas []llm.ToolDefinition
 	bus         *event.DataBus
 	logger      *logging.Logger
-	policy      agent.Policy // FIX: Added Policy field
+	policy      agent.Policy
 	controller  *AdaptiveController
 	processor   *ObservationProcessor
 	rateLimiter *ratelimit.ToolRateLimiter
@@ -1088,23 +1159,24 @@ func NewReActAgent(
 
 	// 1. Map Domain Tools to LLM Schemas using Reflection
 	for _, t := range tools {
-		toolMap[t.Name()] = t
+		name := t.Name()
+		toolMap[name] = t
 
-		inputStruct, exists := toolInputRegistry[t.Name()]
+		inputStruct, exists := toolInputRegistry[name]
 		if !exists {
+			// Fallback for unknown tools
 			inputStruct = struct {
-				Input string `json:"input" desc:"The input for the tool"`
+				Input string `json:"input" desc:"The input argument for the tool"`
 			}{}
 		}
 
 		schemas = append(schemas, llm.GenerateToolDefinition(
-			t.Name(),
+			name,
 			t.Description(),
 			inputStruct,
 		))
 	}
 
-	// 🔥 FIXED: New execution-focused default system prompt
 	return &ReActAgent{
 		model:       model,
 		tools:       toolMap,
@@ -1115,7 +1187,7 @@ func NewReActAgent(
 		controller:  NewAdaptiveController(10, 30, costTracker, budget),
 		processor:   NewObservationProcessor(4000),
 		rateLimiter: rateLimiter,
-		memory:      NewTurnMemory(8000),
+		memory:      NewTurnMemory(16000), // Increased memory buffer for larger contexts
 		sysMsg: `You are CodePicker, an autonomous code execution agent with direct filesystem access.
 
 🎯 PRIMARY MODE: EXECUTION WITH TOOLS
@@ -1132,62 +1204,25 @@ CRITICAL RULES:
 AVAILABLE TOOLS:
 • read_file: Read any file to understand its current state (MANDATORY before modifications)
 • write_file: Write complete file content (MANDATORY for making any code changes)
-• list_files: List directory contents to explore the project structure
+• list_dir: List directory contents to explore the project structure
 • search_code: Semantic search across the codebase to find relevant code
 • run_cmd: Execute shell commands (use cautiously, mainly for verification)
 
-EXECUTION WORKFLOW (your standard operating procedure):
-Task: "Update logger in service.go to use slog"
-
+EXECUTION WORKFLOW:
 Step 1: Call read_file("service.go") to see the current implementation
 Step 2: Analyze what needs to change
 Step 3: Call write_file("service.go", "<COMPLETE modified file content>")
-Step 4: (Optional) Verify with read_file or run_cmd if needed
-Step 5: Respond with "Final Answer: Successfully updated service.go to use slog.Logger"
+Step 4: (Optional) Verify with read_file or run_cmd
+Step 5: Respond with "Final Answer: Successfully updated service.go..."
 
-FORBIDDEN BEHAVIORS - DO NOT DO THESE:
-❌ Responding "I would modify line 45 to..." or "The file should contain..."
-❌ Providing code snippets or diffs without calling write_file
+FORBIDDEN BEHAVIORS:
+❌ Responding "I would modify line 45 to..." without calling write_file
+❌ Providing code snippets/diffs without calling write_file
 ❌ Making assumptions about file contents without calling read_file first
-❌ Writing partial updates like "replace this function with..." - always write COMPLETE files
-❌ Saying "Final Answer: Here's what needs to be done..." without actually doing it
-❌ Using tools only to "check" or "verify" without actually making changes
+❌ Writing partial updates like "replace this function with..."
+❌ Using tools only to "check" without making changes when changes are requested
 
-CORRECT EXAMPLES:
-
-✅ GOOD - Actual Execution:
-[User: Update the logger in service.go]
-[Agent calls: read_file("service.go")]
-[Agent analyzes the content]
-[Agent calls: write_file("service.go", "package service\n\nimport (\n\t\"log/slog\"\n...COMPLETE FILE...")]
-[Agent: "Final Answer: Updated service.go to use slog.Logger with structured logging"]
-
-❌ WRONG - Just Describing:
-[User: Update the logger in service.go]
-[Agent: "I would update the logger by changing the import to log/slog and replacing all log.Printf calls with slog.Info calls..."]
-[Agent: "Final Answer: The file should be modified to use slog"]
-
-PLANNING MODE (only when explicitly requested):
-If the user specifically asks "create a PLAN" or "generate a plan", then use this format:
-
-STEP 1: [brief description]
-FILES: [comma-separated file paths]
-INSTRUCTION: [specific action for the executor to perform]
-
-STEP 2: [brief description]
-FILES: [comma-separated file paths]
-INSTRUCTION: [specific action for the executor to perform]
-
-Final Answer: Created plan with N steps.
-
-PLANNING RULES:
-• Every step must start with "STEP N: "
-• Every step must have a "FILES: " line with relative paths
-• Every step must have an "INSTRUCTION: " line with a clear directive
-• Do not include implementation code in plans, only high-level instructions
-• Plans are for delegating work, not for doing the work yourself
-
-DEFAULT BEHAVIOR: Execute with tools. Actions speak louder than words. If you're not calling tools, you're not doing your job.`,
+DEFAULT BEHAVIOR: Execute with tools. Actions speak louder than words.`,
 	}
 }
 
@@ -1210,6 +1245,7 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 		{Role: "user", Content: taskInput},
 	}
 
+	// Use range over integer (Go 1.22+)
 	for i := range maxTurns {
 		if infraCtx.IsCancelled(ctx) {
 			a.bus.Publish(event.Event{Type: event.EventError, Payload: map[string]any{"error": "cancelled"}})
@@ -1234,10 +1270,13 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 		})
 
 		if len(respMsg.ToolCalls) == 0 {
-			if strings.Contains(respMsg.Content, "Final Answer:") || i > 1 {
+			// If the model produces a "Final Answer" or we've run at least one turn, accept it.
+			if strings.Contains(respMsg.Content, "Final Answer:") || i > 0 {
 				a.bus.Publish(event.Event{Type: event.EventAgentFinish, Payload: map[string]any{"result": respMsg.Content}})
 				return respMsg.Content, nil
 			}
+			// If no tool calls and no final answer in the very first turn, it's likely a chatty model.
+			// We continue to let it potentially self-correct or receive a prompt to use tools.
 		}
 
 		// Parallel Execution Block
@@ -1268,7 +1307,7 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 					return
 				}
 
-				// Check Policy (NEW FIX)
+				// Check Policy
 				if a.policy != nil {
 					allowed, reason := a.policy.CanExecute(call.Function.Name, call.Function.Arguments)
 					if !allowed {
@@ -1321,41 +1360,24 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 				results = append(results, toolResult{call.ID, call.Function.Name, processedOutput})
 				mu.Unlock()
 
-				a.bus.Publish(event.Event{
-					Type: event.EventAgentThought,
-					Payload: map[string]any{
-						"turn":    i,
-						"content": respMsg.Content,
-					},
-					Timestamp: time.Now().Unix(),
-				})
-
-				// ADD verbose logging for thoughts:
-				if a.verbose && respMsg.Content != "" {
-					fmt.Printf("💭 [TURN %d] Thought: %s\n", i, truncate(respMsg.Content, 150))
-				}
-
-				if len(respMsg.ToolCalls) == 0 {
-					if a.verbose {
-						fmt.Printf("🏁 [TURN %d] No tool calls - checking for Final Answer\n", i)
-					}
-					if strings.Contains(respMsg.Content, "Final Answer:") || i > 1 {
-						a.bus.Publish(event.Event{Type: event.EventAgentFinish, Payload: map[string]any{"result": respMsg.Content}})
-					}
-				} else if a.verbose {
-					fmt.Printf("🔧 [TURN %d] Executing %d tool call(s)\n", i, len(respMsg.ToolCalls))
-				}
-
 			}(tc)
 		}
 
 		wg.Wait()
 
-		for _, res := range results {
-			a.recordToolResult(res.callID, res.name, res.content)
+		// If no tools were actually executed (e.g. empty list), we skip recording
+		if len(results) > 0 {
+			for _, res := range results {
+				a.recordToolResult(res.callID, res.name, res.content)
+			}
+			a.pruneHistory()
+		} else if len(respMsg.ToolCalls) > 0 {
+			// Tool calls existed but failed to produce results (e.g. rate limit/policy block on all)
+			// We must record something or the LLM gets confused waiting for a tool output
+			for _, tc := range respMsg.ToolCalls {
+				a.recordToolResult(tc.ID, tc.Function.Name, "Error: Execution blocked or failed internally.")
+			}
 		}
-
-		a.pruneHistory()
 	}
 
 	return "", fmt.Errorf("max turns exceeded (%d)", maxTurns)
@@ -1374,29 +1396,30 @@ func (a *ReActAgent) pruneHistory() {
 	a.history = a.memory.Prune(a.history)
 }
 
+// Global registry of tool input schemas.
+// keys must match Tool.Name() return values exactly.
 var toolInputRegistry = map[string]any{
 	"read_file": struct {
-		Path string `json:"path"`
+		Path string `json:"path" desc:"Relative path to the file"`
 	}{},
 	"write_file": struct {
-		Path    string `json:"path"`
-		Content string `json:"content"`
+		Path    string `json:"path" desc:"Relative path to the file"`
+		Content string `json:"content" desc:"The complete content to write"`
 	}{},
-	"list_files": struct {
-		Path string `json:"path"`
+	"list_dir": struct {
+		Path string `json:"path" desc:"Directory path to list"`
 	}{},
 	"search_code": struct {
-		Query string `json:"query"`
-		Path  string `json:"path"`
+		Query string `json:"query" desc:"Natural language query"`
 	}{},
 	"search_definition": struct {
-		Name string `json:"name"`
+		Name string `json:"name" desc:"Symbol name to find"`
 	}{},
 	"run_cmd": struct {
-		Command string `json:"command"`
+		Command string `json:"command" desc:"Shell command to execute"`
 	}{},
 	"read_skeleton": struct {
-		Path string `json:"path"`
+		Path string `json:"path" desc:"File or directory path"`
 	}{},
 	"git_diff": struct {
 	}{},
@@ -1679,6 +1702,7 @@ import (
 	"strings"
 )
 
+// ProjectPrimer generates a map of the file structure to help the agent navigate.
 type ProjectPrimer struct {
 	Root string
 }
@@ -1687,17 +1711,26 @@ func NewProjectPrimer(root string) *ProjectPrimer {
 	return &ProjectPrimer{Root: root}
 }
 
-// Generate provides a safe string wrapper for Prime(), used by CLI commands.
+// Generate provides a default deep map (depth 4), compatible with existing callers.
 func (p *ProjectPrimer) Generate() string {
-	res, err := p.Prime()
+	return p.GenerateWithDepth(4)
+}
+
+// GenerateShallow provides a high-level overview (depth 2), perfect for initial planning.
+func (p *ProjectPrimer) GenerateShallow() string {
+	return p.GenerateWithDepth(2)
+}
+
+// GenerateWithDepth generates a structured text overview with a specific recursion limit.
+func (p *ProjectPrimer) GenerateWithDepth(maxDepth int) string {
+	res, err := p.prime(maxDepth)
 	if err != nil {
 		return fmt.Sprintf("Error generating project map: %v", err)
 	}
 	return res
 }
 
-// Prime generates a structured text overview of the repository.
-func (p *ProjectPrimer) Prime() (string, error) {
+func (p *ProjectPrimer) prime(maxDepth int) (string, error) {
 	var sb strings.Builder
 	sb.WriteString("### PROJECT MAP & STRUCTURE\n")
 
@@ -1711,22 +1744,29 @@ func (p *ProjectPrimer) Prime() (string, error) {
 			return nil
 		}
 
-		if info.IsDir() {
-			name := info.Name()
-			if strings.HasPrefix(name, ".") || name == "vendor" || name == "node_modules" || name == "dist" {
+		// Calculate depth
+		depth := strings.Count(rel, string(os.PathSeparator)) + 1
+
+		// Skip if deeper than requested
+		if depth > maxDepth {
+			if info.IsDir() {
 				return filepath.SkipDir
 			}
+			return nil
 		}
 
-		depth := strings.Count(rel, string(os.PathSeparator))
-		indent := strings.Repeat("  ", depth)
+		// Indentation for tree structure
+		indent := strings.Repeat("  ", depth-1)
 
 		if info.IsDir() {
+			name := info.Name()
+			// Smart filtering: Skip common noise directories
+			if strings.HasPrefix(name, ".") || name == "vendor" || name == "node_modules" || name == "dist" || name == "tmp" {
+				return filepath.SkipDir
+			}
 			sb.WriteString(fmt.Sprintf("%s- %s/\n", indent, info.Name()))
 		} else {
-			if depth < 4 {
-				sb.WriteString(fmt.Sprintf("%s- %s\n", indent, info.Name()))
-			}
+			sb.WriteString(fmt.Sprintf("%s- %s\n", indent, info.Name()))
 		}
 
 		return nil
@@ -1736,9 +1776,11 @@ func (p *ProjectPrimer) Prime() (string, error) {
 		return "", fmt.Errorf("failed to prime project: %w", err)
 	}
 
+	// Always include go.mod context if it exists, as it's critical for understanding dependencies
 	goModPath := filepath.Join(p.Root, "go.mod")
 	if content, err := os.ReadFile(goModPath); err == nil {
 		sb.WriteString("\n### DEPENDENCIES (go.mod)\n")
+		// Truncate go.mod if it's huge, just keeping the requires
 		sb.WriteString(string(content))
 	}
 
@@ -2512,15 +2554,15 @@ func DefaultSet(
 		NewWriteFileTool(shadow),
 
 		// 2. File Reading (Direct - reads from shadow + real fs)
-		// FIX: Pass shadow manager so agent can read its own pending writes
+		// Pass shadow manager so agent can read its own pending writes
 		NewReadFileTool(root, shadow),
 		NewListDirTool(root),
 
 		// 3. Search (Semantic)
 		NewSearchTool(embedder, repo),
 
-		// 4. Shell (Sandboxed)
-		NewShellTool(sh),
+		// 4. Shell (Sandboxed & Shadow-Aware)
+		NewShellTool(sh, shadow),
 	}
 }
 
@@ -2931,23 +2973,31 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/david22573/codepicker/domain/errors"
+	"github.com/david22573/codepicker/infra/fs"
 	"github.com/david22573/codepicker/infra/shell"
 )
 
 type ShellTool struct {
-	exec *shell.Executor
+	exec   *shell.Executor
+	shadow *fs.ShadowManager // Injected to check for pending changes
 }
 
-func NewShellTool(e *shell.Executor) *ShellTool {
-	return &ShellTool{exec: e}
+func NewShellTool(e *shell.Executor, shadow *fs.ShadowManager) *ShellTool {
+	return &ShellTool{
+		exec:   e,
+		shadow: shadow,
+	}
 }
 
 func (t *ShellTool) Name() string { return "run_cmd" }
 func (t *ShellTool) Description() string {
-	return `Execute a shell command. Input JSON: {"command": "string"}`
+	return `Execute a shell command.
+Input JSON: {"command": "string"}
+NOTE: If you have pending edits, this will automatically run in a temporary sandbox containing those edits.`
 }
 
 func (t *ShellTool) Execute(ctx context.Context, args string) (string, error) {
@@ -2958,13 +3008,56 @@ func (t *ShellTool) Execute(ctx context.Context, args string) (string, error) {
 		return "", errors.NewValidation("tool.run_cmd", "invalid JSON arguments")
 	}
 
-	// Basic safety check is handled by Policy, but we can have a fallback here
+	// Basic safety check
 	if strings.TrimSpace(input.Command) == "" {
 		return "", errors.NewValidation("tool.run_cmd", "command cannot be empty")
 	}
 
-	// We pass the command to bash to allow pipes and simple logic
+	// 1. Check for Pending Shadow Changes
+	// If the agent has modified files that aren't committed yet, running 'go test'
+	// on the real directory will return results for the OLD code.
+	// We must detect this and spin up a sandbox.
+	pendingFiles, err := t.shadow.ListShadowFiles()
+	if err == nil && len(pendingFiles) > 0 {
+		return t.executeInSandbox(ctx, input.Command, pendingFiles)
+	}
+
+	// 2. Fast Path: No changes, run directly in project root
 	return t.exec.Run(ctx, "bash", "-c", input.Command)
+}
+
+// executeInSandbox spins up a temporary copy of the repo, applies shadow changes, and runs the command.
+func (t *ShellTool) executeInSandbox(ctx context.Context, command string, changedFiles []string) (string, error) {
+	fmt.Printf("📦 [run_cmd] Detected %d pending changes. Switching to SANDBOX mode for verification.\n", len(changedFiles))
+
+	// A. Create Sandbox (copy real files)
+	sandbox, err := fs.NewSandbox(t.shadow.ProjectRoot)
+	if err != nil {
+		return "", fmt.Errorf("failed to create verification sandbox: %w", err)
+	}
+	defer sandbox.Cleanup()
+
+	// B. Apply Shadow Overlay (overwrite with agent's changes)
+	if err := t.shadow.ExportTo(sandbox.SandboxRoot); err != nil {
+		return "", fmt.Errorf("failed to sync shadow files to sandbox: %w", err)
+	}
+
+	// C. Create a temporary Executor locked to the Sandbox
+	// We clone the configuration of the main executor but swap the directory.
+	sandboxExec := shell.NewExecutor(
+		t.exec.Timeout,
+		t.exec.MaxOutput,
+		t.exec.DryRun,
+		sandbox.SandboxRoot,
+	)
+
+	// D. Execute
+	output, err := sandboxExec.Run(ctx, "bash", "-c", command)
+
+	// Add a footer to the output so the Agent knows what happened
+	footer := fmt.Sprintf("\n\n--- [Sandbox Execution Notice] ---\nCommand executed in a temporary environment with your %d pending changes applied.\nReal files were NOT modified.", len(changedFiles))
+
+	return output + footer, err
 }
 
 </file>
@@ -3060,7 +3153,7 @@ func (p *Pipeline) ApplyToReal(patchPath string) error {
 package app
 
 import (
-	"os"
+	"fmt"
 	"path/filepath"
 	"time"
 
@@ -3069,6 +3162,7 @@ import (
 	"github.com/david22573/codepicker/adapters/policy"
 	"github.com/david22573/codepicker/adapters/tools"
 	"github.com/david22573/codepicker/adapters/verifier"
+	domainAgent "github.com/david22573/codepicker/domain/agent"
 	"github.com/david22573/codepicker/domain/config"
 	domainCtx "github.com/david22573/codepicker/domain/context"
 	"github.com/david22573/codepicker/domain/event"
@@ -3081,13 +3175,10 @@ import (
 	"github.com/david22573/codepicker/infra/ratelimit"
 	"github.com/david22573/codepicker/infra/shell"
 	"github.com/david22573/codepicker/infra/storage"
-
-	// FIX: Alias this import to avoid collision with "adapters/agent"
-	domainAgent "github.com/david22573/codepicker/domain/agent"
-
 	"go.uber.org/zap"
 )
 
+// Container holds all the dependencies for the application.
 type Container struct {
 	Planner          *agent.Planner
 	PlanExecutor     *agent.PlanExecutor
@@ -3109,53 +3200,45 @@ type Container struct {
 	Config           *config.AppConfig
 }
 
-func NewContainer(apiKey, projectRoot, llmModel string, isDryRun, isCI, isVerbose bool) (*Container, error) {
+func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose bool) (*Container, error) {
+	// 1. Initialize Logger (Correctly handling 2 return values)
 	env := "development"
-	if isCI {
+	if ciMode {
 		env = "production"
 	}
-	logger, err := logging.NewLogger(env, isVerbose)
+	logger, err := logging.NewLogger(env, verbose)
 	if err != nil {
 		return nil, err
 	}
 
-	configPath := ""
-	if envPath := os.Getenv("CODEPICKER_CONFIG"); envPath != "" {
-		configPath = envPath
-	} else {
-		rootConfig := filepath.Join(projectRoot, "codepicker.yaml")
-		if _, err := os.Stat(rootConfig); err == nil {
-			configPath = rootConfig
-		} else {
-			legacyConfig := filepath.Join(projectRoot, "configs", "default.yaml")
-			if _, err := os.Stat(legacyConfig); err == nil {
-				configPath = legacyConfig
-			}
-		}
-	}
-
-	loader := infraConfig.NewLoader(configPath)
+	// 2. Load Configuration
+	cfgPath := filepath.Join(rootDir, "codepicker.yaml")
+	loader := infraConfig.NewLoader(cfgPath)
 	cfg, err := loader.Load()
 	if err != nil {
 		logger.Warn("Failed to load configuration file, using defaults", zap.Error(err))
 		cfg = config.DefaultConfig()
 	}
 
-	if llmModel != "" {
-		cfg.LLM.Model = llmModel
+	if modelOverride != "" {
+		cfg.LLM.Model = modelOverride
 	}
-	if isDryRun {
+	if dryRun {
 		cfg.Environment = "dry-run"
 	}
 
-	dbPath := filepath.Join(projectRoot, ".codepicker", "state.db")
+	// 3. Infrastructure
+	dbPath := filepath.Join(rootDir, ".codepicker", "state.db")
 	repo, err := storage.NewSQLiteRepository(dbPath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to init sqlite: %w", err)
 	}
 
-	workspaceMgr := fs.NewWorkspaceManager(projectRoot)
+	workspaceMgr := fs.NewWorkspaceManager(rootDir)
 	eventBus := event.NewDataBus()
+
+	costTracker := llm.NewCostTracker(cfg.LLM.InputCostPer1M, cfg.LLM.OutputCostPer1M)
+	_ = llm.NewBudgetGuard(costTracker, cfg.LLM.BudgetCap)
 
 	llmClient := llm.NewOpenRouterAdapter(
 		apiKey,
@@ -3165,43 +3248,39 @@ func NewContainer(apiKey, projectRoot, llmModel string, isDryRun, isCI, isVerbos
 
 	embedClient := llm.NewEmbeddingClient(apiKey, cfg.Embedding.Model)
 
-	costTracker := llm.NewCostTracker(cfg.LLM.InputCostPer1M, cfg.LLM.OutputCostPer1M)
-	_ = llm.NewBudgetGuard(costTracker, cfg.LLM.BudgetCap)
+	shadowMgr := fs.NewShadowManager(rootDir, dryRun)
+	shellExec := shell.NewExecutor(30*time.Second, 5000, dryRun, rootDir)
 
-	shadowMgr := fs.NewShadowManager(projectRoot, isDryRun)
-	shellExec := shell.NewExecutor(30*time.Second, 5000, isDryRun, projectRoot)
-
-	allTools := tools.DefaultSet(shadowMgr, shellExec, projectRoot, embedClient, repo)
-
+	allTools := tools.DefaultSet(shadowMgr, shellExec, rootDir, embedClient, repo)
 	rateLimiter := ratelimit.NewToolRateLimiter(20)
 
-	// FIX: Use the aliased domainAgent.Policy interface
+	// 4. Policy (Using correct interface alias)
 	var guardRail domainAgent.Policy
-
-	if isCI {
-		// NewStrictPolicy returns *StrictPolicy, which satisfies the interface
-		guardRail = policy.NewStrictPolicy(isDryRun, isCI)
+	if ciMode {
+		guardRail = policy.NewStrictPolicy(dryRun, ciMode)
 	} else {
-		policyConfig, _ := policy.LoadPolicy(filepath.Join(projectRoot, "policy.json"))
-		guardRail = policy.NewEnforcer(*policyConfig, isDryRun)
+		policyConfig, _ := policy.LoadPolicy(filepath.Join(rootDir, "policy.json"))
+		guardRail = policy.NewEnforcer(*policyConfig, dryRun)
 	}
 
+	// 5. Agents
 	worker := agent.NewReActAgent(
 		llmClient,
 		allTools,
 		eventBus,
 		logger,
-		guardRail, // FIX: Now passing the correctly typed variable
+		guardRail,
 		costTracker,
 		rateLimiter,
 		cfg.LLM.BudgetCap,
 	)
-	worker.SetVerbose(isVerbose)
+	worker.SetVerbose(verbose)
 
 	planner := agent.NewPlanner(worker)
 
 	executor := agent.NewPlanExecutor(worker, repo, workspaceMgr, shadowMgr)
 
+	// FIX: Pass cfg.LLM.BudgetCap as the 9th argument
 	auditor := agent.NewAuditor(
 		llmClient,
 		repo,
@@ -3211,15 +3290,13 @@ func NewContainer(apiKey, projectRoot, llmModel string, isDryRun, isCI, isVerbos
 		costTracker,
 		rateLimiter,
 		eventBus,
+		cfg.LLM.BudgetCap,
 	)
 
 	explainer := agent.NewExplainer(llmClient, repo)
 
-	packedContent := ""
-	if content, err := os.ReadFile(filepath.Join(projectRoot, "codepicker_context.txt")); err == nil {
-		packedContent = string(content)
-	}
-
+	// 6. Two-Pass Engine (Repair)
+	packedContent := "" // Optional pre-loaded context
 	twoPass := agent.NewTwoPassEngine(
 		llmClient,
 		repo,
@@ -3231,21 +3308,21 @@ func NewContainer(apiKey, projectRoot, llmModel string, isDryRun, isCI, isVerbos
 		packedContent,
 	)
 
+	// 7. Context & Verification
 	slicer := indexer.NewCodeSlicer()
 	indexManager := indexer.NewIndexManager(slicer, repo, embedClient)
 	reranker := context.NewReranker(llmClient)
-
 	ctxBuilder := context.NewSmartBuilder(repo, embedClient, reranker, cfg.Agent.MaxContextSize)
+	primer := context.NewProjectPrimer(rootDir)
+	verifierPipeline := verifier.NewPipeline(rootDir)
 
-	primer := context.NewProjectPrimer(projectRoot)
-	verifierPipeline := verifier.NewPipeline(projectRoot)
-
+	// 8. Background Cleanup
 	go func() {
 		cleanupPolicy := audit.CleanupPolicy{
 			MaxAge:   30 * 24 * time.Hour,
 			MaxCount: 100,
 		}
-		auditDir := filepath.Join(projectRoot, ".codepicker", "audit")
+		auditDir := filepath.Join(rootDir, ".codepicker", "audit")
 		_ = audit.CleanupAudits(auditDir, cleanupPolicy)
 	}()
 
@@ -4731,9 +4808,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/david22573/codepicker/app"
-	"github.com/david22573/codepicker/domain/task" // Import added
+	"github.com/david22573/codepicker/domain/task"
 	"github.com/spf13/cobra"
 )
 
@@ -4768,11 +4846,22 @@ var runCmd = &cobra.Command{
 		fmt.Printf("🚀 Running task: %s\n", taskDescription)
 
 		// 1. Load Context (The Primer)
-		fmt.Println("🗺️  Loading project context...")
-		primer := container.ProjectPrimer.Generate()
+		// FIX: Use a Smart Primer strategy.
+		// If the user has manually packed context, use it.
+		// Otherwise, generate a SHALLOW (Depth 2) primer to save tokens during the planning phase.
+		var primer string
+		manualContextPath := filepath.Join(cwd, "codepicker_context.txt")
+
+		if content, err := os.ReadFile(manualContextPath); err == nil {
+			fmt.Println("🗺️  Using manual context file (codepicker_context.txt)...")
+			primer = string(content)
+		} else {
+			fmt.Println("🗺️  Generating shallow project map (Depth 2) for planning...")
+			primer = container.ProjectPrimer.GenerateShallow()
+		}
 
 		// 2. Generate a Plan
-		// We pass the primer as context so the planner knows the file structure
+		// We pass the primer as context so the planner knows the high-level file structure
 		fmt.Println("🧠 Generating execution plan...")
 		plan, err := container.Planner.CreatePlan(ctx, taskDescription, "", primer)
 		if err != nil {
@@ -5260,14 +5349,17 @@ func DefaultConfig() *AppConfig {
 	return &AppConfig{
 		Environment: "development",
 		LLM: LLMConfig{
-			// OPTIMIZATION: DeepSeek V3 is the current price/performance king for coding
+			// Recommended default: DeepSeek V3 or Claude 3.5 Sonnet for coding
 			Model:           "deepseek/deepseek-chat",
-			TimeoutSeconds:  120,
+			TimeoutSeconds:  300, // Increased to 5 minutes for large refactors
 			MaxTokens:       8000,
-			Temperature:     0.0,  // Coding requires precision, not creativity
-			InputCostPer1M:  0.14, // Extremely cheap input
-			OutputCostPer1M: 0.28, // Extremely cheap output
-			BudgetCap:       2.00,
+			Temperature:     0.0,
+			InputCostPer1M:  0.14,
+			OutputCostPer1M: 0.28,
+			// FIX: Increased from 2.00 to 10.00.
+			// A $2.00 limit is too aggressive for an agent that might read 100k+ tokens
+			// of context multiple times in a session.
+			BudgetCap: 10.00,
 		},
 		Embedding: EmbeddingConfig{
 			Model:     "text-embedding-3-small",
@@ -5275,9 +5367,9 @@ func DefaultConfig() *AppConfig {
 			CostPer1M: 0.02,
 		},
 		Agent: AgentConfig{
-			MaxTurns:       20,
+			MaxTurns:       30, // Slight bump to allow for more complex reasoning loops
 			UseReflexion:   true,
-			MaxContextSize: 128000,
+			MaxContextSize: 200000, // Modern models handle 200k easily
 		},
 		Server: ServerConfig{
 			Port:        8080,
@@ -6061,6 +6153,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -6118,6 +6211,7 @@ func (t *Transaction) AttachShadow(s *ShadowManager) {
 // BackupFile creates a backup of a single file before modification.
 func (t *Transaction) BackupFile(relPath string) error {
 	// Idempotency Check: If we already backed this up, don't do it again.
+	// We want the state of the file BEFORE the transaction started.
 	if t.backedUpPaths[relPath] {
 		return nil
 	}
@@ -6169,38 +6263,59 @@ func (t *Transaction) BackupFile(relPath string) error {
 }
 
 // Rollback restores all backed-up files, removes new files, AND clears shadow.
+// It uses an atomic swap strategy to prevent data corruption during restoration.
 func (t *Transaction) Rollback() error {
 	if t.Committed {
 		return nil
 	}
 
-	// 1. Restore modified files
+	var errorList []string
+
+	// 1. Restore modified files (Atomic Strategy)
 	for _, relPath := range t.changedFiles {
 		backupPath := filepath.Join(t.backupDir, relPath)
 		realPath := filepath.Join(t.projectRoot, relPath)
 
-		if _, err := os.Stat(backupPath); os.IsNotExist(err) {
-			_ = os.Remove(realPath)
+		// Read the backup content
+		data, err := os.ReadFile(backupPath)
+		if err != nil {
+			errorList = append(errorList, fmt.Sprintf("failed to read backup for %s: %v", relPath, err))
 			continue
 		}
 
-		input, err := os.ReadFile(backupPath)
-		if err == nil {
-			_ = os.WriteFile(realPath, input, 0644)
+		// Write to a temporary file first
+		tmpPath := realPath + ".tmp"
+		if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+			errorList = append(errorList, fmt.Sprintf("failed to write tmp file for %s: %v", relPath, err))
+			continue
+		}
+
+		// Atomic Move: Rename tmp to real
+		if err := os.Rename(tmpPath, realPath); err != nil {
+			// Try to clean up the tmp file if rename failed
+			_ = os.Remove(tmpPath)
+			errorList = append(errorList, fmt.Sprintf("failed to restore %s: %v", relPath, err))
 		}
 	}
 
 	// 2. Delete files that were created new
 	for _, newFile := range t.newFiles {
-		_ = os.Remove(filepath.Join(t.projectRoot, newFile))
+		fullPath := filepath.Join(t.projectRoot, newFile)
+		if err := os.Remove(fullPath); err != nil && !os.IsNotExist(err) {
+			errorList = append(errorList, fmt.Sprintf("failed to remove new file %s: %v", newFile, err))
+		}
 	}
 
 	// 3. Clear the shadow directory if attached
-	// This fixes the "floating staging layer" bug
 	if t.shadow != nil {
-		_ = t.shadow.Clear()
+		if err := t.shadow.Clear(); err != nil {
+			errorList = append(errorList, fmt.Sprintf("failed to clear shadow: %v", err))
+		}
 	}
 
+	if len(errorList) > 0 {
+		return fmt.Errorf("rollback completed with errors:\n- %s", strings.Join(errorList, "\n- "))
+	}
 	return nil
 }
 
@@ -6210,7 +6325,7 @@ func (t *Transaction) Commit() error {
 	// On success, we also want to clear shadow to ensure a clean slate for next run,
 	// assuming all shadow files were applied via incremental commits.
 	if t.shadow != nil {
-		_ = t.shadow.Clear()
+		return t.shadow.Clear()
 	}
 	return nil
 }
@@ -6221,8 +6336,10 @@ func (t *Transaction) Commit() error {
 package fs
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"time"
@@ -6230,11 +6347,13 @@ import (
 
 const (
 	MaxFileSize    = 10 * 1024 * 1024 // 10MB limit
-	MaxReadTimeout = 5 * time.Second  //
+	MaxReadTimeout = 5 * time.Second  // Hard timeout for I/O operations
 )
 
-// SafeReadFile checks file size and type before reading to prevent OOM or hangs.
+// SafeReadFile reads a file with strict size limits, binary detection, and timeout enforcement.
+// It prevents goroutine leaks by actively closing the file handle if a timeout occurs.
 func SafeReadFile(ctx context.Context, path string) ([]byte, error) {
+	// 1. Stat check for initial size limit
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, err
@@ -6244,45 +6363,93 @@ func SafeReadFile(ctx context.Context, path string) ([]byte, error) {
 		return nil, fmt.Errorf("file too large (%d bytes), limit is %d", info.Size(), MaxFileSize)
 	}
 
-	// Create a timeout specifically for the I/O operation
-	readCtx, cancel := context.WithTimeout(ctx, MaxReadTimeout)
-	defer cancel()
+	// 2. Open the file
+	// We do NOT defer f.Close() here immediately because we might need to close it
+	// asynchronously to interrupt the read on timeout.
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
 
-	// Read file in a goroutine to respect timeout context
-	resultChan := make(chan []byte, 1)
-	errChan := make(chan error, 1)
+	// Channel to capture the result or error from the read operation
+	type readResult struct {
+		data []byte
+		err  error
+	}
+	resultChan := make(chan readResult, 1)
 
+	// 3. Run Read in a separate Goroutine
 	go func() {
-		content, err := os.ReadFile(path)
-		if err != nil {
-			errChan <- err
+		// Ensure file is closed when this goroutine finishes (normal path)
+		defer f.Close()
+
+		// A. Read first 512 bytes for MIME sniffing
+		header := make([]byte, 512)
+		n, err := f.Read(header)
+		if err != nil && err != io.EOF {
+			resultChan <- readResult{nil, err}
 			return
 		}
 
-		// Binary detection via Sniffing
-		if len(content) > 512 {
-			contentType := http.DetectContentType(content[:512])
+		// B. Binary Detection
+		if n > 0 {
+			contentType := http.DetectContentType(header[:n])
 			if isForbiddenBinary(contentType) {
-				errChan <- fmt.Errorf("binary file detected (type: %s)", contentType)
+				resultChan <- readResult{nil, fmt.Errorf("binary file detected (type: %s)", contentType)}
 				return
 			}
 		}
 
-		resultChan <- content
+		// If file was smaller than 512 bytes, we are done
+		if n < 512 {
+			resultChan <- readResult{header[:n], nil}
+			return
+		}
+
+		// C. Read the rest with a hard limit constraint
+		// We use a buffer initialized with the header we already read
+		var buf bytes.Buffer
+		buf.Write(header[:n])
+
+		// Calculate remaining allowed bytes
+		remainingLimit := MaxFileSize - int64(n)
+
+		// Use LimitReader to prevent memory exhaustion if file grows during read
+		if _, err := io.Copy(&buf, io.LimitReader(f, remainingLimit)); err != nil {
+			resultChan <- readResult{nil, err}
+			return
+		}
+
+		resultChan <- readResult{buf.Bytes(), nil}
 	}()
 
+	// 4. Wait for Result or Timeout
 	select {
-	case <-readCtx.Done():
-		return nil, fmt.Errorf("read operation timed out for %s", path)
-	case err := <-errChan:
-		return nil, err
-	case content := <-resultChan:
-		return content, nil
+	case res := <-resultChan:
+		return res.data, res.err
+
+	case <-ctx.Done():
+		// TIMEOUT/CANCEL: Explicitly Close() the file.
+		// This forces the blocked Read() in the goroutine to error out,
+		// allowing the goroutine to exit and preventing a leak.
+		_ = f.Close()
+		return nil, fmt.Errorf("read operation cancelled for %s: %w", path, ctx.Err())
+
+	case <-time.After(MaxReadTimeout):
+		// Internal safety timeout
+		_ = f.Close()
+		return nil, fmt.Errorf("read operation timed out (exceeded %s)", MaxReadTimeout)
 	}
 }
 
 func isForbiddenBinary(contentType string) bool {
-	forbidden := []string{"application/octet-stream", "application/x-executable", "application/zip"}
+	forbidden := []string{
+		"application/octet-stream",
+		"application/x-executable",
+		"application/zip",
+		"application/x-gzip",
+		"application/x-tar",
+	}
 	for _, f := range forbidden {
 		if contentType == f {
 			return true
@@ -6477,7 +6644,6 @@ func (s *ShadowManager) Write(relPath string, content []byte) (string, error) {
 }
 
 // Read retrieves content from the shadow directory if it exists.
-// FIX: Added to allow the agent to see its own pending changes.
 func (s *ShadowManager) Read(relPath string) ([]byte, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -6524,6 +6690,51 @@ func (s *ShadowManager) Commit(relPath string) error {
 	// Remove from shadow after successful commit to keep state clean
 	_ = os.Remove(shadowPath)
 	return nil
+}
+
+// ExportTo copies all shadow files to a specific target directory.
+// This is used to hydrate a temporary sandbox with the "pending" state.
+func (s *ShadowManager) ExportTo(targetRoot string) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	shadowRoot := filepath.Join(s.ProjectRoot, ShadowDir)
+
+	// If no shadow dir exists, nothing to export
+	if _, err := os.Stat(shadowRoot); os.IsNotExist(err) {
+		return nil
+	}
+
+	return filepath.Walk(shadowRoot, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+
+		// Get path relative to .codepicker/shadow
+		rel, err := filepath.Rel(shadowRoot, path)
+		if err != nil {
+			return err
+		}
+
+		// Determine destination in the target root
+		destPath := filepath.Join(targetRoot, rel)
+
+		// Create dest dir
+		if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+			return err
+		}
+
+		// Copy content
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+
+		return os.WriteFile(destPath, content, 0644)
+	})
 }
 
 // Clear wipes the entire shadow directory.
@@ -8384,6 +8595,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"math"
 	"sort"
 
@@ -8398,10 +8610,22 @@ type SQLiteRepository struct {
 }
 
 func NewSQLiteRepository(dbPath string) (*SQLiteRepository, error) {
-	db, err := sql.Open("sqlite3", dbPath)
+	// FIX: Enable Write-Ahead Logging (WAL) and set a busy timeout (5000ms).
+	// WAL allows concurrent readers and one writer.
+	// busy_timeout ensures we wait for locks rather than failing immediately.
+	dsn := fmt.Sprintf("%s?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on", dbPath)
+
+	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, err
 	}
+
+	// FIX: Enforce strict serialization.
+	// While WAL supports concurrency, high-write pressure from the Indexer
+	// can still cause contention. Using 1 connection guarantees safety.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0)
 
 	// Schema Updated for Embeddings and Plans
 	schema := `
@@ -8452,6 +8676,7 @@ func NewSQLiteRepository(dbPath string) (*SQLiteRepository, error) {
 	}
 
 	for _, stmt := range migrations {
+		// Ignore errors for existing columns
 		_, _ = db.Exec(stmt)
 	}
 
@@ -8470,7 +8695,7 @@ func (r *SQLiteRepository) UpdateSliceEmbedding(ctx context.Context, sliceID str
 	return err
 }
 
-// [FIX] Implemented VectorSearch to satisfy agent.Repository interface
+// VectorSearch implements the interface for semantic search
 func (r *SQLiteRepository) VectorSearch(ctx context.Context, vector []float32, limit int) ([]agent.SearchResult, error) {
 	// Re-use the logic from SearchByVector but map to SearchResult
 	slices, err := r.SearchByVector(ctx, vector, limit)
@@ -9102,10 +9327,10 @@ fi
 
 ```json
 {
-  "total_bytes": 229357,
+  "total_bytes": 238179,
   "file_count": 96,
-  "estimated_tokens": 59058,
+  "estimated_tokens": 61264,
   "mode": "full",
-  "generated_at": "2026-02-16T20:03:29.654907656Z"
+  "generated_at": "2026-02-16T20:36:33.847391231Z"
 }
 ```

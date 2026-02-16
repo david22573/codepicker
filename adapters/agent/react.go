@@ -26,6 +26,7 @@ type ReActAgent struct {
 	controller  *AdaptiveController
 	processor   *ObservationProcessor
 	rateLimiter *ratelimit.ToolRateLimiter
+	budgetGuard *llm.BudgetGuard // FIX: Guard against cost overruns
 	memory      *TurnMemory
 	history     []llm.Message
 	sysMsg      string
@@ -66,6 +67,9 @@ func NewReActAgent(
 		))
 	}
 
+	// FIX: Initialize BudgetGuard
+	bg := llm.NewBudgetGuard(costTracker, budget)
+
 	return &ReActAgent{
 		model:       model,
 		tools:       toolMap,
@@ -74,14 +78,14 @@ func NewReActAgent(
 		logger:      logger,
 		policy:      policy,
 		controller:  NewAdaptiveController(10, 30, costTracker, budget),
+		budgetGuard: bg,
 		processor:   NewObservationProcessor(4000),
 		rateLimiter: rateLimiter,
 		memory:      NewTurnMemory(16000), // Increased memory buffer for larger contexts
 		sysMsg: `You are CodePicker, an autonomous code execution agent with direct filesystem access.
-
 🎯 PRIMARY MODE: EXECUTION WITH TOOLS
-Your default behavior is to EXECUTE tasks using tools. You are not a consultant - you are a doer.
-
+Your default behavior is to EXECUTE tasks using tools.
+You are not a consultant - you are a doer.
 CRITICAL RULES:
 1. ALWAYS use tools to accomplish tasks - NEVER just describe what should be done
 2. To modify any file, you MUST call write_file with the COMPLETE new file content
@@ -111,7 +115,8 @@ FORBIDDEN BEHAVIORS:
 ❌ Writing partial updates like "replace this function with..."
 ❌ Using tools only to "check" without making changes when changes are requested
 
-DEFAULT BEHAVIOR: Execute with tools. Actions speak louder than words.`,
+DEFAULT BEHAVIOR: Execute with tools.
+Actions speak louder than words.`,
 	}
 }
 
@@ -139,6 +144,13 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 		if infraCtx.IsCancelled(ctx) {
 			a.bus.Publish(event.Event{Type: event.EventError, Payload: map[string]any{"error": "cancelled"}})
 			return "", fmt.Errorf("agent cancelled: %w", ctx.Err())
+		}
+
+		// FIX: Check Budget BEFORE calling LLM
+		estimatedInputTokens := a.memory.estimateTokens(a.history)
+		if err := a.budgetGuard.CheckBeforeCall(estimatedInputTokens); err != nil {
+			a.bus.Publish(event.Event{Type: event.EventError, Payload: map[string]any{"error": "budget_exceeded"}})
+			return "", fmt.Errorf("halted by budget guard: %w", err)
 		}
 
 		respMsg, _, err := a.model.ChatNative(ctx, a.history, a.toolSchemas)
@@ -259,6 +271,7 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 			for _, res := range results {
 				a.recordToolResult(res.callID, res.name, res.content)
 			}
+			// FIX: Prune history here to prevent unbounded growth
 			a.pruneHistory()
 		} else if len(respMsg.ToolCalls) > 0 {
 			// Tool calls existed but failed to produce results (e.g. rate limit/policy block on all)
@@ -266,6 +279,8 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 			for _, tc := range respMsg.ToolCalls {
 				a.recordToolResult(tc.ID, tc.Function.Name, "Error: Execution blocked or failed internally.")
 			}
+			// FIX: Prune history here as well
+			a.pruneHistory()
 		}
 	}
 

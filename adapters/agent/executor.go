@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync" // Added sync for Once
 
 	"github.com/david22573/codepicker/domain/agent"
 	"github.com/david22573/codepicker/domain/task"
@@ -49,18 +50,23 @@ func (e *PlanExecutor) Execute(ctx context.Context, plan *task.Plan) error {
 	// Ensure we start with a clean slate
 	_ = e.shadowMgr.Clear()
 
-	defer func() {
-		if !txn.Committed {
-			fmt.Println("⚠️  Rolling back changes (restoring files + clearing shadow)...")
-			_ = txn.Rollback()
-		}
-	}()
+	// FIX: Use sync.Once to prevent double rollback (defer + WatchContext)
+	var rollbackOnce sync.Once
+	doRollback := func() {
+		rollbackOnce.Do(func() {
+			if !txn.Committed {
+				fmt.Println("⚠️  Rolling back changes (restoring files + clearing shadow)...")
+				_ = txn.Rollback()
+			}
+		})
+	}
 
-	infraCtx.WatchContext(ctx, func() {
-		if !txn.Committed {
-			_ = txn.Rollback()
-		}
-	})
+	defer doRollback()
+
+	// Use the returned stop function from WatchContext (assuming previous fix applied)
+	// or just pass the function if using the original signature.
+	// Here we use the idempotent wrapper.
+	infraCtx.WatchContext(ctx, doRollback)
 
 	plan.Status = task.StatusRunning
 	_ = e.repo.SavePlan(ctx, plan)
@@ -91,13 +97,11 @@ func (e *PlanExecutor) Execute(ctx context.Context, plan *task.Plan) error {
 		}
 
 		// Pre-Backup original files listed in the plan (safety net)
-		// Pre-Backup original files listed in the plan (safety net)
 		for _, file := range step.Files {
 			_ = txn.BackupFile(file)
 		}
 
 		// 🔥 IMPROVED: Wrap the instruction with execution-focused context
-		// This reinforces that the agent must USE TOOLS, not just describe changes
 		workerInput := fmt.Sprintf(`EXECUTION MODE - You MUST use tools to complete this task.
 
 INSTRUCTION: %s
@@ -135,7 +139,7 @@ Execute the instruction NOW using your tools.`, step.Instruction, step.Files)
 
 		// 🔥 ADD: Warning if no changes were made
 		if len(changes) == 0 {
-			fmt.Printf("⚠️  WARNING: Step completed but no files were modified. Agent may not have used write_file.\n")
+			fmt.Printf("⚠️  WARNING: Step completed but no files were modified.\nAgent may not have used write_file.\n")
 			fmt.Printf("   Agent response: %s\n", result)
 		}
 
@@ -154,7 +158,6 @@ Execute the instruction NOW using your tools.`, step.Instruction, step.Files)
 	}
 
 	// 4. Finalize Transaction
-	// This marks the transaction as safe, and clears the shadow dir via Commit() logic
 	if err := txn.Commit(); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}

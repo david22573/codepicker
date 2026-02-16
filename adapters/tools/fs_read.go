@@ -14,7 +14,7 @@ import (
 
 type ReadFileTool struct {
 	ProjectRoot string
-	Shadow      *fs.ShadowManager // FIX: Inject ShadowManager
+	Shadow      *fs.ShadowManager
 }
 
 func NewReadFileTool(root string, shadow *fs.ShadowManager) *ReadFileTool {
@@ -41,15 +41,16 @@ func (t *ReadFileTool) Execute(ctx context.Context, args string) (string, error)
 	cleanPath = strings.ReplaceAll(cleanPath, `"`, "")
 	cleanPath = strings.TrimSpace(cleanPath)
 
-	// FIX: Check Shadow Layer first!
-	// This allows the agent to see changes it just made but hasn't committed yet.
+	// 1. Check Shadow Layer first (Agent's pending changes)
 	if content, err := t.Shadow.Read(cleanPath); err == nil {
 		return string(content), nil
 	}
 
+	// 2. Read from Real Filesystem (Safe Mode)
 	fullPath := filepath.Join(t.ProjectRoot, cleanPath)
 
-	content, err := os.ReadFile(fullPath)
+	// FIX: Use SafeReadFile to enforce size limits and binary detection
+	content, err := fs.SafeReadFile(ctx, fullPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to read file '%s': %w", cleanPath, err)
 	}

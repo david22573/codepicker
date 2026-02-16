@@ -44,8 +44,9 @@ func (t *SemanticSearchTool) Execute(ctx context.Context, args string) (string, 
 	if err != nil {
 		return "", fmt.Errorf("failed to vectorize query: %w", err)
 	}
+	// FIX: Explicitly check for empty slice before access
 	if len(vectors) == 0 {
-		return "", fmt.Errorf("no embedding generated")
+		return "", fmt.Errorf("no embedding generated for query")
 	}
 
 	// 2. Vector Search (Cosine Similarity)

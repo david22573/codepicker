@@ -29,11 +29,21 @@ func (m *TurnMemory) Prune(history []llm.Message) []llm.Message {
 	}
 
 	// 2. Identify Pinned Messages (System Prompt + User Task)
-	// We assume index 0 is System, index 1 is User Task.
-	pinned := history[:2]
+	// FIX: Explicitly validate assumptions about history structure
+	var pinned []llm.Message
+	slidingStart := 0
+
+	if len(history) >= 2 && history[0].Role == "system" && history[1].Role == "user" {
+		pinned = history[:2]
+		slidingStart = 2
+	} else if len(history) >= 1 && history[0].Role == "system" {
+		// Fallback if structure is unexpected (e.g. just system prompt)
+		pinned = history[:1]
+		slidingStart = 1
+	}
 
 	// The rest is the "Sliding Window" of conversation
-	sliding := history[2:]
+	sliding := history[slidingStart:]
 
 	// 3. Prune from the *front* of the sliding window until we fit
 	// We want to keep the most recent interactions, so we drop the oldest thoughts/tools.

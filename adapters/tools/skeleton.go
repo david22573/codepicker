@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/david22573/codepicker/domain/errors"
+	"github.com/david22573/codepicker/infra/fs"
 )
 
 type SkeletonTool struct {
@@ -26,7 +27,7 @@ func NewSkeletonTool(root string) *SkeletonTool {
 
 func (t *SkeletonTool) Name() string { return "read_skeleton" }
 func (t *SkeletonTool) Description() string {
-	return `Read the structure (skeleton) of a Go file or directory without implementation details. 
+	return `Read the structure (skeleton) of a Go file or directory without implementation details.
 Input JSON: {"path": "string"}`
 }
 
@@ -57,7 +58,14 @@ func (t *SkeletonTool) Execute(ctx context.Context, args string) (string, error)
 			return nil
 		}
 
-		node, err := parser.ParseFile(fset, currPath, nil, parser.ParseComments)
+		content, err := fs.SafeReadFile(ctx, currPath)
+		if err != nil {
+			// Skip files that are too large or binary
+			return nil
+		}
+
+		// Parse using the safely read content
+		node, err := parser.ParseFile(fset, currPath, content, parser.ParseComments)
 		if err != nil {
 			return nil // Skip unparsable
 		}
@@ -87,7 +95,7 @@ func (t *SkeletonTool) Execute(ctx context.Context, args string) (string, error)
 			return "", err
 		}
 	} else {
-		// Walk the directory (non-recursive to keep it focused, or shallow recursive)
+		// Walk the directory
 		files, err := os.ReadDir(targetPath)
 		if err != nil {
 			return "", err

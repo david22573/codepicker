@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/david22573/codepicker/domain/errors"
+	"github.com/david22573/codepicker/infra/fs"
 )
 
 type DefinitionSearchTool struct {
@@ -24,7 +25,7 @@ func NewDefinitionSearchTool(root string) *DefinitionSearchTool {
 
 func (t *DefinitionSearchTool) Name() string { return "search_definition" }
 func (t *DefinitionSearchTool) Description() string {
-	return `Find the definition of a specific Go symbol (function, struct, interface). 
+	return `Find the definition of a specific Go symbol (function, struct, interface).
 Input JSON: {"name": "SymbolName"}`
 }
 
@@ -59,10 +60,16 @@ func (t *DefinitionSearchTool) Execute(ctx context.Context, args string) (string
 			return nil
 		}
 
-		// Parse the file
-		node, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
+		// FIX: Use SafeReadFile to get content before parsing to avoid reading huge files
+		content, err := fs.SafeReadFile(ctx, path)
 		if err != nil {
-			// Skip unparsable files (tolerant of syntax errors in work-in-progress)
+			// Skip files that are unsafe to read
+			return nil
+		}
+
+		// Parse the file using the safe content
+		node, err := parser.ParseFile(fset, path, content, parser.ParseComments)
+		if err != nil {
 			return nil
 		}
 
@@ -96,7 +103,8 @@ func (t *DefinitionSearchTool) Execute(ctx context.Context, args string) (string
 				position := fset.Position(matchPos)
 
 				// Capture the exact line of code
-				lineContent := getLine(path, position.Line)
+				// FIX: Reuse the content we already safely read
+				lineContent := getLineFromContent(string(content), position.Line)
 
 				results.WriteString(fmt.Sprintf("[%s] %s:%d\n%s\n\n", matchType, relPath, position.Line, lineContent))
 				foundCount++
@@ -118,13 +126,9 @@ func (t *DefinitionSearchTool) Execute(ctx context.Context, args string) (string
 	return results.String(), nil
 }
 
-// Helper to read a specific line for context
-func getLine(path string, lineNum int) string {
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	lines := strings.Split(string(content), "\n")
+// Helper to extract line from string content (memory safe)
+func getLineFromContent(content string, lineNum int) string {
+	lines := strings.Split(content, "\n")
 	if lineNum > 0 && lineNum <= len(lines) {
 		return strings.TrimSpace(lines[lineNum-1])
 	}

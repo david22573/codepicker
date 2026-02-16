@@ -47,6 +47,7 @@ func NewTwoPassEngine(
 
 // RunAnalysis performs Phase 1: The Analyst (Read-Only)
 func (e *TwoPassEngine) RunAnalysis(ctx context.Context, task, contextFile, primer string) (*interaction.Analysis, error) {
+	// ... (Existing implementation, no changes needed) ...
 	var readTools []agent.Tool
 	for _, t := range e.tools {
 		name := t.Name()
@@ -63,17 +64,7 @@ You have READ-ONLY access.
 Locate the specific lines of code that need changing.
 Provide a clear, technical explanation of the bug and the required fix as your Final Answer.`, primer)
 
-	analyst := NewReActAgent(
-		e.model,
-		readTools,
-		nil,
-		e.logger,
-		e.policy, // FIX: Pass policy
-		e.costTracker,
-		e.rateLimiter,
-		1.0,
-	)
-
+	analyst := NewReActAgent(e.model, readTools, nil, e.logger, e.policy, e.costTracker, e.rateLimiter, 1.0)
 	analyst.UpdateSystemPrompt(systemPrompt)
 
 	input := fmt.Sprintf("TASK: %s\nInitial focus file: %s", task, contextFile)
@@ -92,10 +83,14 @@ Provide a clear, technical explanation of the bug and the required fix as your F
 
 // GeneratePatch performs Phase 2: The Engineer
 func (e *TwoPassEngine) GeneratePatch(ctx context.Context, task string, analysis *interaction.Analysis) (*interaction.Patch, error) {
-	basePrompt := `You are the CodePicker Engineer. Write a Git Unified Diff.
+	// FIX: Explicitly instruct for Diff, but handle fallback logic in the caller (fix command)
+	// For now, we improve the prompt to reduce failure rate.
+	basePrompt := `You are the CodePicker Engineer.
+Write a Git Unified Diff to fix the issue.
 RULES:
 1. Output ONLY raw diff content.
-2. Context lines must be exact.`
+2. Context lines must match the original file EXACTLY (including whitespace).
+3. If you are unsure about exact context matching, use larger context blocks.`
 
 	systemPrompt := basePrompt
 	if e.PackedContext != "" {
@@ -120,6 +115,7 @@ RULES:
 
 // RefinePatch performs Phase 5: Self-Correction
 func (e *TwoPassEngine) RefinePatch(ctx context.Context, task string, analysis *interaction.Analysis, originalDiff string, feedback string) (*interaction.Patch, error) {
+	// ... (Existing implementation) ...
 	systemPrompt := `You are the CodePicker Repair Engineer.
 The previous patch failed. Correct the Git Unified Diff based on the error feedback.
 Output ONLY the raw diff.`

@@ -2,12 +2,11 @@ go.mod
 LICENSE
 README.md
 go.sum
-codepicker_context.md
-codepicker_out
+codepicker_context.*
 *.md
 ./../*.md
 *.yml
 Dockerfile
 *_test.go
 ./../*_test.go
-roadmaps/
+
