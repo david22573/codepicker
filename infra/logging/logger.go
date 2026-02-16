@@ -13,7 +13,9 @@ type Logger struct {
 }
 
 // NewLogger initializes the logging system for dev or prod.
-func NewLogger(env string) (*Logger, error) {
+// When verbose is true, sets the log level to DebugLevel.
+// When verbose is false, sets the log level to InfoLevel.
+func NewLogger(env string, verbose bool) (*Logger, error) {
 	var config zap.Config
 
 	if env == "production" {
@@ -25,6 +27,13 @@ func NewLogger(env string) (*Logger, error) {
 		config.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
 		config.EncoderConfig.EncodeTime = zapcore.TimeEncoderOfLayout("15:04:05")
 		config.EncoderConfig.EncodeCaller = zapcore.ShortCallerEncoder
+	}
+
+	// Set log level based on verbose flag
+	if verbose {
+		config.Level = zap.NewAtomicLevelAt(zapcore.DebugLevel)
+	} else {
+		config.Level = zap.NewAtomicLevelAt(zapcore.InfoLevel)
 	}
 
 	logger, err := config.Build(

@@ -3,22 +3,31 @@ package tools
 import (
 	"github.com/david22573/codepicker/domain/agent"
 	"github.com/david22573/codepicker/infra/fs"
+	"github.com/david22573/codepicker/infra/llm"
 	"github.com/david22573/codepicker/infra/shell"
 )
 
-// DefaultSet returns the standard set of tools for the coding agent
+// DefaultSet creates the standard list of tools for the agent.
 func DefaultSet(
-	fsTools *fs.ShadowManager,
-	shellExec *shell.Executor,
+	shadow *fs.ShadowManager,
+	sh *shell.Executor,
 	root string,
+	embedder *llm.EmbeddingClient,
+	repo agent.Repository,
 ) []agent.Tool {
 	return []agent.Tool{
-		NewReadFileTool(fsTools),
-		NewWriteFileTool(fsTools),
-		NewListFilesTool(root),
-		NewSearchTool(root),
-		NewSkeletonTool(root),
-		NewDefinitionSearchTool(root),
-		NewShellTool(shellExec),
+		// 1. File Modification (Safe - goes to shadow)
+		NewWriteFileTool(shadow),
+
+		// 2. File Reading (Direct - reads from shadow + real fs)
+		// Pass shadow manager so agent can read its own pending writes
+		NewReadFileTool(root, shadow),
+		NewListDirTool(root),
+
+		// 3. Search (Semantic)
+		NewSearchTool(embedder, repo),
+
+		// 4. Shell (Sandboxed & Shadow-Aware)
+		NewShellTool(sh, shadow),
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -26,7 +27,13 @@ type Transaction struct {
 	backupDir    string
 	projectRoot  string
 	changedFiles []string
-	Committed    bool // Exported so Agent can check status
+	newFiles     []string
+	// backedUpPaths ensures we only save the ORIGINAL version once per transaction
+	backedUpPaths map[string]bool
+
+	// Link to shadow manager for cleanup
+	shadow    *ShadowManager
+	Committed bool
 }
 
 // BeginTransaction initializes a backup area for the current operation.
@@ -39,115 +46,138 @@ func (m *WorkspaceManager) BeginTransaction() (*Transaction, error) {
 	}
 
 	return &Transaction{
-		backupDir:    backupDir,
-		projectRoot:  m.ProjectRoot,
-		changedFiles: []string{},
-		Committed:    false,
+		backupDir:     backupDir,
+		projectRoot:   m.ProjectRoot,
+		changedFiles:  []string{},
+		newFiles:      []string{},
+		backedUpPaths: make(map[string]bool),
+		Committed:     false,
 	}, nil
 }
 
-// BackupFile copies the current version of a file to the backup directory.
-func (t *Transaction) BackupFile(relPath string) error {
-	srcPath := filepath.Join(t.projectRoot, relPath)
-	dstPath := filepath.Join(t.backupDir, relPath)
+// AttachShadow links a ShadowManager to this transaction so it can be cleared on rollback.
+func (t *Transaction) AttachShadow(s *ShadowManager) {
+	t.shadow = s
+}
 
-	// If file doesn't exist (new file), track for potential deletion
-	if _, err := os.Stat(srcPath); os.IsNotExist(err) {
-		t.changedFiles = append(t.changedFiles, relPath)
+// BackupFile creates a backup of a single file before modification.
+func (t *Transaction) BackupFile(relPath string) error {
+	// Idempotency Check: If we already backed this up, don't do it again.
+	// We want the state of the file BEFORE the transaction started.
+	if t.backedUpPaths[relPath] {
 		return nil
 	}
 
-	if err := os.MkdirAll(filepath.Dir(dstPath), 0755); err != nil {
-		return err
+	srcPath := filepath.Join(t.projectRoot, relPath)
+	dstPath := filepath.Join(t.backupDir, relPath)
+
+	// Check if file exists
+	info, err := os.Stat(srcPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// File doesn't exist yet - track it as new for deletion on rollback
+			t.newFiles = append(t.newFiles, relPath)
+			t.backedUpPaths[relPath] = true
+			return nil
+		}
+		return fmt.Errorf("stat failed for %s: %w", relPath, err)
 	}
 
+	if info.IsDir() {
+		return fmt.Errorf("cannot backup directory as file: %s", relPath)
+	}
+
+	// Create backup directory structure
+	if err := os.MkdirAll(filepath.Dir(dstPath), 0755); err != nil {
+		return fmt.Errorf("failed to create backup dir: %w", err)
+	}
+
+	// Copy file to backup
 	src, err := os.Open(srcPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to open source: %w", err)
 	}
 	defer src.Close()
 
 	dst, err := os.Create(dstPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create backup: %w", err)
 	}
 	defer dst.Close()
 
-	_, err = io.Copy(dst, src)
-	if err == nil {
-		t.changedFiles = append(t.changedFiles, relPath)
+	if _, err := io.Copy(dst, src); err != nil {
+		return fmt.Errorf("backup copy failed: %w", err)
 	}
-	return err
+
+	t.changedFiles = append(t.changedFiles, relPath)
+	t.backedUpPaths[relPath] = true
+	return nil
 }
 
-// Rollback restores all backed-up files and removes new files.
+// Rollback restores all backed-up files, removes new files, AND clears shadow.
+// It uses an atomic swap strategy to prevent data corruption during restoration.
 func (t *Transaction) Rollback() error {
 	if t.Committed {
 		return nil
 	}
 
+	var errorList []string
+
+	// 1. Restore modified files (Atomic Strategy)
 	for _, relPath := range t.changedFiles {
 		backupPath := filepath.Join(t.backupDir, relPath)
 		realPath := filepath.Join(t.projectRoot, relPath)
 
-		// If no backup exists, it was a brand new file; delete it
-		if _, err := os.Stat(backupPath); os.IsNotExist(err) {
-			os.Remove(realPath)
+		// Read the backup content
+		data, err := os.ReadFile(backupPath)
+		if err != nil {
+			errorList = append(errorList, fmt.Sprintf("failed to read backup for %s: %v", relPath, err))
 			continue
 		}
 
-		// Restore original content
-		input, err := os.ReadFile(backupPath)
-		if err == nil {
-			os.WriteFile(realPath, input, 0644)
+		// Write to a temporary file first
+		tmpPath := realPath + ".tmp"
+		if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+			errorList = append(errorList, fmt.Sprintf("failed to write tmp file for %s: %v", relPath, err))
+			continue
 		}
+
+		// Atomic Move: Rename tmp to real
+		if err := os.Rename(tmpPath, realPath); err != nil {
+			// Try to clean up the tmp file if rename failed
+			_ = os.Remove(tmpPath)
+			errorList = append(errorList, fmt.Sprintf("failed to restore %s: %v", relPath, err))
+		}
+	}
+
+	// 2. Delete files that were created new
+	for _, newFile := range t.newFiles {
+		fullPath := filepath.Join(t.projectRoot, newFile)
+		if err := os.Remove(fullPath); err != nil && !os.IsNotExist(err) {
+			errorList = append(errorList, fmt.Sprintf("failed to remove new file %s: %v", newFile, err))
+		}
+	}
+
+	// 3. Clear the shadow directory if attached
+	if t.shadow != nil {
+		if err := t.shadow.Clear(); err != nil {
+			errorList = append(errorList, fmt.Sprintf("failed to clear shadow: %v", err))
+		}
+	}
+
+	if len(errorList) > 0 {
+		return fmt.Errorf("rollback completed with errors:\n- %s", strings.Join(errorList, "\n- "))
 	}
 	return nil
 }
 
 // Commit marks the transaction as successful.
-func (t *Transaction) Commit() {
+func (t *Transaction) Commit() error {
 	t.Committed = true
-}
-
-// --- Workspace Management ---
-
-type RunWorkspace struct {
-	ID      string
-	DirPath string
-}
-
-func (m *WorkspaceManager) CreateRunWorkspace() (*RunWorkspace, error) {
-	timestamp := time.Now().Format("2006-01-02T15-04-05")
-	runDirName := timestamp
-
-	fullPath := filepath.Join(m.ProjectRoot, ".codepicker", "runs", runDirName)
-
-	if err := os.MkdirAll(fullPath, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create run workspace: %w", err)
+	// On success, we also want to clear shadow to ensure a clean slate for next run,
+	// assuming all shadow files were applied via incremental commits.
+	if t.shadow != nil {
+		return t.shadow.Clear()
 	}
-
-	return &RunWorkspace{
-		ID:      runDirName,
-		DirPath: fullPath,
-	}, nil
-}
-
-func (m *WorkspaceManager) ListExecutions() ([]string, error) {
-	runsDir := filepath.Join(m.ProjectRoot, ".codepicker", "runs")
-	entries, err := os.ReadDir(runsDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return []string{}, nil
-		}
-		return nil, err
-	}
-
-	var runs []string
-	for _, e := range entries {
-		if e.IsDir() {
-			runs = append(runs, e.Name())
-		}
-	}
-	return runs, nil
+	return nil
 }

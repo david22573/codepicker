@@ -18,58 +18,52 @@ type PlanExecutor struct {
 	worker       agent.Agent
 	repo         agent.Repository
 	workspaceMgr *fs.WorkspaceManager
+	shadowMgr    *fs.ShadowManager
 	autoConfirm  bool
 }
 
-// NewPlanExecutor initializes the executor with a workspace manager for transactions.
-func NewPlanExecutor(worker agent.Agent, repo agent.Repository, ws *fs.WorkspaceManager) *PlanExecutor {
+func NewPlanExecutor(worker agent.Agent, repo agent.Repository, ws *fs.WorkspaceManager, shadow *fs.ShadowManager) *PlanExecutor {
 	return &PlanExecutor{
 		worker:       worker,
 		repo:         repo,
 		workspaceMgr: ws,
-		autoConfirm:  false, // Default to safe mode (require confirmation)
+		shadowMgr:    shadow,
+		autoConfirm:  false,
 	}
 }
 
-// SetAutoConfirm allows bypassing the interactive prompt (e.g. for CI or -y flag)
 func (e *PlanExecutor) SetAutoConfirm(auto bool) {
 	e.autoConfirm = auto
 }
 
 func (e *PlanExecutor) Execute(ctx context.Context, plan *task.Plan) error {
-	// Start Transaction
+	// 1. Begin Transaction
 	txn, err := e.workspaceMgr.BeginTransaction()
 	if err != nil {
 		return fmt.Errorf("failed to start transaction: %w", err)
 	}
 
-	// 1. CRITICAL: Register robust rollback defer
-	// If Execute returns before txn.Commit() (due to error or panic), this ensures rollback.
+	// 2. Link Shadow to Transaction (The Architectural Fix)
+	txn.AttachShadow(e.shadowMgr)
+
+	// Ensure we start with a clean slate
+	_ = e.shadowMgr.Clear()
+
 	defer func() {
 		if !txn.Committed {
-			fmt.Println("⚠️  [SYSTEM] Plan execution failed or interrupted. Rolling back filesystem changes...")
-			if err := txn.Rollback(); err != nil {
-				fmt.Printf("❌ [CRITICAL] Rollback failed: %v\n", err)
-			} else {
-				fmt.Println("✅ [SYSTEM] Rollback complete. Filesystem restored.")
-			}
+			fmt.Println("⚠️  Rolling back changes (restoring files + clearing shadow)...")
+			_ = txn.Rollback()
 		}
 	}()
 
-	// 2. CRITICAL: Active Context Watcher
-	// This monitors for Ctrl+C (cancellation) in the background.
-	// If detected, it forces a rollback immediately, even if the main thread is busy.
 	infraCtx.WatchContext(ctx, func() {
 		if !txn.Committed {
-			fmt.Println("\n🛑 [INTERRUPT] Cancellation detected during execution.")
 			_ = txn.Rollback()
 		}
 	})
 
 	plan.Status = task.StatusRunning
 	_ = e.repo.SavePlan(ctx, plan)
-
-	// Interactive Input Reader
 	reader := bufio.NewReader(os.Stdin)
 
 	for _, step := range plan.Steps {
@@ -77,66 +71,94 @@ func (e *PlanExecutor) Execute(ctx context.Context, plan *task.Plan) error {
 			continue
 		}
 
-		// 3. CRITICAL: Check for cancellation before starting new work
 		if infraCtx.IsCancelled(ctx) {
-			return fmt.Errorf("execution cancelled by user")
+			return fmt.Errorf("cancelled")
 		}
 
-		fmt.Printf("\n🔹 [PLANNER] STEP %d/%d: %s\n", step.ID, len(plan.Steps), step.Description)
+		fmt.Printf("\n🔹 STEP %d: %s\n", step.ID, step.Description)
 
-		// 4. Interactive Approval Logic (Phase 3 Feature)
 		if !e.autoConfirm {
-			fmt.Println(color.HiBlackString("   Files: %v", step.Files))
 			fmt.Println(color.HiBlackString("   Instruction: %s", step.Instruction))
-			fmt.Print(color.YellowString("   👉 Execute this step? [y]es / [s]kip / [q]uit: "))
-
+			fmt.Print(color.YellowString("   👉 Execute? [y/s/q]: "))
 			input, _ := reader.ReadString('\n')
 			input = strings.TrimSpace(strings.ToLower(input))
-
-			switch input {
-			case "q", "quit":
-				return fmt.Errorf("execution aborted by user")
-			case "s", "skip":
-				fmt.Println("   ⏭️  Skipping step...")
-				plan.MarkStepComplete(step.ID, "Skipped by user request")
-				_ = e.repo.SavePlan(ctx, plan)
+			if input == "q" {
+				return fmt.Errorf("aborted")
+			}
+			if input == "s" {
 				continue
-			case "y", "yes", "":
-				// Proceed
-			default:
-				// Assume yes if they type random stuff, or strictly enforce?
-				// For safety, let's treat unknown as "proceed" only if strict mode isn't desired,
-				// but explicitly asking requires explicit 'y' usually.
-				// For now, loop if unclear? No, let's default to run for UX speed unless 's' or 'q'.
 			}
 		}
 
-		// Backup relevant files before the agent touches them
+		// Pre-Backup original files listed in the plan (safety net)
+		// Pre-Backup original files listed in the plan (safety net)
 		for _, file := range step.Files {
-			if err := txn.BackupFile(file); err != nil {
-				plan.Status = task.StatusFailed
-				_ = e.repo.SavePlan(ctx, plan)
-				return fmt.Errorf("backup failed for %s: %w", file, err)
-			}
+			_ = txn.BackupFile(file)
 		}
 
-		workerInput := fmt.Sprintf("%s\n\nFocus on these files: %v", step.Instruction, step.Files)
-		result, err := e.worker.Run(ctx, workerInput)
+		// 🔥 IMPROVED: Wrap the instruction with execution-focused context
+		// This reinforces that the agent must USE TOOLS, not just describe changes
+		workerInput := fmt.Sprintf(`EXECUTION MODE - You MUST use tools to complete this task.
 
+INSTRUCTION: %s
+
+TARGET FILES: %v
+
+MANDATORY EXECUTION REQUIREMENTS:
+1. You MUST call read_file on each target file to see the current state
+2. You MUST call write_file with the COMPLETE modified file content
+3. You MUST NOT just describe what should be changed
+4. Providing code snippets without calling write_file = FAILURE
+5. Only respond "Final Answer:" after you have actually used write_file
+
+EXECUTION PATTERN:
+→ Call read_file for each target file
+→ Analyze what needs to change based on the instruction
+→ Call write_file with the complete new file content
+→ Respond: "Final Answer: [description of what you actually did]"
+
+Execute the instruction NOW using your tools.`, step.Instruction, step.Files)
+
+		// Run Agent
+		result, err := e.worker.Run(ctx, workerInput)
 		if err != nil {
 			plan.MarkStepFailed(step.ID, err)
-			plan.Status = task.StatusFailed
 			_ = e.repo.SavePlan(ctx, plan)
-			return err // Triggers rollback via defer
+			return err
 		}
 
 		plan.MarkStepComplete(step.ID, result)
 		_ = e.repo.SavePlan(ctx, plan)
+
+		// 3. Apply Changes Incrementally (The "See Your Work" Requirement)
+		changes, _ := e.shadowMgr.ListShadowFiles()
+
+		// 🔥 ADD: Warning if no changes were made
+		if len(changes) == 0 {
+			fmt.Printf("⚠️  WARNING: Step completed but no files were modified. Agent may not have used write_file.\n")
+			fmt.Printf("   Agent response: %s\n", result)
+		}
+
+		for _, file := range changes {
+			// CRITICAL: Backup file immediately before overwriting with shadow content
+			if err := txn.BackupFile(file); err != nil {
+				return fmt.Errorf("backup failed for %s: %w", file, err)
+			}
+
+			if err := e.shadowMgr.Commit(file); err != nil {
+				fmt.Printf("❌ Failed to apply %s: %v\n", file, err)
+				return err
+			}
+			fmt.Printf("✅ Applied: %s\n", file)
+		}
 	}
 
-	// Success!
-	// Commit the transaction.
-	txn.Commit()
+	// 4. Finalize Transaction
+	// This marks the transaction as safe, and clears the shadow dir via Commit() logic
+	if err := txn.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
 	plan.Status = task.StatusCompleted
 	return e.repo.SavePlan(ctx, plan)
 }

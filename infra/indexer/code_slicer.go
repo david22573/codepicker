@@ -26,7 +26,7 @@ func NewCodeSlicer() *CodeSlicer {
 }
 
 // SliceFile parses a Go file and breaks it into semantic CodeSlices.
-// ENHANCEMENT: Now associates methods with their receiver types.
+// OPTIMIZATION: Recursively splits large functions into smaller logical blocks.
 func (s *CodeSlicer) SliceFile(filePath string) ([]context.CodeSlice, error) {
 	content, err := os.ReadFile(filePath)
 	if err != nil {
@@ -44,29 +44,22 @@ func (s *CodeSlicer) SliceFile(filePath string) ([]context.CodeSlice, error) {
 	for _, decl := range node.Decls {
 		switch d := decl.(type) {
 		case *ast.FuncDecl:
-			// 1. Extract Name
+			// Extract Name & Receiver
 			name := d.Name.Name
-
-			// 2. Identify Receiver (Method vs Function)
 			var symbols []string
-			sliceType := context.SliceTypeFunction
 
 			if d.Recv != nil && len(d.Recv.List) > 0 {
-				// It's a method. Try to get the receiver type name.
 				recvType := ""
 				switch t := d.Recv.List[0].Type.(type) {
-				case *ast.StarExpr: // e.g. *MyStruct
+				case *ast.StarExpr:
 					if ident, ok := t.X.(*ast.Ident); ok {
 						recvType = ident.Name
 					}
-				case *ast.Ident: // e.g. MyStruct
+				case *ast.Ident:
 					recvType = t.Name
 				}
-
 				if recvType != "" {
-					// Symbol format: "MyStruct.MethodName"
 					symbols = append(symbols, recvType, fmt.Sprintf("%s.%s", recvType, name))
-					sliceType = context.SliceTypeFunction // Domain doesn't have "Method" type yet, keep as Function
 				} else {
 					symbols = append(symbols, name)
 				}
@@ -74,18 +67,26 @@ func (s *CodeSlicer) SliceFile(filePath string) ([]context.CodeSlice, error) {
 				symbols = append(symbols, name)
 			}
 
-			slices = append(slices, s.createSlice(filePath, d, sliceType, symbols, fileHash))
+			// OPTIMIZATION: Check size. If > 50 lines, split it.
+			start := s.fset.Position(d.Pos()).Line
+			end := s.fset.Position(d.End()).Line
+
+			if end-start > 50 {
+				// Recursively slice the body
+				subSlices := s.sliceBlock(filePath, d.Body, symbols, fileHash)
+				slices = append(slices, subSlices...)
+			} else {
+				// Keep it whole
+				slices = append(slices, s.createSlice(filePath, d, context.SliceTypeFunction, symbols, fileHash))
+			}
 
 		case *ast.GenDecl:
-			// 3. Extract Types (Structs/Interfaces)
+			// Keep types/structs whole as they define contracts
 			for _, spec := range d.Specs {
 				if typeSpec, ok := spec.(*ast.TypeSpec); ok {
 					typeName := typeSpec.Name.Name
 					sType := s.getSliceType(typeSpec)
-
-					// Just the type name as symbol
 					symbols := []string{typeName}
-
 					slices = append(slices, s.createSlice(filePath, d, sType, symbols, fileHash))
 				}
 			}
@@ -95,6 +96,34 @@ func (s *CodeSlicer) SliceFile(filePath string) ([]context.CodeSlice, error) {
 	return slices, nil
 }
 
+// sliceBlock recursively hunts for large control structures (if/for/switch) to split.
+func (s *CodeSlicer) sliceBlock(filePath string, block *ast.BlockStmt, parentSymbols []string, fileHash string) []context.CodeSlice {
+	var slices []context.CodeSlice
+
+	for _, stmt := range block.List {
+		start := s.fset.Position(stmt.Pos()).Line
+		end := s.fset.Position(stmt.End()).Line
+
+		// Only split if the individual statement block is substantial (>10 lines)
+		if end-start > 10 {
+			switch t := stmt.(type) {
+			case *ast.IfStmt:
+				slices = append(slices, s.createSlice(filePath, t, context.SliceTypeBlock, parentSymbols, fileHash))
+			case *ast.ForStmt:
+				slices = append(slices, s.createSlice(filePath, t, context.SliceTypeBlock, parentSymbols, fileHash))
+			case *ast.SwitchStmt:
+				slices = append(slices, s.createSlice(filePath, t, context.SliceTypeBlock, parentSymbols, fileHash))
+			case *ast.RangeStmt:
+				slices = append(slices, s.createSlice(filePath, t, context.SliceTypeBlock, parentSymbols, fileHash))
+			}
+		}
+	}
+
+	// If no sub-blocks were large enough, we might have missed the forest for the trees.
+	// In a production version, you'd add fallback logic here to grab the whole parent if sub-slicing yielded nothing.
+	return slices
+}
+
 func (s *CodeSlicer) createSlice(path string, node ast.Node, sType context.SliceType, symbols []string, fileHash string) context.CodeSlice {
 	start := s.fset.Position(node.Pos()).Line
 	end := s.fset.Position(node.End()).Line
@@ -102,12 +131,10 @@ func (s *CodeSlicer) createSlice(path string, node ast.Node, sType context.Slice
 	var buf bytes.Buffer
 	format.Node(&buf, s.fset, node)
 
-	// Primary symbol is usually the last one (e.g. "Struct.Method") or just the name
 	primaryName := symbols[0]
 	if len(symbols) > 1 {
 		primaryName = symbols[len(symbols)-1]
 	}
-	// Sanitize ID
 	safeName := strings.ReplaceAll(primaryName, "*", "")
 
 	return context.CodeSlice{

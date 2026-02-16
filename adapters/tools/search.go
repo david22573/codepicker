@@ -1,114 +1,70 @@
 package tools
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
-	"github.com/david22573/codepicker/domain/errors"
+	"github.com/david22573/codepicker/domain/agent"
+	"github.com/david22573/codepicker/infra/llm"
 )
 
 type SearchTool struct {
-	projectRoot string
+	Embedder *llm.EmbeddingClient
+	Repo     agent.Repository
 }
 
-func NewSearchTool(root string) *SearchTool {
-	return &SearchTool{projectRoot: root}
+// NewSearchTool initializes the tool with the dependencies needed for semantic search.
+func NewSearchTool(embedder *llm.EmbeddingClient, repo agent.Repository) *SearchTool {
+	return &SearchTool{
+		Embedder: embedder,
+		Repo:     repo,
+	}
 }
 
-func (t *SearchTool) Name() string { return "search_code" }
+func (t *SearchTool) Name() string {
+	return "search_code"
+}
+
 func (t *SearchTool) Description() string {
-	return `Search for a string in non-binary files. Input JSON: {"query": "string", "path": "string"}`
+	return `Search the codebase using natural language.
+Input: A simple query string describing what you are looking for.
+Example: "how is the database connection handled?"`
 }
 
 func (t *SearchTool) Execute(ctx context.Context, args string) (string, error) {
-	var input struct {
-		Query string `json:"query"`
-		Path  string `json:"path"`
-	}
-	if err := json.Unmarshal([]byte(args), &input); err != nil {
-		return "", errors.NewValidation("tool.search_code", "invalid JSON arguments")
+	// Cleanup input: strip surrounding quotes if the LLM adds them
+	query := strings.TrimSpace(args)
+	if len(query) > 1 && query[0] == '"' && query[len(query)-1] == '"' {
+		query = query[1 : len(query)-1]
 	}
 
-	if input.Query == "" {
-		return "", errors.NewValidation("tool.search_code", "query cannot be empty")
-	}
-	if input.Path == "" {
-		input.Path = "."
-	}
-
-	targetDir := filepath.Join(t.projectRoot, input.Path)
-	var results strings.Builder
-	matchCount := 0
-
-	err := filepath.Walk(targetDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil // Skip unreadable
-		}
-		if info.IsDir() {
-			// Skip hidden dirs
-			if strings.HasPrefix(info.Name(), ".") && info.Name() != "." {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		// Skip hidden files
-		if strings.HasPrefix(info.Name(), ".") {
-			return nil
-		}
-
-		// Simple binary check (skip known binary extensions or huge files)
-		ext := strings.ToLower(filepath.Ext(path))
-		if isBinaryExt(ext) {
-			return nil
-		}
-
-		// Read file
-		file, err := os.Open(path)
-		if err != nil {
-			return nil
-		}
-		defer file.Close()
-
-		scanner := bufio.NewScanner(file)
-		lineNum := 1
-
-		relPath, _ := filepath.Rel(t.projectRoot, path)
-
-		for scanner.Scan() {
-			line := scanner.Text()
-			if strings.Contains(line, input.Query) {
-				results.WriteString(fmt.Sprintf("%s:%d: %s\n", relPath, lineNum, strings.TrimSpace(line)))
-				matchCount++
-				if matchCount > 100 {
-					results.WriteString("... (limit reached)\n")
-					return filepath.SkipDir // Stop searching to save token limit
-				}
-			}
-			lineNum++
-		}
-		return nil
-	})
-
+	// 1. Convert the natural language query into a vector
+	vector, err := t.Embedder.Embed(ctx, query)
 	if err != nil {
-		return "", errors.NewSystem("tool.search_code", "walk failed", err)
+		return "", fmt.Errorf("failed to generate embedding for query: %w", err)
 	}
 
-	if matchCount == 0 {
-		return "No matches found.", nil
+	// 2. Search the vector database for similar code chunks
+	// We request the top 5 most relevant results
+	results, err := t.Repo.VectorSearch(ctx, vector, 5)
+	if err != nil {
+		return "", fmt.Errorf("vector search failed: %w", err)
 	}
-	return results.String(), nil
-}
 
-func isBinaryExt(ext string) bool {
-	switch ext {
-	case ".exe", ".dll", ".so", ".dylib", ".bin", ".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf", ".zip", ".tar", ".gz":
-		return true
-	default:
-		return false
+	if len(results) == 0 {
+		return "No relevant code found in the index.", nil
 	}
+
+	// 3. Format the results for the Agent
+	var out strings.Builder
+	out.WriteString(fmt.Sprintf("Found %d relevant code snippets:\n\n", len(results)))
+
+	for _, r := range results {
+		out.WriteString(fmt.Sprintf("--- FILE: %s ---\n", r.FilePath))
+		out.WriteString(r.Content)
+		out.WriteString("\n\n")
+	}
+
+	return out.String(), nil
 }

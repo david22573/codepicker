@@ -33,14 +33,15 @@ func (p *StrictPolicy) Mode() string {
 }
 
 func (p *StrictPolicy) CanExecute(toolName string, args string) (bool, string) {
-	// 0. Global CI / Read-Only Check
-	if p.ciMode || p.readOnly {
-		// Strictly block side effects
+	// 0. Global Read-Only Check
+	// FIX: We decoupled ciMode from readOnly. CI should allow writes/exec unless explicitly --dry-run.
+	if p.readOnly {
+		// Strictly block side effects in Dry-Run
 		if toolName == "write_file" {
-			return false, "BLOCKED (CI/Read-Only): File writes are disabled in this mode."
+			return false, "BLOCKED (Read-Only): File writes are disabled in this mode."
 		}
 		if toolName == "run_cmd" {
-			return false, "BLOCKED (CI/Read-Only): Shell commands are disabled in this mode."
+			return false, "BLOCKED (Read-Only): Shell commands are disabled in this mode."
 		}
 	}
 

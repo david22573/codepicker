@@ -1,14 +1,12 @@
 package cmd
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"strings"
 
 	"github.com/david22573/codepicker/app"
 	ctxDomain "github.com/david22573/codepicker/domain/context"
-	"github.com/david22573/codepicker/infra/indexer"
 	"github.com/spf13/cobra"
 )
 
@@ -24,7 +22,8 @@ var contextCmd = &cobra.Command{
 
 var contextIndexCmd = &cobra.Command{
 	Use:   "index [directory]",
-	Short: "Scan and index the codebase using ignore patterns",
+	Short: "Scan, slice, and embed the codebase for RAG",
+	Long:  `Indexes the codebase by breaking files into semantic slices and generating vector embeddings.`,
 	Args:  cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		targetDir := "."
@@ -35,23 +34,21 @@ var contextIndexCmd = &cobra.Command{
 		apiKey := os.Getenv("OPENROUTER_API_KEY")
 		cwd, _ := os.Getwd()
 
-		container, err := app.NewContainer(apiKey, cwd, "", false, false)
+		// Initialize container to get the configured IndexManager
+		container, err := app.NewContainer(apiKey, cwd, "", false, false, verboseFlag)
 		if err != nil {
 			return fmt.Errorf("failed to initialize container: %w", err)
 		}
 		defer container.Close()
 
 		fmt.Printf("🔍 Indexing codebase at: %s\n", targetDir)
+		fmt.Println("   (This involves generating embeddings via API, please wait...)")
 
-		// SliceStore is now available directly in the container
-		slicer := indexer.NewCodeSlicer()
-		manager := indexer.NewIndexManager(slicer, container.SliceStore)
-
-		if err := manager.IndexDirectory(targetDir); err != nil {
+		// UPDATED: Use the container's manager which has the Embedder wired up
+		if err := container.IndexManager.IndexDirectory(targetDir); err != nil {
 			return fmt.Errorf("indexing failed: %w", err)
 		}
 
-		// Correct usage of GetStats from SliceStore interface
 		stats, err := container.SliceStore.GetStats()
 		if err != nil {
 			return err
@@ -74,7 +71,7 @@ var contextExportCmd = &cobra.Command{
 
 		cwd, _ := os.Getwd()
 		apiKey := os.Getenv("OPENROUTER_API_KEY")
-		container, err := app.NewContainer(apiKey, cwd, "", false, false)
+		container, err := app.NewContainer(apiKey, cwd, "", false, false, verboseFlag)
 		if err != nil {
 			return err
 		}
@@ -82,7 +79,6 @@ var contextExportCmd = &cobra.Command{
 
 		fmt.Printf("📄 Exporting full index to %s...\n", outFile)
 
-		// Correct usage: GetAllSlices is a method of the concrete Repository
 		allSlices, err := container.Repository.GetAllSlices()
 		if err != nil {
 			return err
@@ -107,26 +103,6 @@ var contextExportCmd = &cobra.Command{
 
 		return os.WriteFile(outFile, []byte(sb.String()), 0644)
 	},
-}
-
-// readIgnoreFile helper to parse .gitignore/.codepickerignore
-func readIgnoreFile(filename string) ([]string, error) {
-	file, err := os.Open(filename)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	var patterns []string
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		patterns = append(patterns, line)
-	}
-	return patterns, scanner.Err()
 }
 
 func init() {

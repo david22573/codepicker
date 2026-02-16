@@ -1,90 +1,69 @@
 package cmd
 
 import (
-	"bufio"
-	"context"
 	"fmt"
 	"os"
-	"path/filepath"
-	"strings"
 
 	"github.com/david22573/codepicker/infra/fs"
-	"github.com/david22573/codepicker/infra/hooks"
 	"github.com/spf13/cobra"
 )
 
-var (
-	formatFlag bool
-)
-
 var applyCmd = &cobra.Command{
-	Use:   "apply [file_path]",
-	Short: "Apply a file from shadow storage to the real filesystem",
-	Args:  cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		relPath := args[0]
-		cwd, _ := os.Getwd()
+	Use:   "apply [file]",
+	Short: "Apply pending shadow changes to the real filesystem",
+	Long: `Moves files from the shadow storage (.codepicker/shadow) to the actual project structure.
+If a filename is provided, only that file is applied.
+If no argument is provided, ALL pending shadow files are applied.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		// Get project root
+		wd, _ := os.Getwd()
 
-		// Initialize ShadowManager with dryRun=false because 'apply' is an explicit write action
-		shadowMgr := fs.NewShadowManager(cwd, false)
+		// Initialize ShadowManager directly
+		// We default DryRun to false here because 'apply' is an explicit user action
+		shadowMgr := fs.NewShadowManager(wd, false)
 
-		// 1. Validation & Summary
-		shadowPath := filepath.Join(cwd, ".codepicker/shadow", relPath)
-		if _, err := os.Stat(shadowPath); os.IsNotExist(err) {
-			return fmt.Errorf("no shadow file found for %s", relPath)
+		// Determine which files to apply
+		var filesToApply []string
+
+		if len(args) > 0 {
+			// User specified a specific file
+			filesToApply = append(filesToApply, args[0])
+		} else {
+			// Auto-discover all pending files
+			pending, err := shadowMgr.ListShadowFiles()
+			if err != nil {
+				fmt.Printf("❌ Failed to list shadow files: %v\n", err)
+				os.Exit(1)
+			}
+			if len(pending) == 0 {
+				fmt.Println("✨ No pending shadow changes found.")
+				return
+			}
+			filesToApply = pending
 		}
 
-		summary, err := shadowMgr.Diff(relPath)
-		if err != nil {
-			return fmt.Errorf("failed to calculate diff: %w", err)
-		}
+		fmt.Printf("📦 Applying %d file(s) to project...\n", len(filesToApply))
 
-		fmt.Println("---------------------------------------------------")
-		fmt.Println("📝 PRE-APPLY CHANGE SUMMARY")
-		fmt.Println(summary.String())
-		fmt.Println("---------------------------------------------------")
-
-		if summary.Type == fs.ChangeNoOp {
-			fmt.Println("⚠️  No changes detected.")
-			return nil
-		}
-
-		// 2. User Confirmation
-		fmt.Print("Are you sure you want to apply these changes? [y/N]: ")
-		reader := bufio.NewReader(os.Stdin)
-		input, _ := reader.ReadString('\n')
-		input = strings.TrimSpace(strings.ToLower(input))
-
-		if input != "y" && input != "yes" {
-			fmt.Println("❌ Apply aborted.")
-			return nil
-		}
-
-		// 3. Apply Changes
-		fmt.Printf("Applying changes to %s...\n", relPath)
-
-		// Updated to use Commit() instead of Apply() based on recent refactors
-		if err := shadowMgr.Commit(relPath); err != nil {
-			return fmt.Errorf("failed to apply: %w", err)
-		}
-
-		// 4. Post-Apply Hook: Formatting
-		if formatFlag {
-			realPath := filepath.Join(cwd, relPath)
-			// Run formatting in background context
-			if err := hooks.RunFormatter(context.Background(), realPath); err != nil {
-				// Warn but do not fail the command, as the file is already applied
-				fmt.Printf("⚠️  Formatting warning: %v\n", err)
+		successCount := 0
+		for _, file := range filesToApply {
+			err := shadowMgr.Commit(file)
+			if err != nil {
+				fmt.Printf("❌ Failed to apply '%s': %v\n", file, err)
+			} else {
+				fmt.Printf("✅ Applied: %s\n", file)
+				successCount++
 			}
 		}
 
-		fmt.Println("✅ Changes applied successfully.")
-		return nil
+		if successCount == len(filesToApply) {
+			fmt.Println("🎉 All changes applied successfully.")
+		} else {
+			fmt.Printf("⚠️  Applied %d/%d files. Check errors above.\n", successCount, len(filesToApply))
+			os.Exit(1)
+		}
 	},
 }
 
 func init() {
-	// Add opt-out flag for formatting
-	applyCmd.Flags().BoolVar(&formatFlag, "fmt", true, "Run code formatter after applying changes")
 	rootCmd.AddCommand(applyCmd)
 }

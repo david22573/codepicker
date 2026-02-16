@@ -11,6 +11,7 @@ import (
 
 // Local flag to ensure this file compiles independently
 var improveDryRun bool
+var improveVerbose bool
 
 var improveCmd = &cobra.Command{
 	Use:   "improve",
@@ -24,8 +25,8 @@ var improveCmd = &cobra.Command{
 
 		cwd, _ := os.Getwd()
 
-		// FIX 1: Use local 'improveDryRun' and hardcode CI to false
-		container, err := app.NewContainer(apiKey, cwd, "", improveDryRun, false)
+		// FIX 1: Use local 'improveDryRun' and hardcode CI to false, add verboseFlag
+		container, err := app.NewContainer(apiKey, cwd, "", improveDryRun, false, verboseFlag)
 		if err != nil {
 			fmt.Printf("❌ Container Init Failed: %v\n", err)
 			os.Exit(1)
@@ -64,5 +65,6 @@ var improveCmd = &cobra.Command{
 
 func init() {
 	improveCmd.Flags().BoolVar(&improveDryRun, "dry-run", false, "Enable read-only mode")
+	improveCmd.Flags().BoolVarP(&improveVerbose, "verbose", "v", false, "Enable verbose output")
 	rootCmd.AddCommand(improveCmd)
 }

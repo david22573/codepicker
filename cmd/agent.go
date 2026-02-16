@@ -10,12 +10,13 @@ import (
 
 	"github.com/david22573/codepicker/app"
 	"github.com/david22573/codepicker/domain/task"
-	"github.com/david22573/codepicker/infra/metrics" // <--- CRITICAL IMPORT
+	"github.com/david22573/codepicker/infra/metrics"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )
 
 var agentDryRun bool
+var agentVerbose bool
 
 var agentCmd = &cobra.Command{
 	Use:   "agent",
@@ -29,15 +30,15 @@ var agentCmd = &cobra.Command{
 
 		cwd, _ := os.Getwd()
 
-		// 1. Initialize Container
-		container, err := app.NewContainer(apiKey, cwd, "", agentDryRun, false)
+		// Initialize Container with verbose flag from root command
+		container, err := app.NewContainer(apiKey, cwd, "", agentDryRun, false, GetVerbose())
 		if err != nil {
 			fmt.Printf("❌ Container Init Failed: %v\n", err)
 			os.Exit(1)
 		}
 		defer container.Close()
 
-		// 2. Start Metrics & Health Server
+		// Start Metrics & Health Server
 		metricsPort := 9090
 		if container.Config != nil && container.Config.Server.MetricsPort != 0 {
 			metricsPort = container.Config.Server.MetricsPort
@@ -58,7 +59,7 @@ var agentCmd = &cobra.Command{
 		fmt.Println(color.CyanString("🤖 CodePicker Agent initialized."))
 		fmt.Println(color.HiBlackString("Type 'exit' or 'quit' to stop."))
 
-		// 3. Generate the Primer (Project Map)
+		// Generate the Primer (Project Map)
 		fmt.Print("🗺️  Loading project context... ")
 		primer := container.ProjectPrimer.Generate()
 		fmt.Println("Done.")
@@ -66,7 +67,7 @@ var agentCmd = &cobra.Command{
 		reader := bufio.NewReader(os.Stdin)
 		ctx := context.Background()
 
-		// 4. Main Interactive Loop
+		// Main Interactive Loop
 		for {
 			fmt.Print(color.GreenString("\n> "))
 			input, _ := reader.ReadString('\n')
@@ -122,5 +123,6 @@ var agentCmd = &cobra.Command{
 
 func init() {
 	agentCmd.Flags().BoolVar(&agentDryRun, "dry-run", false, "Enable read-only mode")
+	agentCmd.Flags().BoolVarP(&agentVerbose, "verbose", "v", false, "Enable verbose output")
 	rootCmd.AddCommand(agentCmd)
 }

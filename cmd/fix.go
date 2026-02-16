@@ -9,98 +9,81 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// Local flags to ensure this file compiles independently
-var (
-	fixTargetFile string
-	fixDryRun     bool
-)
+var fixDryRun bool
+var fixLlmModel string
+var fixVerbose bool
 
 var fixCmd = &cobra.Command{
-	Use:   "fix [task]",
-	Short: "Auto-fix a bug using the Two-Pass (Analyst/Engineer) workflow",
-	Long: `The fix command uses a specialized two-stage process:
-1. Analyst: Reads the code and diagnoses the root cause.
-2. Engineer: Writes a patch to fix the issue.
-
-Requires a task description and a target file.`,
-	Args: cobra.ExactArgs(1),
+	Use:   "fix [file path]",
+	Short: "Apply automated fixes to a file",
+	Args:  cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		taskInput := args[0]
 		apiKey := os.Getenv("OPENROUTER_API_KEY")
 		if apiKey == "" {
-			fmt.Println("❌ Error: OPENROUTER_API_KEY environment variable is required.")
+			fmt.Println("❌ Error: OPENROUTER_API_KEY is not set.")
 			os.Exit(1)
 		}
 
+		targetFile := args[0]
 		cwd, _ := os.Getwd()
 
-		// FIX 1: Use local 'fixDryRun' and hardcode CI to false
-		container, err := app.NewContainer(apiKey, cwd, "", fixDryRun, false)
+		// Initialize Container with verbose flag
+		container, err := app.NewContainer(apiKey, cwd, fixLlmModel, fixDryRun, false, GetVerbose())
 		if err != nil {
 			fmt.Printf("❌ Container Init Failed: %v\n", err)
 			os.Exit(1)
 		}
+		defer container.Close()
 
 		ctx := context.Background()
+		task := "Fix bugs, handle unhandled errors, and improve code quality."
+		fmt.Printf("🔧 Analyzing %s...\n", targetFile)
 
-		if fixTargetFile == "" {
-			fmt.Println("❌ Error: You must specify a target file with --file or -f")
-			return
-		}
-
-		// --- Phase 1: The Analyst ---
-		fmt.Printf("🧐 [ANALYST] Diagnosing issue in %s...\n", fixTargetFile)
-
-		// FIX 2: Generate the Project Primer (Map)
+		// 1. Primer (Context)
 		primer := container.ProjectPrimer.Generate()
 
-		// FIX 3: Pass 'primer' to RunAnalysis (matches new signature)
-		analysis, err := container.TwoPassEngine.RunAnalysis(ctx, taskInput, fixTargetFile, primer)
+		// 2. Phase 1: Analysis (Read-Only)
+		analysis, err := container.TwoPassEngine.RunAnalysis(ctx, task, targetFile, primer)
 		if err != nil {
-			fmt.Printf("❌ Analysis Failed: %v\n", err)
+			fmt.Printf("❌ Analysis failed: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("💡 Diagnosis: %s\n", analysis.Markdown)
+
+		// 3. Phase 2: Generation (Engineer)
+		fmt.Println("🏗️  Generating patch...")
+		patch, err := container.TwoPassEngine.GeneratePatch(ctx, task, analysis)
+		if err != nil {
+			fmt.Printf("❌ Patch generation failed: %v\n", err)
 			os.Exit(1)
 		}
 
-		fmt.Println("\n📄 [REPORT] Findings:")
-		fmt.Println(analysis.Markdown)
-
-		// --- Phase 2: The Engineer ---
-		fmt.Println("\n👷 [ENGINEER] Generating patch...")
-
-		// The Engineer generates a Git patch based on the Analyst's report
-		patch, err := container.TwoPassEngine.GeneratePatch(ctx, taskInput, analysis)
+		// 4. Verification (Sandbox)
+		fmt.Println("🧪 Verifying patch in sandbox...")
+		verifyRes, err := container.Verifier.Verify(ctx, patch.Diff)
 		if err != nil {
-			fmt.Printf("❌ Patch Generation Failed: %v\n", err)
+			fmt.Printf("❌ Verification error: %v\n", err)
 			os.Exit(1)
 		}
 
-		fmt.Println("\n📝 [PATCH] Generated Diff:")
-		fmt.Println(patch.Diff)
-
-		// --- Phase 3: Verification (Optional) ---
-		if !fixDryRun {
-			fmt.Println("\n🧪 [VERIFIER] Verifying patch in sandbox...")
-			result, err := container.Verifier.Verify(ctx, patch.Diff)
-			if err != nil {
-				fmt.Printf("⚠️  Verification Error: %v\n", err)
-			} else if !result.Success {
-				fmt.Printf("❌ Verification Failed during %s:\n%s\n", result.Stage, result.Logs)
-
-				// Optional: Trigger Self-Correction (RefinePatch) here if desired
-				// patch, err = container.TwoPassEngine.RefinePatch(ctx, taskInput, analysis, patch.Diff, result.Logs)
-			} else {
-				fmt.Println("✅ Verification Passed! Applying to real codebase...")
-				if err := container.Verifier.ApplyToReal("patch.diff"); err != nil {
-					// Note: You might need to save patch.diff to disk first depending on implementation
-					fmt.Printf("⚠️  Could not auto-apply. Save the diff manually.\n")
-				}
-			}
+		if !verifyRes.Success {
+			fmt.Printf("❌ Verification failed at stage '%s':\n%s\n", verifyRes.Stage, verifyRes.Logs)
+			os.Exit(1)
 		}
+
+		// 5. Apply
+		fmt.Println("✅ Patch verified. Applying to real filesystem...")
+		if err := container.Verifier.ApplyToReal(patch.Diff); err != nil {
+			fmt.Printf("❌ Apply failed: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("✨ Fix applied successfully!")
 	},
 }
 
 func init() {
-	fixCmd.Flags().StringVarP(&fixTargetFile, "file", "f", "", "Target file to analyze and fix")
 	fixCmd.Flags().BoolVar(&fixDryRun, "dry-run", false, "Enable read-only mode")
+	fixCmd.Flags().StringVar(&fixLlmModel, "model", "", "LLM model to use")
+	fixCmd.Flags().BoolVarP(&fixVerbose, "verbose", "v", false, "Enable verbose output")
 	rootCmd.AddCommand(fixCmd)
 }

@@ -5,75 +5,81 @@ import (
 	"fmt"
 	"strings"
 
-	domainCtx "github.com/david22573/codepicker/domain/context"
 	"github.com/david22573/codepicker/domain/errors"
+	"github.com/david22573/codepicker/infra/indexer"
+	"github.com/david22573/codepicker/infra/llm"
 )
 
-// SliceBasedBuilder implements the streaming context logic for large repositories.
-// UPDATED: Now uses token budgeting instead of naive loading.
-type SliceBasedBuilder struct {
-	repo      domainCtx.SliceStore
+type SmartBuilder struct {
+	repo      indexer.ContextRepository
+	embedder  *llm.EmbeddingClient
+	reranker  *Reranker
 	maxTokens int
 }
 
-// NewSliceBasedBuilder creates a builder that respects a specific token budget.
-func NewSliceBasedBuilder(repo domainCtx.SliceStore, maxTokens int) *SliceBasedBuilder {
-	return &SliceBasedBuilder{
+func NewSmartBuilder(repo indexer.ContextRepository, embedder *llm.EmbeddingClient, reranker *Reranker, maxTokens int) *SmartBuilder {
+	return &SmartBuilder{
 		repo:      repo,
+		embedder:  embedder,
+		reranker:  reranker,
 		maxTokens: maxTokens,
 	}
 }
 
-// BuildForTask is a helper used by the CLI (cmd/run.go, cmd/context.go) to prepare context.
-func (b *SliceBasedBuilder) BuildForTask(query string) (string, error) {
+func (b *SmartBuilder) BuildForTask(query string) (string, error) {
 	return b.BuildContext(context.Background(), query)
 }
 
-// BuildContext pulls relevant code slices and formats them for the LLM turn.
-func (b *SliceBasedBuilder) BuildContext(ctx context.Context, query string) (string, error) {
-	// 1. Fetch more candidates than we need (oversampling) to allow for prioritization
-	// We ask for up to 50 slices initially to filter down.
-	candidates, err := b.repo.SearchSlices(ctx, query, 50)
+func (b *SmartBuilder) BuildContext(ctx context.Context, query string) (string, error) {
+	// 1. Vector Retrieval (Fetch top 50 candidates)
+	vectors, _, err := b.embedder.CreateEmbeddings(ctx, []string{query})
 	if err != nil {
-		return "", errors.NewSystem("context.builder", "failed to search code slices", err)
+		return "", errors.NewSystem("context.build", "embedding failed", err)
+	}
+
+	candidates, err := b.repo.SearchByVector(ctx, vectors[0], 50)
+	if err != nil {
+		return "", errors.NewSystem("context.build", "vector search failed", err)
 	}
 
 	if len(candidates) == 0 {
-		return "No relevant code context found in the index for the given query.", nil
+		return "No relevant code found.", nil
 	}
 
+	// 2. Re-Ranking (LLM filters and orders them)
+	ranked, err := b.reranker.Rank(ctx, query, candidates)
+	if err != nil {
+		// Log warning but continue with vector results
+		ranked = candidates
+	}
+
+	// 3. Packing (Token Budgeting)
 	var builder strings.Builder
-	builder.WriteString("### RELEVANT CODE CONTEXT\n")
-	builder.WriteString("The following snippets are relevant to your current task:\n\n")
+	builder.WriteString("### RELEVANT CODE CONTEXT (RAG Optimized)\n")
 
 	usedTokens := 0
 	includedCount := 0
 
-	// 2. Packing Strategy: Strict Token Budgeting
-	for _, slice := range candidates {
-		// Estimate tokens: roughly 4 chars per token + formatting overhead
-		// Header overhead: "--- File: ... (Lines ..) ---\n\n\n" is approx 15 tokens
+	for _, slice := range ranked {
+		// Estimate tokens: 4 chars / token
 		contentTokens := len(slice.Content) / 4
-		headerTokens := 15
-		sliceCost := contentTokens + headerTokens
+		overhead := 20
+		cost := contentTokens + overhead
 
-		// Stop if this slice would exceed our budget
-		if usedTokens+sliceCost > b.maxTokens {
+		if usedTokens+cost > b.maxTokens {
 			continue
 		}
 
-		builder.WriteString(fmt.Sprintf("--- File: %s (Lines %d-%d) [%s] ---\n",
-			slice.FilePath, slice.StartLine, slice.EndLine, slice.SliceType))
+		builder.WriteString(fmt.Sprintf("--- File: %s (Lines %d-%d) [%s] ---\n", slice.FilePath, slice.StartLine, slice.EndLine, slice.SliceType))
 		builder.WriteString(slice.Content)
 		builder.WriteString("\n\n")
 
-		usedTokens += sliceCost
+		usedTokens += cost
 		includedCount++
 	}
 
-	// 3. Add footer if we had to drop content
-	if includedCount < len(candidates) {
-		builder.WriteString(fmt.Sprintf("\n... (Truncated %d less relevant snippets to fit context window)\n", len(candidates)-includedCount))
+	if includedCount < len(ranked) {
+		builder.WriteString(fmt.Sprintf("\n... (Truncated %d less relevant snippets)\n", len(ranked)-includedCount))
 	}
 
 	return builder.String(), nil

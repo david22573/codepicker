@@ -9,6 +9,7 @@ import (
 
 	"github.com/david22573/codepicker/domain/agent"
 	"github.com/david22573/codepicker/domain/audit"
+	"github.com/david22573/codepicker/domain/event"
 	"github.com/david22573/codepicker/infra/llm"
 	"github.com/david22573/codepicker/infra/logging"
 	"github.com/david22573/codepicker/infra/ratelimit"
@@ -21,9 +22,12 @@ type Auditor struct {
 	policy      agent.Policy
 	logger      *logging.Logger
 	costTracker *llm.CostTracker
-	rateLimiter *ratelimit.ToolRateLimiter // Added for operational safety
+	rateLimiter *ratelimit.ToolRateLimiter
+	bus         *event.DataBus
+	budget      float64 // FIX: Store budget to allocate to sub-agents
 }
 
+// NewAuditor initializes the auditor with a budget cap.
 func NewAuditor(
 	model *llm.OpenRouterAdapter,
 	repo agent.Repository,
@@ -31,7 +35,9 @@ func NewAuditor(
 	policy agent.Policy,
 	logger *logging.Logger,
 	costTracker *llm.CostTracker,
-	rateLimiter *ratelimit.ToolRateLimiter, // Injected from container
+	rateLimiter *ratelimit.ToolRateLimiter,
+	bus *event.DataBus,
+	budget float64, // FIX: Added budget argument
 ) *Auditor {
 	return &Auditor{
 		model:       model,
@@ -41,6 +47,8 @@ func NewAuditor(
 		logger:      logger,
 		costTracker: costTracker,
 		rateLimiter: rateLimiter,
+		bus:         bus,
+		budget:      budget,
 	}
 }
 
@@ -61,17 +69,23 @@ RULES:
 1. You MUST use tools to see the code.
 2. Your Final Answer must list the improvements, each starting with "TASK: ".`, primer)
 
+	// FIX: Allocate 20% of budget to the Scout (cheap, fast scan)
+	scoutBudget := a.budget * 0.20
+	if scoutBudget < 0.2 {
+		scoutBudget = 0.2 // Minimum floor
+	}
+
 	scout := NewReActAgent(
 		a.model,
 		a.tools,
-		nil,
+		a.bus,
 		a.logger,
+		a.policy,
 		a.costTracker,
-		a.rateLimiter, // FIX: Pass injected rate limiter
-		0.50,
+		a.rateLimiter,
+		scoutBudget,
 	)
 
-	// FIX: Apply the specialized persona to the scout
 	scout.UpdateSystemPrompt(systemPrompt)
 
 	fmt.Println("📡 [SCOUT] Scanning for improvements using Native Tool Calling...")
@@ -102,17 +116,23 @@ Your goal is to AUDIT the codebase for vulnerabilities, technical debt, and arch
 STRICT READ-ONLY MODE: You cannot modify any files.
 Your Final Answer MUST be a comprehensive Markdown report.`
 
+	// FIX: Allocate 80% of budget to the Auditor (expensive, deep analysis)
+	auditBudget := a.budget * 0.80
+	if auditBudget < 1.0 {
+		auditBudget = 1.0 // Minimum floor
+	}
+
 	auditAgent := NewReActAgent(
 		a.model,
 		a.tools,
-		nil,
+		a.bus,
 		a.logger,
+		a.policy,
 		a.costTracker,
-		a.rateLimiter, // FIX: Pass injected rate limiter
-		1.50,
+		a.rateLimiter,
+		auditBudget,
 	)
 
-	// FIX: Apply the specialized persona to the audit agent
 	auditAgent.UpdateSystemPrompt(systemPrompt)
 
 	fmt.Println("🔍 [AUDITOR] Starting comprehensive analysis...")

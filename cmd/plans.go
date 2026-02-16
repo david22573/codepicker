@@ -19,7 +19,8 @@ var plansCmd = &cobra.Command{
 		apiKey := os.Getenv("OPENROUTER_API_KEY")
 		cwd, _ := os.Getwd()
 
-		container, err := app.NewContainer(apiKey, cwd, "", false, false)
+		// Pass verboseFlag to NewContainer
+		container, err := app.NewContainer(apiKey, cwd, "", false, false, verboseFlag)
 		if err != nil {
 			fmt.Printf("❌ Failed to initialize: %v\n", err)
 			return

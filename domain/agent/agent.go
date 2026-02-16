@@ -39,13 +39,20 @@ type ExecutionSummary struct {
 	StartTime time.Time
 }
 
-// PlanSummary is a lightweight view for listing plans (New for UX)
+// PlanSummary is a lightweight view for listing plans
 type PlanSummary struct {
 	ID           string
 	OriginalTask string
 	Status       task.Status
 	StepCount    int
 	CreatedAt    time.Time
+}
+
+// [FIX] Added SearchResult for vector search responses
+type SearchResult struct {
+	FilePath string
+	Content  string
+	Score    float64
 }
 
 // Repository defines how we save/load executions and plans
@@ -61,4 +68,6 @@ type Repository interface {
 	// Phase 5: Plan Management (Dashboard)
 	ListPlans(ctx context.Context, limit int) ([]PlanSummary, error)
 	DeletePlan(ctx context.Context, id string) error
+
+	VectorSearch(ctx context.Context, vector []float32, limit int) ([]SearchResult, error)
 }

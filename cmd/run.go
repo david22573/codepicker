@@ -2,233 +2,100 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/david22573/codepicker/app"
 	"github.com/david22573/codepicker/domain/task"
-	"github.com/david22573/codepicker/infra/ui"
 	"github.com/spf13/cobra"
 )
 
-var (
-	runDryRun  bool
-	runCI      bool
-	runPlanID  string
-	runAutoYes bool
-)
+var runDryRun bool
+var runCiMode bool
+var runLlmModel string
+var runVerbose bool
 
 var runCmd = &cobra.Command{
-	Use:   "run [task]",
-	Short: "Execute a coding task (via plan)",
+	Use:   "run [task description]",
+	Short: "Run a single task using the agent",
+	Args:  cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		if runPlanID == "" && len(args) < 1 {
-			ui.PrintError("You must provide a task string OR a --plan <id>")
-			_ = cmd.Usage()
+		apiKey := os.Getenv("OPENROUTER_API_KEY")
+		if apiKey == "" {
+			fmt.Println("❌ Error: OPENROUTER_API_KEY is not set.")
 			os.Exit(1)
 		}
 
-		taskInput := ""
-		if len(args) > 0 {
-			taskInput = args[0]
+		taskDescription := args[0]
+		cwd, _ := os.Getwd()
+
+		// Initialize Container
+		container, err := app.NewContainer(apiKey, cwd, runLlmModel, runDryRun, runCiMode, GetVerbose())
+		if err != nil {
+			fmt.Printf("❌ Container Init Failed: %v\n", err)
+			os.Exit(1)
+		}
+		defer container.Close()
+
+		ctx := context.Background()
+		fmt.Printf("🚀 Running task: %s\n", taskDescription)
+
+		// 1. Load Context (The Primer)
+		// FIX: Use a Smart Primer strategy.
+		// If the user has manually packed context, use it.
+		// Otherwise, generate a SHALLOW (Depth 2) primer to save tokens during the planning phase.
+		var primer string
+		manualContextPath := filepath.Join(cwd, "codepicker_context.txt")
+
+		if content, err := os.ReadFile(manualContextPath); err == nil {
+			fmt.Println("🗺️  Using manual context file (codepicker_context.txt)...")
+			primer = string(content)
+		} else {
+			fmt.Println("🗺️  Generating shallow project map (Depth 2) for planning...")
+			primer = container.ProjectPrimer.GenerateShallow()
 		}
 
-		if err := executeRun(taskInput, runPlanID); err != nil {
-			if runCI {
-				res := task.CIResult{
-					Status: "failure",
-					Task:   taskInput,
-					Error:  err.Error(),
-				}
-				json.NewEncoder(os.Stdout).Encode(res)
-				os.Exit(1)
+		// 2. Generate a Plan
+		// We pass the primer as context so the planner knows the high-level file structure
+		fmt.Println("🧠 Generating execution plan...")
+		plan, err := container.Planner.CreatePlan(ctx, taskDescription, "", primer)
+		if err != nil {
+			fmt.Printf("❌ Planning failed: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Printf("📝 Plan generated: %s (%d steps)\n", plan.ID, len(plan.Steps))
+
+		// 3. Configure Execution Mode
+		// If CI mode is on, we skip the interactive confirmation prompts
+		if runCiMode {
+			container.PlanExecutor.SetAutoConfirm(true)
+		}
+
+		// 4. Execute the Plan
+		err = container.PlanExecutor.Execute(ctx, plan)
+		if err != nil {
+			fmt.Printf("❌ Execution failed: %v\n", err)
+			os.Exit(1)
+		}
+
+		// 5. Final Report
+		fmt.Println("\n✅ Task Execution Completed.")
+		for _, step := range plan.Steps {
+			icon := "✅"
+			if step.Status == task.StatusFailed {
+				icon = "❌"
 			}
-			ui.PrintError(fmt.Sprintf("EXECUTION FAILED: %v", err))
-			os.Exit(1)
+			fmt.Printf("   %s Step %d: %s\n", icon, step.ID, step.Description)
 		}
 	},
 }
 
-func executeRun(taskInput, planID string) error {
-	apiKey := os.Getenv("OPENROUTER_API_KEY")
-	if apiKey == "" {
-		return fmt.Errorf("OPENROUTER_API_KEY required")
-	}
-
-	cwd, _ := os.Getwd()
-	container, err := app.NewContainer(apiKey, cwd, "", runDryRun, runCI)
-	if err != nil {
-		return err
-	}
-	defer container.Close()
-
-	container.PlanExecutor.SetAutoConfirm(runAutoYes)
-
-	if !runCI {
-		printSafetyBanner(runDryRun)
-	}
-
-	ctx := context.Background()
-	var plan *task.Plan
-
-	// --- Step 1: Planning ---
-	if planID != "" {
-		if !runCI {
-			ui.PrintInfo(fmt.Sprintf("Loading Plan %s...", planID))
-		}
-		plan, err = container.Repository.GetPlan(ctx, planID)
-		if err != nil {
-			return fmt.Errorf("failed to load plan: %w", err)
-		}
-	} else {
-		if !runCI {
-			ui.PrintHeader("Planning Phase")
-			var fileContext, primer string
-
-			err := ui.RunSpinner("Analyzing project context...", func() error {
-				var innerErr error
-				primer = container.ProjectPrimer.Generate()
-				fileContext, innerErr = container.ContextBuilder.BuildForTask(taskInput)
-				return innerErr
-			})
-			if err != nil {
-				ui.PrintWarning(fmt.Sprintf("Context generation partial: %v", err))
-			}
-
-			err = ui.RunSpinner("Generating implementation plan...", func() error {
-				var innerErr error
-				plan, innerErr = container.Planner.CreatePlan(ctx, taskInput, fileContext, primer)
-				return innerErr
-			})
-			if err != nil {
-				return err
-			}
-
-			ui.PrintSuccess(fmt.Sprintf("Plan Generated (ID: %s)", plan.ID))
-			fmt.Printf("\n%s\n", ui.InfoStyle.Render("Strategy: "+plan.Reasoning))
-			for i, step := range plan.Steps {
-				fmt.Printf("   %d. %s\n", i+1, step.Description)
-			}
-			fmt.Println()
-		} else {
-			primer := container.ProjectPrimer.Generate()
-			fileContext, _ := container.ContextBuilder.BuildForTask(taskInput)
-			plan, err = container.Planner.CreatePlan(ctx, taskInput, fileContext, primer)
-			if err != nil {
-				return err
-			}
-		}
-	}
-
-	// --- Step 2: Execution ---
-	if !runCI {
-		ui.PrintHeader("Execution Phase")
-	}
-
-	execErr := container.PlanExecutor.Execute(ctx, plan)
-
-	// --- Step 3: Application (Feature 5) ---
-	if execErr == nil {
-		files, err := container.ShadowManager.ListChanges()
-		if err == nil && len(files) > 0 {
-			if runDryRun {
-				fmt.Println("\n📝 [DRY-RUN] The following changes would be applied:")
-				for _, f := range files {
-					// We can improve this by using ShadowManager.Diff(f)
-					summary, _ := container.ShadowManager.Diff(f)
-					if summary != nil {
-						fmt.Printf("   %s\n", summary.String())
-					} else {
-						fmt.Printf("   • %s\n", f)
-					}
-				}
-				fmt.Println("   (No files were modified on disk)")
-			} else {
-				fmt.Println("\n💾 Applying changes to filesystem...")
-				for _, f := range files {
-					if err := container.ShadowManager.Commit(f); err != nil {
-						ui.PrintError(fmt.Sprintf("Failed to commit %s: %v", f, err))
-					} else {
-						fmt.Printf("   ✔ Applied: %s\n", f)
-					}
-				}
-			}
-		}
-	}
-
-	// --- Step 4: Reporting ---
-	if runCI {
-		return handleCIOutput(plan, execErr)
-	}
-
-	if container.CostTracker != nil {
-		container.CostTracker.PrintSummary()
-	}
-
-	if execErr != nil {
-		return execErr
-	}
-
-	ui.PrintSuccess("Task Completed Successfully.")
-	return nil
-}
-
-func printSafetyBanner(isDryRun bool) {
-	if isDryRun {
-		fmt.Println(ui.BoxStyle.Render(
-			ui.InfoStyle.Render("🔒 MODE: DRY-RUN (Read-Only)\n") +
-				"• File system writes are DISABLED\n" +
-				"• Shell commands are DISABLED\n" +
-				"• Changes are simulated in shadow FS",
-		))
-	} else {
-		fmt.Println(ui.BoxStyle.Render(
-			ui.WarningStyle.Render("⚡ MODE: LIVE EXECUTION (Write-Enabled)\n") +
-				"• The agent has permission to modify files.\n" +
-				"• Changes will be applied automatically upon success.",
-		))
-	}
-	fmt.Println()
-}
-
-func handleCIOutput(plan *task.Plan, execErr error) error {
-	failedCount := 0
-	for _, s := range plan.Steps {
-		if s.Status == task.StatusFailed {
-			failedCount++
-		}
-	}
-
-	status := "success"
-	errMsg := ""
-	if execErr != nil || failedCount > 0 {
-		status = "failure"
-		if execErr != nil {
-			errMsg = execErr.Error()
-		} else {
-			errMsg = "One or more steps failed"
-		}
-	}
-
-	result := task.CIResult{
-		Status:      status,
-		Task:        plan.OriginalTask,
-		PlanSummary: plan.Reasoning,
-		StepsTotal:  len(plan.Steps),
-		StepsFailed: failedCount,
-		Error:       errMsg,
-	}
-
-	encoder := json.NewEncoder(os.Stdout)
-	encoder.SetIndent("", "  ")
-	return encoder.Encode(result)
-}
-
 func init() {
 	runCmd.Flags().BoolVar(&runDryRun, "dry-run", false, "Enable read-only mode")
-	runCmd.Flags().BoolVar(&runCI, "ci", false, "Enable CI mode")
-	runCmd.Flags().StringVar(&runPlanID, "plan", "", "Execute a specific plan ID")
-	runCmd.Flags().BoolVarP(&runAutoYes, "yes", "y", false, "Skip confirmation prompts")
+	runCmd.Flags().BoolVar(&runCiMode, "ci", false, "Enable CI mode (skip confirmations)")
+	runCmd.Flags().StringVar(&runLlmModel, "model", "", "LLM model to use")
+	runCmd.Flags().BoolVarP(&runVerbose, "verbose", "v", false, "Enable verbose output")
 	rootCmd.AddCommand(runCmd)
 }

@@ -1,7 +1,7 @@
 package app
 
 import (
-	"os"
+	"fmt"
 	"path/filepath"
 	"time"
 
@@ -10,12 +10,14 @@ import (
 	"github.com/david22573/codepicker/adapters/policy"
 	"github.com/david22573/codepicker/adapters/tools"
 	"github.com/david22573/codepicker/adapters/verifier"
+	domainAgent "github.com/david22573/codepicker/domain/agent"
 	"github.com/david22573/codepicker/domain/config"
 	domainCtx "github.com/david22573/codepicker/domain/context"
 	"github.com/david22573/codepicker/domain/event"
 	"github.com/david22573/codepicker/infra/audit"
 	infraConfig "github.com/david22573/codepicker/infra/config"
 	"github.com/david22573/codepicker/infra/fs"
+	"github.com/david22573/codepicker/infra/indexer"
 	"github.com/david22573/codepicker/infra/llm"
 	"github.com/david22573/codepicker/infra/logging"
 	"github.com/david22573/codepicker/infra/ratelimit"
@@ -25,107 +27,108 @@ import (
 )
 
 // Container holds all the dependencies for the application.
-// It acts as the central dependency injection root.
 type Container struct {
-	// Agents
-	Planner       *agent.Planner
-	PlanExecutor  *agent.PlanExecutor
-	Auditor       *agent.Auditor
-	Explainer     *agent.Explainer
-	TwoPassEngine *agent.TwoPassEngine
-	Verifier      *verifier.Pipeline
-
-	// Context & Data
-	ContextBuilder   *context.SliceBasedBuilder
+	Planner          *agent.Planner
+	PlanExecutor     *agent.PlanExecutor
+	Auditor          *agent.Auditor
+	Explainer        *agent.Explainer
+	TwoPassEngine    *agent.TwoPassEngine
+	Verifier         *verifier.Pipeline
+	ContextBuilder   *context.SmartBuilder
 	ProjectPrimer    *context.ProjectPrimer
 	Repository       *storage.SQLiteRepository
 	SliceStore       domainCtx.SliceStore
 	WorkspaceManager *fs.WorkspaceManager
-	ShadowManager    *fs.ShadowManager // Exposed for CLI usage
-
-	// Infrastructure
-	EventBus    *event.DataBus
-	Logger      *logging.Logger
-	CostTracker *llm.CostTracker
-	RateLimiter *ratelimit.ToolRateLimiter
-	Config      *config.AppConfig
+	ShadowManager    *fs.ShadowManager
+	IndexManager     *indexer.IndexManager
+	EventBus         *event.DataBus
+	Logger           *logging.Logger
+	CostTracker      *llm.CostTracker
+	RateLimiter      *ratelimit.ToolRateLimiter
+	Config           *config.AppConfig
 }
 
-// NewContainer initializes the application container with all dependencies wired up.
-func NewContainer(apiKey, projectRoot, llmModel string, isDryRun, isCI bool) (*Container, error) {
-	// 1. Initialize Logger
-	logger, _ := logging.NewLogger("development")
-	if isCI {
-		logger, _ = logging.NewLogger("production")
+func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose bool) (*Container, error) {
+	// 1. Initialize Logger (Correctly handling 2 return values)
+	env := "development"
+	if ciMode {
+		env = "production"
+	}
+	logger, err := logging.NewLogger(env, verbose)
+	if err != nil {
+		return nil, err
 	}
 
 	// 2. Load Configuration
-	configPath := filepath.Join(projectRoot, "configs", "default.yaml")
-	if customPath := os.Getenv("CODEPICKER_CONFIG"); customPath != "" {
-		configPath = customPath
-	}
-
-	loader := infraConfig.NewLoader(configPath)
+	cfgPath := filepath.Join(rootDir, "codepicker.yaml")
+	loader := infraConfig.NewLoader(cfgPath)
 	cfg, err := loader.Load()
 	if err != nil {
 		logger.Warn("Failed to load configuration file, using defaults", zap.Error(err))
 		cfg = config.DefaultConfig()
 	}
 
-	// Apply CLI overrides
-	if llmModel != "" {
-		cfg.LLM.Model = llmModel
+	if modelOverride != "" {
+		cfg.LLM.Model = modelOverride
 	}
-	if isDryRun {
+	if dryRun {
 		cfg.Environment = "dry-run"
 	}
 
-	// 3. Persistence Layer
-	dbPath := filepath.Join(projectRoot, ".codepicker", "state.db")
+	// 3. Infrastructure
+	dbPath := filepath.Join(rootDir, ".codepicker", "state.db")
 	repo, err := storage.NewSQLiteRepository(dbPath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to init sqlite: %w", err)
 	}
 
-	workspaceMgr := fs.NewWorkspaceManager(projectRoot)
+	workspaceMgr := fs.NewWorkspaceManager(rootDir)
 	eventBus := event.NewDataBus()
 
-	// 4. LLM & Cost Safety
+	costTracker := llm.NewCostTracker(cfg.LLM.InputCostPer1M, cfg.LLM.OutputCostPer1M)
+	_ = llm.NewBudgetGuard(costTracker, cfg.LLM.BudgetCap)
+
 	llmClient := llm.NewOpenRouterAdapter(
 		apiKey,
 		cfg.LLM.Model,
 		time.Duration(cfg.LLM.TimeoutSeconds)*time.Second,
 	)
 
-	costTracker := llm.NewCostTracker(cfg.LLM.InputCostPer1M, cfg.LLM.OutputCostPer1M)
-	_ = llm.NewBudgetGuard(costTracker, cfg.LLM.BudgetCap)
+	embedClient := llm.NewEmbeddingClient(apiKey, cfg.Embedding.Model)
 
-	// 5. Tools, Policy & Rate Limiting
+	shadowMgr := fs.NewShadowManager(rootDir, dryRun)
+	shellExec := shell.NewExecutor(30*time.Second, 5000, dryRun, rootDir)
 
-	// Feature 5: Inject isDryRun into ShadowManager
-	shadowMgr := fs.NewShadowManager(projectRoot, isDryRun)
-
-	shellExec := shell.NewExecutor(30*time.Second, 5000, isDryRun, projectRoot)
-	allTools := tools.DefaultSet(shadowMgr, shellExec, projectRoot)
+	allTools := tools.DefaultSet(shadowMgr, shellExec, rootDir, embedClient, repo)
 	rateLimiter := ratelimit.NewToolRateLimiter(20)
 
-	policyConfig, _ := policy.LoadPolicy(filepath.Join(projectRoot, "policy.json"))
-	guardRail := policy.NewEnforcer(*policyConfig, isDryRun)
+	// 4. Policy (Using correct interface alias)
+	var guardRail domainAgent.Policy
+	if ciMode {
+		guardRail = policy.NewStrictPolicy(dryRun, ciMode)
+	} else {
+		policyConfig, _ := policy.LoadPolicy(filepath.Join(rootDir, "policy.json"))
+		guardRail = policy.NewEnforcer(*policyConfig, dryRun)
+	}
 
-	// 6. Agents
+	// 5. Agents
 	worker := agent.NewReActAgent(
 		llmClient,
 		allTools,
 		eventBus,
 		logger,
+		guardRail,
 		costTracker,
 		rateLimiter,
 		cfg.LLM.BudgetCap,
 	)
+	worker.SetVerbose(verbose)
 
-	planner := agent.NewPlanner(llmClient, repo)
-	executor := agent.NewPlanExecutor(worker, repo, workspaceMgr)
+	planner := agent.NewPlanner(worker)
 
+	executor := agent.NewPlanExecutor(worker, repo, workspaceMgr, shadowMgr)
+
+	// FIX: Pass cfg.LLM.BudgetCap as the 9th argument
 	auditor := agent.NewAuditor(
 		llmClient,
 		repo,
@@ -134,15 +137,14 @@ func NewContainer(apiKey, projectRoot, llmModel string, isDryRun, isCI bool) (*C
 		logger,
 		costTracker,
 		rateLimiter,
+		eventBus,
+		cfg.LLM.BudgetCap,
 	)
 
 	explainer := agent.NewExplainer(llmClient, repo)
 
-	packedContent := ""
-	if content, err := os.ReadFile(filepath.Join(projectRoot, "codepicker_context.txt")); err == nil {
-		packedContent = string(content)
-	}
-
+	// 6. Two-Pass Engine (Repair)
+	packedContent := "" // Optional pre-loaded context
 	twoPass := agent.NewTwoPassEngine(
 		llmClient,
 		repo,
@@ -154,18 +156,21 @@ func NewContainer(apiKey, projectRoot, llmModel string, isDryRun, isCI bool) (*C
 		packedContent,
 	)
 
-	// 7. Context Management
-	ctxBuilder := context.NewSliceBasedBuilder(repo, cfg.Agent.MaxContextSize)
-	primer := context.NewProjectPrimer(projectRoot)
-	verifierPipeline := verifier.NewPipeline(projectRoot)
+	// 7. Context & Verification
+	slicer := indexer.NewCodeSlicer()
+	indexManager := indexer.NewIndexManager(slicer, repo, embedClient)
+	reranker := context.NewReranker(llmClient)
+	ctxBuilder := context.NewSmartBuilder(repo, embedClient, reranker, cfg.Agent.MaxContextSize)
+	primer := context.NewProjectPrimer(rootDir)
+	verifierPipeline := verifier.NewPipeline(rootDir)
 
-	// 8. Background Maintenance
+	// 8. Background Cleanup
 	go func() {
 		cleanupPolicy := audit.CleanupPolicy{
 			MaxAge:   30 * 24 * time.Hour,
 			MaxCount: 100,
 		}
-		auditDir := filepath.Join(projectRoot, ".codepicker", "audit")
+		auditDir := filepath.Join(rootDir, ".codepicker", "audit")
 		_ = audit.CleanupAudits(auditDir, cleanupPolicy)
 	}()
 
@@ -179,9 +184,10 @@ func NewContainer(apiKey, projectRoot, llmModel string, isDryRun, isCI bool) (*C
 		ContextBuilder:   ctxBuilder,
 		ProjectPrimer:    primer,
 		WorkspaceManager: workspaceMgr,
-		ShadowManager:    shadowMgr, // Exposed for CLI usage
+		ShadowManager:    shadowMgr,
 		Repository:       repo,
 		SliceStore:       repo,
+		IndexManager:     indexManager,
 		EventBus:         eventBus,
 		Logger:           logger,
 		CostTracker:      costTracker,
