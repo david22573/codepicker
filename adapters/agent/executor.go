@@ -37,6 +37,22 @@ func (e *PlanExecutor) SetAutoConfirm(auto bool) {
 	e.autoConfirm = auto
 }
 
+// Add to PlanExecutor struct
+func (e *PlanExecutor) UpdateSystemPrompt(msg string) {
+	// Type assert to access the specific ReActAgent methods
+	if agent, ok := e.worker.(interface{ UpdateSystemPrompt(string) }); ok {
+		agent.UpdateSystemPrompt(msg)
+	}
+}
+
+// Add to PlanExecutor struct
+func (e *PlanExecutor) GetSystemPrompt() string {
+	if agent, ok := e.worker.(interface{ GetSystemPrompt() string }); ok {
+		return agent.GetSystemPrompt()
+	}
+	return ""
+}
+
 func (e *PlanExecutor) Execute(ctx context.Context, plan *task.Plan) error {
 	// 1. Begin Transaction
 	txn, err := e.workspaceMgr.BeginTransaction()

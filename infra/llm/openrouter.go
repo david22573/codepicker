@@ -9,11 +9,16 @@ import (
 	"net/http"
 	"time"
 
-	domainContext "github.com/david22573/codepicker/domain/context" // [cite: 201]
-	"github.com/david22573/codepicker/domain/errors"                // [cite: 212]
+	domainContext "github.com/david22573/codepicker/domain/context"
+	"github.com/david22573/codepicker/domain/errors"
 )
 
-const openRouterURL = "https://openrouter.ai/api/v1/chat/completions" // [cite: 329]
+const openRouterURL = "https://openrouter.ai/api/v1/chat/completions"
+
+// Add this struct to define the cache control object
+type CacheControl struct {
+	Type string `json:"type"`
+}
 
 // --- Native Tool Structures ---
 
@@ -23,9 +28,9 @@ type ToolDefinition struct {
 }
 
 type FunctionDefinition struct {
-	Name        string      `json:"name"`
-	Description string      `json:"description"`
-	Parameters  interface{} `json:"parameters"` // JSON Schema [cite: 101]
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Parameters  any    `json:"parameters"`
 }
 
 type ToolCall struct {
@@ -38,11 +43,12 @@ type ToolCall struct {
 }
 
 type Message struct {
-	Role       string     `json:"role"`
-	Content    string     `json:"content,omitempty"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
-	Name       string     `json:"name,omitempty"`
+	Role         string        `json:"role"`
+	Content      string        `json:"content,omitempty"`
+	ToolCalls    []ToolCall    `json:"tool_calls,omitempty"`
+	ToolCallID   string        `json:"tool_call_id,omitempty"`
+	Name         string        `json:"name,omitempty"`
+	CacheControl *CacheControl `json:"cache_control,omitempty"`
 }
 
 // --- Request/Response Structures ---
@@ -71,7 +77,7 @@ type OpenRouterAdapter struct {
 	apiKey         string
 	model          string
 	client         *http.Client
-	circuitBreaker *CircuitBreaker // [cite: 329]
+	circuitBreaker *CircuitBreaker
 }
 
 func NewOpenRouterAdapter(apiKey, model string, timeout time.Duration) *OpenRouterAdapter {
@@ -79,7 +85,7 @@ func NewOpenRouterAdapter(apiKey, model string, timeout time.Duration) *OpenRout
 		apiKey:         apiKey,
 		model:          model,
 		client:         &http.Client{Timeout: timeout},
-		circuitBreaker: NewCircuitBreaker(5, 60*time.Second), // [cite: 330]
+		circuitBreaker: NewCircuitBreaker(5, 60*time.Second),
 	}
 }
 
@@ -99,7 +105,7 @@ func (o *OpenRouterAdapter) ChatNative(ctx context.Context, messages []Message, 
 	var responseMessage Message
 	var usage domainContext.TokenUsage
 
-	opErr := o.circuitBreaker.Execute(func() error { // [cite: 332]
+	opErr := o.circuitBreaker.Execute(func() error {
 		req, err := http.NewRequestWithContext(ctx, "POST", openRouterURL, bytes.NewBuffer(jsonBody))
 		if err != nil {
 			return err
@@ -148,7 +154,7 @@ func (o *OpenRouterAdapter) ChatNative(ctx context.Context, messages []Message, 
 	return responseMessage, usage, opErr
 }
 
-// Chat maintains backward compatibility for simple system/user prompts. [cite: 331]
+// Chat maintains backward compatibility for simple system/user prompts.
 func (o *OpenRouterAdapter) Chat(ctx context.Context, systemPrompt, userPrompt string) (string, error) {
 	messages := []Message{
 		{Role: "system", Content: systemPrompt},

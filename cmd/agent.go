@@ -64,6 +64,13 @@ var agentCmd = &cobra.Command{
 		primer := container.ProjectPrimer.Generate()
 		fmt.Println("Done.")
 
+		basePrompt := container.PlanExecutor.GetSystemPrompt()
+		cachedPrompt := fmt.Sprintf("%s\n\n### PROJECT CONTEXT (CACHED)\n%s", basePrompt, primer)
+
+		// This prompt will now be marked as "ephemeral" in the ReActAgent (from your previous step)
+		container.PlanExecutor.UpdateSystemPrompt(cachedPrompt)
+		// ----------------------------------------------------
+
 		reader := bufio.NewReader(os.Stdin)
 		ctx := context.Background()
 
@@ -84,8 +91,9 @@ var agentCmd = &cobra.Command{
 				continue
 			}
 
-			// Prepend Primer to the input for immediate context
-			enhancedInput := fmt.Sprintf("PROJECT CONTEXT:\n%s\n\nUSER REQUEST:\n%s", primer, input)
+			// --- CHANGED: REMOVED PRIMER FROM INPUT ---
+			// Old: enhancedInput := fmt.Sprintf("PROJECT CONTEXT: ...", primer, input)
+			// New: We just send the user input. The context is already in the system prompt.
 			fmt.Println(color.HiBlackString("Thinking..."))
 
 			syntheticPlan := &task.Plan{
@@ -97,7 +105,7 @@ var agentCmd = &cobra.Command{
 					{
 						ID:          1,
 						Description: "Execute user request",
-						Instruction: enhancedInput,
+						Instruction: input,
 						Status:      task.StatusPending,
 					},
 				},
@@ -105,7 +113,6 @@ var agentCmd = &cobra.Command{
 
 			// Execute returns error; results are stored in the plan steps
 			err := container.PlanExecutor.Execute(ctx, syntheticPlan)
-
 			if err != nil {
 				fmt.Printf("❌ Error: %v\n", err)
 			} else {

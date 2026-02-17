@@ -27,7 +27,7 @@ type ReActAgent struct {
 	processor   *ObservationProcessor
 	rateLimiter *ratelimit.ToolRateLimiter
 	budgetGuard *llm.BudgetGuard
-	costTracker *llm.CostTracker // Added for prediction
+	costTracker *llm.CostTracker
 	memory      *TurnMemory
 	history     []llm.Message
 	sysMsg      string
@@ -72,9 +72,7 @@ func NewReActAgent(
 	bg := llm.NewBudgetGuard(costTracker, budget)
 
 	baseTurns := maxTurns / 2
-	if baseTurns < 10 {
-		baseTurns = 10
-	}
+	baseTurns = max(10)
 
 	return &ReActAgent{
 		model:       model,
@@ -137,12 +135,22 @@ func (a *ReActAgent) SetVerbose(verbose bool) {
 	a.verbose = verbose
 }
 
+func (a *ReActAgent) GetSystemPrompt() string {
+	return a.sysMsg
+}
+
 // Run executes the ReAct loop using native function calling.
 func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) {
 	maxTurns := a.controller.CalculateAllowedTurns(0.5)
 
+	sysMsg := llm.Message{
+		Role:         "system",
+		Content:      a.sysMsg,
+		CacheControl: &llm.CacheControl{Type: "ephemeral"},
+	}
+
 	a.history = []llm.Message{
-		{Role: "system", Content: a.sysMsg},
+		sysMsg,
 		{Role: "user", Content: taskInput},
 	}
 
