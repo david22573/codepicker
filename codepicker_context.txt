@@ -1,4 +1,4 @@
-Project Context Dump (16 Feb 26 23:24 UTC)
+Project Context Dump (17 Feb 26 00:27 UTC)
 Format: xml
 Mode: FULL (No Truncation)
 Total Files: 96
@@ -220,6 +220,7 @@ RULES:
 		a.costTracker,
 		a.rateLimiter,
 		scoutBudget,
+		20,
 	)
 
 	scout.UpdateSystemPrompt(systemPrompt)
@@ -267,6 +268,7 @@ Your Final Answer MUST be a comprehensive Markdown report.`
 		a.costTracker,
 		a.rateLimiter,
 		auditBudget,
+		200,
 	)
 
 	auditAgent.UpdateSystemPrompt(systemPrompt)
@@ -434,6 +436,22 @@ func NewPlanExecutor(worker agent.Agent, repo agent.Repository, ws *fs.Workspace
 
 func (e *PlanExecutor) SetAutoConfirm(auto bool) {
 	e.autoConfirm = auto
+}
+
+// Add to PlanExecutor struct
+func (e *PlanExecutor) UpdateSystemPrompt(msg string) {
+	// Type assert to access the specific ReActAgent methods
+	if agent, ok := e.worker.(interface{ UpdateSystemPrompt(string) }); ok {
+		agent.UpdateSystemPrompt(msg)
+	}
+}
+
+// Add to PlanExecutor struct
+func (e *PlanExecutor) GetSystemPrompt() string {
+	if agent, ok := e.worker.(interface{ GetSystemPrompt() string }); ok {
+		return agent.GetSystemPrompt()
+	}
+	return ""
 }
 
 func (e *PlanExecutor) Execute(ctx context.Context, plan *task.Plan) error {
@@ -1093,7 +1111,7 @@ type ReActAgent struct {
 	processor   *ObservationProcessor
 	rateLimiter *ratelimit.ToolRateLimiter
 	budgetGuard *llm.BudgetGuard
-	costTracker *llm.CostTracker // Added for prediction
+	costTracker *llm.CostTracker
 	memory      *TurnMemory
 	history     []llm.Message
 	sysMsg      string
@@ -1110,6 +1128,7 @@ func NewReActAgent(
 	costTracker *llm.CostTracker,
 	rateLimiter *ratelimit.ToolRateLimiter,
 	budget float64,
+	maxTurns int,
 ) *ReActAgent {
 	toolMap := make(map[string]agent.Tool)
 	var schemas []llm.ToolDefinition
@@ -1136,6 +1155,9 @@ func NewReActAgent(
 
 	bg := llm.NewBudgetGuard(costTracker, budget)
 
+	baseTurns := maxTurns / 2
+	baseTurns = max(10)
+
 	return &ReActAgent{
 		model:       model,
 		tools:       toolMap,
@@ -1144,7 +1166,7 @@ func NewReActAgent(
 		logger:      logger,
 		policy:      policy,
 		costTracker: costTracker,
-		controller:  NewAdaptiveController(10, 30, costTracker, budget),
+		controller:  NewAdaptiveController(baseTurns, maxTurns, costTracker, budget),
 		budgetGuard: bg,
 		processor:   NewObservationProcessor(4000),
 		rateLimiter: rateLimiter,
@@ -1197,12 +1219,22 @@ func (a *ReActAgent) SetVerbose(verbose bool) {
 	a.verbose = verbose
 }
 
+func (a *ReActAgent) GetSystemPrompt() string {
+	return a.sysMsg
+}
+
 // Run executes the ReAct loop using native function calling.
 func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) {
 	maxTurns := a.controller.CalculateAllowedTurns(0.5)
 
+	sysMsg := llm.Message{
+		Role:         "system",
+		Content:      a.sysMsg,
+		CacheControl: &llm.CacheControl{Type: "ephemeral"},
+	}
+
 	a.history = []llm.Message{
-		{Role: "system", Content: a.sysMsg},
+		sysMsg,
 		{Role: "user", Content: taskInput},
 	}
 
@@ -1479,7 +1511,7 @@ Provide a clear, technical explanation of the bug and the required fix as your F
 
 	// Analyst uses ReActAgent, which handles its own budget checks internally
 	// We pass the guard's remaining limit or the global cap.
-	analyst := NewReActAgent(e.model, readTools, nil, e.logger, e.policy, e.costTracker, e.rateLimiter, e.budgetGuard.Remaining())
+	analyst := NewReActAgent(e.model, readTools, nil, e.logger, e.policy, e.costTracker, e.rateLimiter, e.budgetGuard.Remaining(), 100)
 	analyst.UpdateSystemPrompt(systemPrompt)
 
 	input := fmt.Sprintf("TASK: %s\nInitial focus file: %s", task, contextFile)
@@ -3293,6 +3325,7 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 		costTracker,
 		rateLimiter,
 		cfg.LLM.BudgetCap,
+		cfg.Agent.MaxTurns,
 	)
 	worker.SetVerbose(verbose)
 
@@ -3470,6 +3503,13 @@ var agentCmd = &cobra.Command{
 		primer := container.ProjectPrimer.Generate()
 		fmt.Println("Done.")
 
+		basePrompt := container.PlanExecutor.GetSystemPrompt()
+		cachedPrompt := fmt.Sprintf("%s\n\n### PROJECT CONTEXT (CACHED)\n%s", basePrompt, primer)
+
+		// This prompt will now be marked as "ephemeral" in the ReActAgent (from your previous step)
+		container.PlanExecutor.UpdateSystemPrompt(cachedPrompt)
+		// ----------------------------------------------------
+
 		reader := bufio.NewReader(os.Stdin)
 		ctx := context.Background()
 
@@ -3490,8 +3530,9 @@ var agentCmd = &cobra.Command{
 				continue
 			}
 
-			// Prepend Primer to the input for immediate context
-			enhancedInput := fmt.Sprintf("PROJECT CONTEXT:\n%s\n\nUSER REQUEST:\n%s", primer, input)
+			// --- CHANGED: REMOVED PRIMER FROM INPUT ---
+			// Old: enhancedInput := fmt.Sprintf("PROJECT CONTEXT: ...", primer, input)
+			// New: We just send the user input. The context is already in the system prompt.
 			fmt.Println(color.HiBlackString("Thinking..."))
 
 			syntheticPlan := &task.Plan{
@@ -3503,7 +3544,7 @@ var agentCmd = &cobra.Command{
 					{
 						ID:          1,
 						Description: "Execute user request",
-						Instruction: enhancedInput,
+						Instruction: input,
 						Status:      task.StatusPending,
 					},
 				},
@@ -3511,7 +3552,6 @@ var agentCmd = &cobra.Command{
 
 			// Execute returns error; results are stored in the plan steps
 			err := container.PlanExecutor.Execute(ctx, syntheticPlan)
-
 			if err != nil {
 				fmt.Printf("❌ Error: %v\n", err)
 			} else {
@@ -4950,7 +4990,7 @@ func init() {
 <file path="codepicker.yaml">
 environment: development
 llm:
-    model: moonshotai/kimi-k2.5
+    model: z-ai/glm-5
     timeout_seconds: 120000
     max_tokens: 16000
     temperature: 0.1
@@ -7838,11 +7878,16 @@ import (
 	"net/http"
 	"time"
 
-	domainContext "github.com/david22573/codepicker/domain/context" // [cite: 201]
-	"github.com/david22573/codepicker/domain/errors"                // [cite: 212]
+	domainContext "github.com/david22573/codepicker/domain/context"
+	"github.com/david22573/codepicker/domain/errors"
 )
 
-const openRouterURL = "https://openrouter.ai/api/v1/chat/completions" // [cite: 329]
+const openRouterURL = "https://openrouter.ai/api/v1/chat/completions"
+
+// Add this struct to define the cache control object
+type CacheControl struct {
+	Type string `json:"type"`
+}
 
 // --- Native Tool Structures ---
 
@@ -7852,9 +7897,9 @@ type ToolDefinition struct {
 }
 
 type FunctionDefinition struct {
-	Name        string      `json:"name"`
-	Description string      `json:"description"`
-	Parameters  interface{} `json:"parameters"` // JSON Schema [cite: 101]
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Parameters  any    `json:"parameters"`
 }
 
 type ToolCall struct {
@@ -7867,11 +7912,12 @@ type ToolCall struct {
 }
 
 type Message struct {
-	Role       string     `json:"role"`
-	Content    string     `json:"content,omitempty"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
-	Name       string     `json:"name,omitempty"`
+	Role         string        `json:"role"`
+	Content      string        `json:"content,omitempty"`
+	ToolCalls    []ToolCall    `json:"tool_calls,omitempty"`
+	ToolCallID   string        `json:"tool_call_id,omitempty"`
+	Name         string        `json:"name,omitempty"`
+	CacheControl *CacheControl `json:"cache_control,omitempty"`
 }
 
 // --- Request/Response Structures ---
@@ -7900,7 +7946,7 @@ type OpenRouterAdapter struct {
 	apiKey         string
 	model          string
 	client         *http.Client
-	circuitBreaker *CircuitBreaker // [cite: 329]
+	circuitBreaker *CircuitBreaker
 }
 
 func NewOpenRouterAdapter(apiKey, model string, timeout time.Duration) *OpenRouterAdapter {
@@ -7908,7 +7954,7 @@ func NewOpenRouterAdapter(apiKey, model string, timeout time.Duration) *OpenRout
 		apiKey:         apiKey,
 		model:          model,
 		client:         &http.Client{Timeout: timeout},
-		circuitBreaker: NewCircuitBreaker(5, 60*time.Second), // [cite: 330]
+		circuitBreaker: NewCircuitBreaker(5, 60*time.Second),
 	}
 }
 
@@ -7928,7 +7974,7 @@ func (o *OpenRouterAdapter) ChatNative(ctx context.Context, messages []Message, 
 	var responseMessage Message
 	var usage domainContext.TokenUsage
 
-	opErr := o.circuitBreaker.Execute(func() error { // [cite: 332]
+	opErr := o.circuitBreaker.Execute(func() error {
 		req, err := http.NewRequestWithContext(ctx, "POST", openRouterURL, bytes.NewBuffer(jsonBody))
 		if err != nil {
 			return err
@@ -7977,7 +8023,7 @@ func (o *OpenRouterAdapter) ChatNative(ctx context.Context, messages []Message, 
 	return responseMessage, usage, opErr
 }
 
-// Chat maintains backward compatibility for simple system/user prompts. [cite: 331]
+// Chat maintains backward compatibility for simple system/user prompts.
 func (o *OpenRouterAdapter) Chat(ctx context.Context, systemPrompt, userPrompt string) (string, error) {
 	messages := []Message{
 		{Role: "system", Content: systemPrompt},
@@ -9433,10 +9479,10 @@ fi
 
 ```json
 {
-  "total_bytes": 239392,
+  "total_bytes": 240562,
   "file_count": 96,
-  "estimated_tokens": 61572,
+  "estimated_tokens": 61864,
   "mode": "full",
-  "generated_at": "2026-02-16T23:24:01.33956518Z"
+  "generated_at": "2026-02-17T00:27:16.699127637Z"
 }
 ```
