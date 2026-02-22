@@ -7,31 +7,52 @@ import (
 	"testing"
 
 	"github.com/david22573/codepicker/adapters/agent"
+	domainAgent "github.com/david22573/codepicker/domain/agent"
 	"github.com/david22573/codepicker/domain/task"
 	"github.com/david22573/codepicker/infra/fs"
 	"github.com/david22573/codepicker/infra/logging"
 )
 
-// MockAgent implements the domain/agent.Agent interface
+// MockAgent implements the domainAgent.Agent interface
 type MockAgent struct {
-	Response string
-	Error    error
+	Response  string
+	Error     error
+	sysMsg    string
+	ShadowMgr *fs.ShadowManager
+}
+
+func (m *MockAgent) Name() string {
+	return "MockAgent"
+}
+
+func (m *MockAgent) UpdateSystemPrompt(msg string) {
+	m.sysMsg = msg
+}
+
+func (m *MockAgent) GetSystemPrompt() string {
+	return m.sysMsg
 }
 
 func (m *MockAgent) Run(ctx context.Context, input string) (string, error) {
+	// Simulate agent making a change in the shadow FS DURING its execution
+	if m.ShadowMgr != nil {
+		_, _ = m.ShadowMgr.Write("main.go", []byte("package main\n"))
+	}
 	return m.Response, m.Error
 }
 
-// MockRepo implements agent.Repository
+// MockRepo implements domainAgent.Repository
 type MockRepo struct{}
 
 func (m *MockRepo) SavePlan(ctx context.Context, plan *task.Plan) error { return nil }
 func (m *MockRepo) GetPlan(ctx context.Context, id string) (*task.Plan, error) { return nil, nil }
-func (m *MockRepo) ListPlans(ctx context.Context, limit int) ([]agent.PlanSummary, error) { return nil, nil }
+func (m *MockRepo) ListPlans(ctx context.Context, limit int) ([]domainAgent.PlanSummary, error) { return nil, nil }
 func (m *MockRepo) DeletePlan(ctx context.Context, id string) error { return nil }
-func (m *MockRepo) SaveExecution(ctx context.Context, exec *agent.Execution) error { return nil }
-func (m *MockRepo) GetExecution(ctx context.Context, id string) (*agent.Execution, error) { return nil, nil }
-func (m *MockRepo) ListExecutions(ctx context.Context, limit int) ([]agent.ExecutionSummary, error) { return nil, nil }
+func (m *MockRepo) SaveExecution(ctx context.Context, exec *domainAgent.Execution) error { return nil }
+func (m *MockRepo) GetExecution(ctx context.Context, id string) (*domainAgent.Execution, error) { return nil, nil }
+func (m *MockRepo) ListExecutions(ctx context.Context, limit int) ([]domainAgent.ExecutionSummary, error) { return nil, nil }
+func (m *MockRepo) GetTotalCost(ctx context.Context) (float64, int, error) { return 0.0, 0, nil }
+func (m *MockRepo) VectorSearch(ctx context.Context, vector []float32, limit int) ([]domainAgent.SearchResult, error) { return nil, nil }
 
 func TestPlanExecutor_Integration(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "executor_integration_*")
@@ -44,10 +65,11 @@ func TestPlanExecutor_Integration(t *testing.T) {
 	workspaceMgr := fs.NewWorkspaceManager(tempDir)
 	shadowMgr := fs.NewShadowManager(tempDir, false)
 	mockRepo := &MockRepo{}
-	
+
 	mockWorker := &MockAgent{
-		Response: "Final Answer: completed task successfully",
-		Error:    nil,
+		Response:  "Final Answer: completed task successfully",
+		Error:     nil,
+		ShadowMgr: shadowMgr,
 	}
 
 	executor := agent.NewPlanExecutor(mockWorker, mockRepo, workspaceMgr, shadowMgr, logger)
@@ -65,9 +87,6 @@ func TestPlanExecutor_Integration(t *testing.T) {
 			},
 		},
 	}
-
-	// Simulate agent making a change in the shadow FS during its execution
-	_, _ = shadowMgr.Write("main.go", []byte("package main\n"))
 
 	err = executor.Execute(context.Background(), testPlan)
 	if err != nil {
