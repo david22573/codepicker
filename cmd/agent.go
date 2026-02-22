@@ -5,7 +5,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/david22573/codepicker/app"
@@ -30,7 +32,6 @@ var agentCmd = &cobra.Command{
 
 		cwd, _ := os.Getwd()
 
-		// Initialize Container with verbose flag from root command
 		container, err := app.NewContainer(apiKey, cwd, "", agentDryRun, false, GetVerbose())
 		if err != nil {
 			fmt.Printf("❌ Container Init Failed: %v\n", err)
@@ -38,7 +39,6 @@ var agentCmd = &cobra.Command{
 		}
 		defer container.Close()
 
-		// Start Metrics & Health Server
 		metricsPort := 9090
 		if container.Config != nil && container.Config.Server.MetricsPort != 0 {
 			metricsPort = container.Config.Server.MetricsPort
@@ -47,11 +47,10 @@ var agentCmd = &cobra.Command{
 		metricsSrv := metrics.NewServer(metricsPort)
 		metricsSrv.Start()
 
-		// Ensure graceful shutdown of metrics server
 		defer func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			if err := metricsSrv.Shutdown(ctx); err != nil {
+			if err := metricsSrv.Shutdown(shutdownCtx); err != nil {
 				fmt.Printf("⚠️ Metrics server shutdown error: %v\n", err)
 			}
 		}()
@@ -59,7 +58,6 @@ var agentCmd = &cobra.Command{
 		fmt.Println(color.CyanString("🤖 CodePicker Agent initialized."))
 		fmt.Println(color.HiBlackString("Type 'exit' or 'quit' to stop."))
 
-		// Generate the Primer (Project Map)
 		fmt.Print("🗺️  Loading project context... ")
 		primer := container.ProjectPrimer.Generate()
 		fmt.Println("Done.")
@@ -67,17 +65,32 @@ var agentCmd = &cobra.Command{
 		basePrompt := container.PlanExecutor.GetSystemPrompt()
 		cachedPrompt := fmt.Sprintf("%s\n\n### PROJECT CONTEXT (CACHED)\n%s", basePrompt, primer)
 
-		// This prompt will now be marked as "ephemeral" in the ReActAgent (from your previous step)
 		container.PlanExecutor.UpdateSystemPrompt(cachedPrompt)
-		// ----------------------------------------------------
 
 		reader := bufio.NewReader(os.Stdin)
-		ctx := context.Background()
+		
+		// 4.4 Signal Handling
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
 
-		// Main Interactive Loop
 		for {
 			fmt.Print(color.GreenString("\n> "))
-			input, _ := reader.ReadString('\n')
+
+			// Handle input reading in a way that respects context cancellation
+			inputChan := make(chan string)
+			go func() {
+				in, _ := reader.ReadString('\n')
+				inputChan <- in
+			}()
+
+			var input string
+			select {
+			case <-ctx.Done():
+				fmt.Println("\nGracefully shutting down...")
+				return
+			case input = <-inputChan:
+			}
+
 			input = strings.TrimSpace(input)
 
 			if input == "exit" || input == "quit" {
@@ -91,9 +104,6 @@ var agentCmd = &cobra.Command{
 				continue
 			}
 
-			// --- CHANGED: REMOVED PRIMER FROM INPUT ---
-			// Old: enhancedInput := fmt.Sprintf("PROJECT CONTEXT: ...", primer, input)
-			// New: We just send the user input. The context is already in the system prompt.
 			fmt.Println(color.HiBlackString("Thinking..."))
 
 			syntheticPlan := &task.Plan{
@@ -111,7 +121,6 @@ var agentCmd = &cobra.Command{
 				},
 			}
 
-			// Execute returns error; results are stored in the plan steps
 			err := container.PlanExecutor.Execute(ctx, syntheticPlan)
 			if err != nil {
 				fmt.Printf("❌ Error: %v\n", err)

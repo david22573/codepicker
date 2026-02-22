@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/david22573/codepicker/domain/agent"
+	"github.com/david22573/codepicker/domain/event"
 	"github.com/david22573/codepicker/domain/interaction"
 	"github.com/david22573/codepicker/infra/llm"
 	"github.com/david22573/codepicker/infra/logging"
@@ -72,7 +73,7 @@ Provide a clear, technical explanation of the bug and the required fix as your F
 
 	// Analyst uses ReActAgent, which handles its own budget checks internally
 	// We pass the guard's remaining limit or the global cap.
-	analyst := NewReActAgent(e.model, readTools, nil, e.logger, e.policy, e.costTracker, e.rateLimiter, e.budgetGuard.Remaining(), 100)
+	analyst := NewReActAgent(e.model, readTools, event.NewDataBus(), e.logger, e.policy, e.costTracker, e.rateLimiter, e.budgetGuard.Remaining(), 100)
 	analyst.UpdateSystemPrompt(systemPrompt)
 
 	input := fmt.Sprintf("TASK: %s\nInitial focus file: %s", task, contextFile)

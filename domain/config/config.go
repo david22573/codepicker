@@ -7,14 +7,14 @@ import (
 )
 
 type LLMConfig struct {
-	Model           string  `json:"model" yaml:"model"`
-	APIKey          string  `json:"api_key" yaml:"api_key"`
-	TimeoutSeconds  int     `json:"timeout_seconds" yaml:"timeout_seconds"`
-	MaxTokens       int     `json:"max_tokens" yaml:"max_tokens"`
-	Temperature     float64 `json:"temperature" yaml:"temperature"`
-	InputCostPer1M  float64 `json:"input_cost_per_1m" yaml:"input_cost_per_1m"`
-	OutputCostPer1M float64 `json:"output_cost_per_1m" yaml:"output_cost_per_1m"`
-	BudgetCap       float64 `json:"budget_cap" yaml:"budget_cap"`
+	Model            string  `json:"model" yaml:"model"`
+	DeprecatedAPIKey string  `json:"api_key,omitempty" yaml:"api_key,omitempty"` // Deprecated for security
+	TimeoutSeconds   int     `json:"timeout_seconds" yaml:"timeout_seconds"`
+	MaxTokens        int     `json:"max_tokens" yaml:"max_tokens"`
+	Temperature      float64 `json:"temperature" yaml:"temperature"`
+	InputCostPer1M   float64 `json:"input_cost_per_1m" yaml:"input_cost_per_1m"`
+	OutputCostPer1M  float64 `json:"output_cost_per_1m" yaml:"output_cost_per_1m"`
+	BudgetCap        float64 `json:"budget_cap" yaml:"budget_cap"`
 }
 
 type EmbeddingConfig struct {
@@ -48,17 +48,13 @@ func DefaultConfig() *AppConfig {
 	return &AppConfig{
 		Environment: "development",
 		LLM: LLMConfig{
-			// Recommended default: DeepSeek V3 or Claude 3.5 Sonnet for coding
 			Model:           "moonshotai/kimi-k2.5",
-			TimeoutSeconds:  3000, // Increased to 5 minutes for large refactors
+			TimeoutSeconds:  3000, 
 			MaxTokens:       8000,
 			Temperature:     0.0,
 			InputCostPer1M:  0.14,
 			OutputCostPer1M: 0.28,
-			// FIX: Increased from 2.00 to 10.00.
-			// A $2.00 limit is too aggressive for an agent that might read 100k+ tokens
-			// of context multiple times in a session.
-			BudgetCap: 10.00,
+			BudgetCap:       10.00,
 		},
 		Embedding: EmbeddingConfig{
 			Model:     "text-embedding-3-small",
@@ -66,9 +62,9 @@ func DefaultConfig() *AppConfig {
 			CostPer1M: 0.02,
 		},
 		Agent: AgentConfig{
-			MaxTurns:       2000, // Slight bump to allow for more complex reasoning loops
+			MaxTurns:       2000, 
 			UseReflexion:   true,
-			MaxContextSize: 200000, // Modern models handle 200k easily
+			MaxContextSize: 200000, 
 		},
 		Server: ServerConfig{
 			Port:        8080,

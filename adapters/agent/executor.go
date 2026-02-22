@@ -6,13 +6,15 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"sync" // Added sync for Once
+	"sync"
 
 	"github.com/david22573/codepicker/domain/agent"
 	"github.com/david22573/codepicker/domain/task"
 	infraCtx "github.com/david22573/codepicker/infra/context"
 	"github.com/david22573/codepicker/infra/fs"
+	"github.com/david22573/codepicker/infra/logging"
 	"github.com/fatih/color"
+	"go.uber.org/zap"
 )
 
 type PlanExecutor struct {
@@ -20,15 +22,17 @@ type PlanExecutor struct {
 	repo         agent.Repository
 	workspaceMgr *fs.WorkspaceManager
 	shadowMgr    *fs.ShadowManager
+	logger       *logging.Logger
 	autoConfirm  bool
 }
 
-func NewPlanExecutor(worker agent.Agent, repo agent.Repository, ws *fs.WorkspaceManager, shadow *fs.ShadowManager) *PlanExecutor {
+func NewPlanExecutor(worker agent.Agent, repo agent.Repository, ws *fs.WorkspaceManager, shadow *fs.ShadowManager, logger *logging.Logger) *PlanExecutor {
 	return &PlanExecutor{
 		worker:       worker,
 		repo:         repo,
 		workspaceMgr: ws,
 		shadowMgr:    shadow,
+		logger:       logger,
 		autoConfirm:  false,
 	}
 }
@@ -37,15 +41,12 @@ func (e *PlanExecutor) SetAutoConfirm(auto bool) {
 	e.autoConfirm = auto
 }
 
-// Add to PlanExecutor struct
 func (e *PlanExecutor) UpdateSystemPrompt(msg string) {
-	// Type assert to access the specific ReActAgent methods
 	if agent, ok := e.worker.(interface{ UpdateSystemPrompt(string) }); ok {
 		agent.UpdateSystemPrompt(msg)
 	}
 }
 
-// Add to PlanExecutor struct
 func (e *PlanExecutor) GetSystemPrompt() string {
 	if agent, ok := e.worker.(interface{ GetSystemPrompt() string }); ok {
 		return agent.GetSystemPrompt()
@@ -54,38 +55,39 @@ func (e *PlanExecutor) GetSystemPrompt() string {
 }
 
 func (e *PlanExecutor) Execute(ctx context.Context, plan *task.Plan) error {
-	// 1. Begin Transaction
 	txn, err := e.workspaceMgr.BeginTransaction()
 	if err != nil {
 		return fmt.Errorf("failed to start transaction: %w", err)
 	}
 
-	// 2. Link Shadow to Transaction (The Architectural Fix)
 	txn.AttachShadow(e.shadowMgr)
 
-	// Ensure we start with a clean slate
-	_ = e.shadowMgr.Clear()
+	if err := e.shadowMgr.Clear(); err != nil {
+		e.logger.Error("failed to clear shadow manager on start", zap.Error(err))
+	}
 
-	// FIX: Use sync.Once to prevent double rollback (defer + WatchContext)
 	var rollbackOnce sync.Once
 	doRollback := func() {
 		rollbackOnce.Do(func() {
 			if !txn.Committed {
 				fmt.Println("⚠️  Rolling back changes (restoring files + clearing shadow)...")
-				_ = txn.Rollback()
+				if err := txn.Rollback(); err != nil {
+					e.logger.Error("failed to rollback transaction", zap.Error(err))
+				}
 			}
 		})
 	}
 
 	defer doRollback()
 
-	// Use the returned stop function from WatchContext (assuming previous fix applied)
-	// or just pass the function if using the original signature.
-	// Here we use the idempotent wrapper.
-	infraCtx.WatchContext(ctx, doRollback)
+	stopWatch := infraCtx.WatchContext(ctx, doRollback)
+	defer stopWatch()
 
 	plan.Status = task.StatusRunning
-	_ = e.repo.SavePlan(ctx, plan)
+	if err := e.repo.SavePlan(ctx, plan); err != nil {
+		e.logger.Error("failed to persist plan state", zap.Error(err))
+	}
+
 	reader := bufio.NewReader(os.Stdin)
 
 	for _, step := range plan.Steps {
@@ -112,14 +114,13 @@ func (e *PlanExecutor) Execute(ctx context.Context, plan *task.Plan) error {
 			}
 		}
 
-		// Pre-Backup original files listed in the plan (safety net)
 		for _, file := range step.Files {
-			_ = txn.BackupFile(file)
+			if err := txn.BackupFile(file); err != nil {
+				e.logger.Error("failed to backup file", zap.String("file", file), zap.Error(err))
+			}
 		}
 
-		// 🔥 IMPROVED: Wrap the instruction with execution-focused context
 		workerInput := fmt.Sprintf(`EXECUTION MODE - You MUST use tools to complete this task.
-
 INSTRUCTION: %s
 
 TARGET FILES: %v
@@ -139,28 +140,28 @@ EXECUTION PATTERN:
 
 Execute the instruction NOW using your tools.`, step.Instruction, step.Files)
 
-		// Run Agent
 		result, err := e.worker.Run(ctx, workerInput)
 		if err != nil {
 			plan.MarkStepFailed(step.ID, err)
-			_ = e.repo.SavePlan(ctx, plan)
+			if err := e.repo.SavePlan(ctx, plan); err != nil {
+				e.logger.Error("failed to persist plan state", zap.Error(err))
+			}
 			return err
 		}
 
 		plan.MarkStepComplete(step.ID, result)
-		_ = e.repo.SavePlan(ctx, plan)
+		if err := e.repo.SavePlan(ctx, plan); err != nil {
+			e.logger.Error("failed to persist plan state", zap.Error(err))
+		}
 
-		// 3. Apply Changes Incrementally (The "See Your Work" Requirement)
 		changes, _ := e.shadowMgr.ListShadowFiles()
 
-		// 🔥 ADD: Warning if no changes were made
 		if len(changes) == 0 {
 			fmt.Printf("⚠️  WARNING: Step completed but no files were modified.\nAgent may not have used write_file.\n")
 			fmt.Printf("   Agent response: %s\n", result)
 		}
 
 		for _, file := range changes {
-			// CRITICAL: Backup file immediately before overwriting with shadow content
 			if err := txn.BackupFile(file); err != nil {
 				return fmt.Errorf("backup failed for %s: %w", file, err)
 			}
@@ -173,11 +174,14 @@ Execute the instruction NOW using your tools.`, step.Instruction, step.Files)
 		}
 	}
 
-	// 4. Finalize Transaction
 	if err := txn.Commit(); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
 	plan.Status = task.StatusCompleted
-	return e.repo.SavePlan(ctx, plan)
+	if err := e.repo.SavePlan(ctx, plan); err != nil {
+		e.logger.Error("failed to persist plan state", zap.Error(err))
+	}
+
+	return nil
 }

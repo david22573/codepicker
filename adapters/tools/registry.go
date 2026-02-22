@@ -19,15 +19,17 @@ func DefaultSet(
 		// 1. File Modification (Safe - goes to shadow)
 		NewWriteFileTool(shadow),
 
-		// 2. File Reading (Direct - reads from shadow + real fs)
-		// Pass shadow manager so agent can read its own pending writes
+		// 2. File Reading & Exploration
 		NewReadFileTool(root, shadow),
 		NewListDirTool(root),
+		NewSkeletonTool(root),
+		NewDefinitionSearchTool(root),
 
 		// 3. Search (Semantic)
 		NewSearchTool(embedder, repo),
 
-		// 4. Shell (Sandboxed & Shadow-Aware)
+		// 4. Git & Shell
+		NewGitDiffTool(root),
 		NewShellTool(sh, shadow),
 	}
 }

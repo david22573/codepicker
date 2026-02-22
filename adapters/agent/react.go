@@ -15,6 +15,12 @@ import (
 	"github.com/david22573/codepicker/infra/ratelimit"
 )
 
+const (
+	MaxObservationLength = 4000
+	ExpectedOutputTokens = 1024
+	DefaultMemoryTokens  = 16000
+)
+
 // ReActAgent implements the autonomous agent loop using Native Tool Calling.
 type ReActAgent struct {
 	model       *llm.OpenRouterAdapter
@@ -49,14 +55,12 @@ func NewReActAgent(
 	toolMap := make(map[string]agent.Tool)
 	var schemas []llm.ToolDefinition
 
-	// 1. Map Domain Tools to LLM Schemas using Reflection
 	for _, t := range tools {
 		name := t.Name()
 		toolMap[name] = t
 
 		inputStruct, exists := toolInputRegistry[name]
 		if !exists {
-			// Fallback for unknown tools
 			inputStruct = struct {
 				Input string `json:"input" desc:"The input argument for the tool"`
 			}{}
@@ -72,7 +76,9 @@ func NewReActAgent(
 	bg := llm.NewBudgetGuard(costTracker, budget)
 
 	baseTurns := maxTurns / 2
-	baseTurns = max(10)
+	if baseTurns < 10 {
+		baseTurns = 10
+	}
 
 	return &ReActAgent{
 		model:       model,
@@ -84,13 +90,15 @@ func NewReActAgent(
 		costTracker: costTracker,
 		controller:  NewAdaptiveController(baseTurns, maxTurns, costTracker, budget),
 		budgetGuard: bg,
-		processor:   NewObservationProcessor(4000),
+		processor:   NewObservationProcessor(MaxObservationLength),
 		rateLimiter: rateLimiter,
-		memory:      NewTurnMemory(16000), // Increased memory buffer for larger contexts
+		memory:      NewTurnMemory(DefaultMemoryTokens),
 		sysMsg: `You are CodePicker, an autonomous code execution agent with direct filesystem access.
+
 🎯 PRIMARY MODE: EXECUTION WITH TOOLS
 Your default behavior is to EXECUTE tasks using tools.
 You are not a consultant - you are a doer.
+
 CRITICAL RULES:
 1. ALWAYS use tools to accomplish tasks - NEVER just describe what should be done
 2. To modify any file, you MUST call write_file with the COMPLETE new file content
@@ -154,27 +162,24 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 		{Role: "user", Content: taskInput},
 	}
 
-	// Use range over integer (Go 1.22+)
 	for i := range maxTurns {
 		if infraCtx.IsCancelled(ctx) {
-			a.bus.Publish(event.Event{Type: event.EventError, Payload: map[string]any{"error": "cancelled"}})
+			if a.bus != nil {
+				a.bus.Publish(event.Event{Type: event.EventError, Payload: map[string]any{"error": "cancelled"}})
+			}
 			return "", fmt.Errorf("agent cancelled: %w", ctx.Err())
 		}
 
-		// --- CRITICAL: Budget Reservation ---
-		// 1. Estimate cost for this turn (Input + Expected Output)
 		inputTokens := a.memory.estimateTokens(a.history)
-		expectedOutputTokens := 1024 // Reserve for a reasonable output size
-		estimatedCost := a.costTracker.PredictCost(inputTokens, expectedOutputTokens)
+		estimatedCost := a.costTracker.PredictCost(inputTokens, ExpectedOutputTokens)
 
-		// 2. Attempt to reserve funds
 		if err := a.budgetGuard.Reserve(estimatedCost); err != nil {
-			a.bus.Publish(event.Event{Type: event.EventError, Payload: map[string]any{"error": "budget_exceeded"}})
+			if a.bus != nil {
+				a.bus.Publish(event.Event{Type: event.EventError, Payload: map[string]any{"error": "budget_exceeded"}})
+			}
 			return "", fmt.Errorf("halted by budget guard: %w", err)
 		}
 
-		// 3. Defer the commit (release reservation)
-		// We wrap the LLM call in a function to ensure defer runs immediately after the call
 		respMsg, err := func() (llm.Message, error) {
 			defer a.budgetGuard.Commit(estimatedCost)
 			msg, _, err := a.model.ChatNative(ctx, a.history, a.toolSchemas)
@@ -182,30 +187,34 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 		}()
 
 		if err != nil {
-			a.bus.Publish(event.Event{Type: event.EventError, Payload: map[string]any{"error": err.Error()}})
+			if a.bus != nil {
+				a.bus.Publish(event.Event{Type: event.EventError, Payload: map[string]any{"error": err.Error()}})
+			}
 			return "", err
 		}
-		// ------------------------------------
 
 		a.history = append(a.history, respMsg)
 
-		a.bus.Publish(event.Event{
-			Type: event.EventAgentThought,
-			Payload: map[string]any{
-				"turn":    i,
-				"content": respMsg.Content,
-			},
-			Timestamp: time.Now().Unix(),
-		})
+		if a.bus != nil {
+			a.bus.Publish(event.Event{
+				Type: event.EventAgentThought,
+				Payload: map[string]any{
+					"turn":    i,
+					"content": respMsg.Content,
+				},
+				Timestamp: time.Now().Unix(),
+			})
+		}
 
 		if len(respMsg.ToolCalls) == 0 {
 			if strings.Contains(respMsg.Content, "Final Answer:") || i > 0 {
-				a.bus.Publish(event.Event{Type: event.EventAgentFinish, Payload: map[string]any{"result": respMsg.Content}})
+				if a.bus != nil {
+					a.bus.Publish(event.Event{Type: event.EventAgentFinish, Payload: map[string]any{"result": respMsg.Content}})
+				}
 				return respMsg.Content, nil
 			}
 		}
 
-		// Parallel Execution Block
 		var wg sync.WaitGroup
 		var mu sync.Mutex
 
@@ -255,10 +264,12 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 					fmt.Printf("   📥 Input: %s\n", truncate(call.Function.Arguments, 200))
 				}
 
-				a.bus.Publish(event.Event{
-					Type:    event.EventToolStart,
-					Payload: map[string]any{"tool": call.Function.Name, "input": call.Function.Arguments},
-				})
+				if a.bus != nil {
+					a.bus.Publish(event.Event{
+						Type:    event.EventToolStart,
+						Payload: map[string]any{"tool": call.Function.Name, "input": call.Function.Arguments},
+					})
+				}
 
 				output, toolErr := tool.Execute(ctx, call.Function.Arguments)
 				if toolErr != nil {
@@ -267,10 +278,12 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 
 				processedOutput := a.processor.Process(output)
 
-				a.bus.Publish(event.Event{
-					Type:    event.EventToolEnd,
-					Payload: map[string]any{"tool": call.Function.Name, "status": "finished", "output": processedOutput},
-				})
+				if a.bus != nil {
+					a.bus.Publish(event.Event{
+						Type:    event.EventToolEnd,
+						Payload: map[string]any{"tool": call.Function.Name, "status": "finished", "output": processedOutput},
+					})
+				}
 
 				if a.verbose {
 					status := "✅"
@@ -323,7 +336,8 @@ var toolInputRegistry = map[string]any{
 		Path string `json:"path"`
 	}{},
 	"write_file": struct {
-		Path, Content string `json:"path,content"`
+		Path    string `json:"path" desc:"The file path to write to"`
+		Content string `json:"content" desc:"The complete file content to write"`
 	}{},
 	"list_dir": struct {
 		Path string `json:"path"`

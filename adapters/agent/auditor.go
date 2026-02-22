@@ -13,6 +13,7 @@ import (
 	"github.com/david22573/codepicker/infra/llm"
 	"github.com/david22573/codepicker/infra/logging"
 	"github.com/david22573/codepicker/infra/ratelimit"
+	"go.uber.org/zap"
 )
 
 type Auditor struct {
@@ -89,7 +90,7 @@ RULES:
 
 	scout.UpdateSystemPrompt(systemPrompt)
 
-	fmt.Println("📡 [SCOUT] Scanning for improvements using Native Tool Calling...")
+	a.logger.Info("scanning for improvements using Native Tool Calling", zap.String("phase", "scout"))
 	result, err := scout.Run(ctx, "Analyze the current directory and suggest 3 high-quality improvements.")
 	if err != nil {
 		return nil, fmt.Errorf("scout scanning failed: %w", err)
@@ -137,7 +138,7 @@ Your Final Answer MUST be a comprehensive Markdown report.`
 
 	auditAgent.UpdateSystemPrompt(systemPrompt)
 
-	fmt.Println("🔍 [AUDITOR] Starting comprehensive analysis...")
+	a.logger.Info("starting comprehensive analysis", zap.String("phase", "auditor"))
 	result, err := auditAgent.Run(ctx, input)
 	if err != nil {
 		return nil, fmt.Errorf("audit failed: %w", err)

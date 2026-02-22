@@ -43,21 +43,27 @@ func (t *ShellTool) Execute(ctx context.Context, args string) (string, error) {
 		return "", errors.NewValidation("tool.run_cmd", "command cannot be empty")
 	}
 
+	// Parse the command into executable and arguments to avoid bash -c injection
+	parts := strings.Fields(input.Command)
+	if len(parts) == 0 {
+		return "", errors.NewValidation("tool.run_cmd", "malformed command")
+	}
+
 	// 1. Check for Pending Shadow Changes
 	// If the agent has modified files that aren't committed yet, running 'go test'
 	// on the real directory will return results for the OLD code.
 	// We must detect this and spin up a sandbox.
 	pendingFiles, err := t.shadow.ListShadowFiles()
 	if err == nil && len(pendingFiles) > 0 {
-		return t.executeInSandbox(ctx, input.Command, pendingFiles)
+		return t.executeInSandbox(ctx, parts, pendingFiles)
 	}
 
 	// 2. Fast Path: No changes, run directly in project root
-	return t.exec.Run(ctx, "bash", "-c", input.Command)
+	return t.exec.Run(ctx, parts[0], parts[1:]...)
 }
 
 // executeInSandbox spins up a temporary copy of the repo, applies shadow changes, and runs the command.
-func (t *ShellTool) executeInSandbox(ctx context.Context, command string, changedFiles []string) (string, error) {
+func (t *ShellTool) executeInSandbox(ctx context.Context, parts []string, changedFiles []string) (string, error) {
 	fmt.Printf("📦 [run_cmd] Detected %d pending changes. Switching to SANDBOX mode for verification.\n", len(changedFiles))
 
 	// A. Create Sandbox (copy real files)
@@ -81,8 +87,8 @@ func (t *ShellTool) executeInSandbox(ctx context.Context, command string, change
 		sandbox.SandboxRoot,
 	)
 
-	// D. Execute
-	output, err := sandboxExec.Run(ctx, "bash", "-c", command)
+	// D. Execute safely without shell interpolation
+	output, err := sandboxExec.Run(ctx, parts[0], parts[1:]...)
 
 	// Add a footer to the output so the Agent knows what happened
 	footer := fmt.Sprintf("\n\n--- [Sandbox Execution Notice] ---\nCommand executed in a temporary environment with your %d pending changes applied.\nReal files were NOT modified.", len(changedFiles))

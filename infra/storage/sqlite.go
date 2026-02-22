@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"time"
 
 	"github.com/david22573/codepicker/domain/agent"
 	domainContext "github.com/david22573/codepicker/domain/context"
@@ -50,6 +51,8 @@ func NewSQLiteRepository(dbPath string) (*SQLiteRepository, error) {
 		hash TEXT,
 		embedding TEXT  -- Stored as JSON array of floats
 	);
+	CREATE INDEX IF NOT EXISTS idx_code_slices_file_path ON code_slices(file_path);
+	
 	CREATE TABLE IF NOT EXISTS plans (
 		id TEXT PRIMARY KEY,
 		task TEXT,
@@ -240,16 +243,22 @@ func (r *SQLiteRepository) ListPlans(ctx context.Context, limit int) ([]agent.Pl
 
 	var summaries []agent.PlanSummary
 	for rows.Next() {
-		var s agent.PlanSummary
-		var createdAtStr string
-		// Try scanning with time.Time
-		if err := rows.Scan(&s.ID, &s.OriginalTask, &s.Status, &s.CreatedAt); err != nil {
-			// Fallback if schema/scan fails, check strict error
-			if err2 := rows.Scan(&s.ID, &s.OriginalTask, &s.Status, &createdAtStr); err2 != nil {
-				// FIX: Don't ignore second failure
-				continue
-			}
+		var id, taskStr, statusStr, createdStr string
+		
+		if err := rows.Scan(&id, &taskStr, &statusStr, &createdStr); err != nil {
+			continue
 		}
+		
+		s := agent.PlanSummary{
+			ID:           id,
+			OriginalTask: taskStr,
+			Status:       task.Status(statusStr),
+		}
+		
+		if t, err := time.Parse(time.RFC3339, createdStr); err == nil {
+			s.CreatedAt = t
+		}
+		
 		summaries = append(summaries, s)
 	}
 	return summaries, nil

@@ -39,6 +39,12 @@ func (l *Loader) Load() (*config.AppConfig, error) {
 		if err := yaml.Unmarshal(data, cfg); err != nil {
 			return nil, fmt.Errorf("failed to parse config file: %w", err)
 		}
+
+		if cfg.LLM.DeprecatedAPIKey != "" {
+			fmt.Println("⚠️  [SECURITY WARNING] 'api_key' found in codepicker.yaml. Please remove it and use the OPENROUTER_API_KEY environment variable instead.")
+			cfg.LLM.DeprecatedAPIKey = "" // Wipe from memory
+		}
+
 		fmt.Printf("📄 [CONFIG] Loaded configuration from %s\n", resolvedPath)
 	} else {
 		// Only warn if the user explicitly provided a path that wasn't found
@@ -102,9 +108,6 @@ func (l *Loader) applyEnvOverrides(cfg *config.AppConfig) {
 	// LLM
 	if v := os.Getenv("CODEPICKER_LLM_MODEL"); v != "" {
 		cfg.LLM.Model = v
-	}
-	if v := os.Getenv("CODEPICKER_LLM_KEY"); v != "" {
-		cfg.LLM.APIKey = v
 	}
 	if v := os.Getenv("CODEPICKER_LLM_TIMEOUT"); v != "" {
 		if i, err := strconv.Atoi(v); err == nil {

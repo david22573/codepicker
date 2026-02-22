@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -34,12 +35,21 @@ Input: JSON with "path" (e.g., {"path": "main.go"}).`
 }
 
 func (t *ReadFileTool) Execute(ctx context.Context, args string) (string, error) {
-	cleanPath := strings.TrimSpace(args)
-	cleanPath = strings.TrimPrefix(cleanPath, `{"path":`)
-	cleanPath = strings.TrimPrefix(cleanPath, `{"path": `)
-	cleanPath = strings.TrimSuffix(cleanPath, `}`)
-	cleanPath = strings.ReplaceAll(cleanPath, `"`, "")
-	cleanPath = strings.TrimSpace(cleanPath)
+	var input struct {
+		Path string `json:"path"`
+	}
+
+	cleanPath := ""
+	if err := json.Unmarshal([]byte(args), &input); err != nil {
+		// Fallback: treat entire string as path (for backward compat if LLM forgets JSON)
+		cleanPath = strings.Trim(strings.TrimSpace(args), `"' `)
+	} else {
+		cleanPath = filepath.Clean(strings.TrimSpace(input.Path))
+	}
+
+	if cleanPath == "" {
+		return "", fmt.Errorf("path cannot be empty")
+	}
 
 	// 1. Check Shadow Layer first (Agent's pending changes)
 	if content, err := t.Shadow.Read(cleanPath); err == nil {
@@ -49,7 +59,7 @@ func (t *ReadFileTool) Execute(ctx context.Context, args string) (string, error)
 	// 2. Read from Real Filesystem (Safe Mode)
 	fullPath := filepath.Join(t.ProjectRoot, cleanPath)
 
-	// FIX: Use SafeReadFile to enforce size limits and binary detection
+	// Use SafeReadFile to enforce size limits and binary detection
 	content, err := fs.SafeReadFile(ctx, fullPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to read file '%s': %w", cleanPath, err)
@@ -73,11 +83,22 @@ func (t *ListDirTool) Name() string {
 
 func (t *ListDirTool) Description() string {
 	return `List files in a directory.
-Input: Relative path string (e.g., "./cmd").`
+Input: Relative path string (e.g., {"path": "./cmd"}).`
 }
 
 func (t *ListDirTool) Execute(ctx context.Context, args string) (string, error) {
-	cleanPath := strings.TrimSpace(strings.ReplaceAll(args, `"`, ""))
+	var input struct {
+		Path string `json:"path"`
+	}
+
+	cleanPath := ""
+	if err := json.Unmarshal([]byte(args), &input); err != nil {
+		// Fallback handling
+		cleanPath = strings.TrimSpace(strings.ReplaceAll(args, `"`, ""))
+	} else {
+		cleanPath = filepath.Clean(strings.TrimSpace(input.Path))
+	}
+
 	fullPath := filepath.Join(t.ProjectRoot, cleanPath)
 
 	entries, err := os.ReadDir(fullPath)

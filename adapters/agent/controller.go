@@ -6,6 +6,8 @@ import (
 	"github.com/david22573/codepicker/infra/llm"
 )
 
+const MinBudgetFactor = 0.1
+
 // AdaptiveController manages the agent's turn budget based on real-time feedback.
 type AdaptiveController struct {
 	baseTurns   int
@@ -27,20 +29,16 @@ func NewAdaptiveController(base, max int, tracker *llm.CostTracker, limit float6
 func (c *AdaptiveController) CalculateAllowedTurns(taskComplexity float64) int {
 	currentCost := c.costTracker.GetMetrics().TotalCost
 
-	// FIX: Hard stop if over budget.
-	// Previously, the ratio calc below would allow 10% turns even when over budget.
 	if c.budgetLimit > 0 && currentCost >= c.budgetLimit {
 		return 0
 	}
 
-	// If we are close to budget, restrict turns
 	budgetFactor := 1.0
 	if currentCost > 0 {
 		remainingRatio := (c.budgetLimit - currentCost) / c.budgetLimit
-		budgetFactor = math.Max(0.1, remainingRatio)
+		budgetFactor = math.Max(MinBudgetFactor, remainingRatio)
 	}
 
-	// Complexity scales turns from base up to max
 	calculated := float64(c.baseTurns) + (taskComplexity * float64(c.maxTurns-c.baseTurns))
 
 	finalTurns := int(calculated * budgetFactor)

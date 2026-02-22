@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/david22573/codepicker/domain/errors"
+	"github.com/david22573/codepicker/infra/pathutil"
 )
 
 const ShadowDir = ".codepicker/shadow"
@@ -30,7 +31,7 @@ func (s *ShadowManager) Write(relPath string, content []byte) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	cleanPath, err := s.sanitizePath(relPath)
+	cleanPath, err := pathutil.Clean(relPath)
 	if err != nil {
 		return "", err
 	}
@@ -53,7 +54,7 @@ func (s *ShadowManager) Read(relPath string) ([]byte, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	cleanPath, err := s.sanitizePath(relPath)
+	cleanPath, err := pathutil.Clean(relPath)
 	if err != nil {
 		return nil, err
 	}
@@ -71,7 +72,7 @@ func (s *ShadowManager) Commit(relPath string) error {
 		return nil
 	}
 
-	cleanPath, err := s.sanitizePath(relPath)
+	cleanPath, err := pathutil.Clean(relPath)
 	if err != nil {
 		return err
 	}
@@ -98,14 +99,12 @@ func (s *ShadowManager) Commit(relPath string) error {
 }
 
 // ExportTo copies all shadow files to a specific target directory.
-// This is used to hydrate a temporary sandbox with the "pending" state.
 func (s *ShadowManager) ExportTo(targetRoot string) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	shadowRoot := filepath.Join(s.ProjectRoot, ShadowDir)
 
-	// If no shadow dir exists, nothing to export
 	if _, err := os.Stat(shadowRoot); os.IsNotExist(err) {
 		return nil
 	}
@@ -118,21 +117,17 @@ func (s *ShadowManager) ExportTo(targetRoot string) error {
 			return nil
 		}
 
-		// Get path relative to .codepicker/shadow
 		rel, err := filepath.Rel(shadowRoot, path)
 		if err != nil {
 			return err
 		}
 
-		// Determine destination in the target root
 		destPath := filepath.Join(targetRoot, rel)
 
-		// Create dest dir
 		if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
 			return err
 		}
 
-		// Copy content
 		content, err := os.ReadFile(path)
 		if err != nil {
 			return err
@@ -148,7 +143,6 @@ func (s *ShadowManager) Clear() error {
 	defer s.mu.Unlock()
 
 	shadowRoot := filepath.Join(s.ProjectRoot, ShadowDir)
-	// Safety check: ensure we are actually deleting the shadow dir
 	if filepath.Base(shadowRoot) != "shadow" {
 		return fmt.Errorf("safety check failed: refusing to clear %s", shadowRoot)
 	}
@@ -185,7 +179,7 @@ func (s *ShadowManager) Diff(relPath string) (*FileChangeSummary, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	cleanPath, err := s.sanitizePath(relPath)
+	cleanPath, err := pathutil.Clean(relPath)
 	if err != nil {
 		return nil, err
 	}
@@ -216,7 +210,6 @@ func (s *ShadowManager) Diff(relPath string) (*FileChangeSummary, error) {
 		}, nil
 	}
 
-	// Simple byte comparison
 	if string(shadowContent) == string(realContent) {
 		return &FileChangeSummary{
 			Path:     cleanPath,
@@ -234,14 +227,6 @@ func (s *ShadowManager) Diff(relPath string) (*FileChangeSummary, error) {
 		NewLines:   shadowLines,
 		DeltaLines: shadowLines - realLines,
 	}, nil
-}
-
-func (s *ShadowManager) sanitizePath(relPath string) (string, error) {
-	clean := filepath.Clean(relPath)
-	if filepath.IsAbs(clean) {
-		return "", fmt.Errorf("absolute paths not allowed")
-	}
-	return clean, nil
 }
 
 func countLines(data []byte) int {

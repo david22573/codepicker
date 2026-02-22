@@ -7,8 +7,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var setVerbose bool
-
 var verboseFlag bool
 
 var rootCmd = &cobra.Command{
@@ -19,7 +17,7 @@ var rootCmd = &cobra.Command{
 
 // GetVerbose returns the value of the verbose flag for use by commands
 func GetVerbose() bool {
-	return setVerbose
+	return verboseFlag
 }
 
 func init() {

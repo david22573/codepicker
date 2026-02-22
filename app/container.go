@@ -2,16 +2,12 @@ package app
 
 import (
 	"context"
-	"fmt"
 	"path/filepath"
 	"time"
 
 	"github.com/david22573/codepicker/adapters/agent"
 	ctxAdapters "github.com/david22573/codepicker/adapters/context"
-	"github.com/david22573/codepicker/adapters/policy"
-	"github.com/david22573/codepicker/adapters/tools"
 	"github.com/david22573/codepicker/adapters/verifier"
-	domainAgent "github.com/david22573/codepicker/domain/agent"
 	"github.com/david22573/codepicker/domain/config"
 	domainCtx "github.com/david22573/codepicker/domain/context"
 	"github.com/david22573/codepicker/domain/event"
@@ -21,8 +17,6 @@ import (
 	"github.com/david22573/codepicker/infra/indexer"
 	"github.com/david22573/codepicker/infra/llm"
 	"github.com/david22573/codepicker/infra/logging"
-	"github.com/david22573/codepicker/infra/ratelimit"
-	"github.com/david22573/codepicker/infra/shell"
 	"github.com/david22573/codepicker/infra/storage"
 	"go.uber.org/zap"
 )
@@ -45,7 +39,6 @@ type Container struct {
 	EventBus         *event.DataBus
 	Logger           *logging.Logger
 	CostTracker      *llm.CostTracker
-	RateLimiter      *ratelimit.ToolRateLimiter
 	Config           *config.AppConfig
 
 	// Lifecycle management
@@ -54,7 +47,6 @@ type Container struct {
 }
 
 func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose bool) (*Container, error) {
-	// 1. Initialize Logger
 	env := "development"
 	if ciMode {
 		env = "production"
@@ -64,7 +56,6 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 		return nil, err
 	}
 
-	// 2. Load Configuration
 	cfgPath := filepath.Join(rootDir, "codepicker.yaml")
 	loader := infraConfig.NewLoader(cfgPath)
 	cfg, err := loader.Load()
@@ -80,118 +71,50 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 		cfg.Environment = "dry-run"
 	}
 
-	// 3. Infrastructure
-	dbPath := filepath.Join(rootDir, ".codepicker", "state.db")
-	repo, err := storage.NewSQLiteRepository(dbPath)
+	llmClient, costTracker, embedClient, err := NewLLMStack(apiKey, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to init sqlite: %w", err)
+		return nil, err
 	}
 
-	workspaceMgr := fs.NewWorkspaceManager(rootDir)
+	repo, workspaceMgr, shadowMgr, err := NewStorageStack(rootDir, dryRun)
+	if err != nil {
+		return nil, err
+	}
+
 	eventBus := event.NewDataBus()
 
-	costTracker := llm.NewCostTracker(cfg.LLM.InputCostPer1M, cfg.LLM.OutputCostPer1M)
-	_ = llm.NewBudgetGuard(costTracker, cfg.LLM.BudgetCap)
-
-	llmClient := llm.NewOpenRouterAdapter(
-		apiKey,
-		cfg.LLM.Model,
-		time.Duration(cfg.LLM.TimeoutSeconds)*time.Second,
+	worker, planner, executor, auditor, explainer, twoPass, reranker, err := NewAgentStack(
+		cfg, llmClient, costTracker, repo, workspaceMgr, shadowMgr, embedClient,
+		eventBus, logger, rootDir, dryRun, ciMode, verbose,
 	)
-
-	embedClient := llm.NewEmbeddingClient(apiKey, cfg.Embedding.Model)
-
-	shadowMgr := fs.NewShadowManager(rootDir, dryRun)
-	shellExec := shell.NewExecutor(30*time.Second, 5000, dryRun, rootDir)
-
-	allTools := tools.DefaultSet(shadowMgr, shellExec, rootDir, embedClient, repo)
-	rateLimiter := ratelimit.NewToolRateLimiter(20)
-
-	// 4. Policy
-	var guardRail domainAgent.Policy
-	if ciMode {
-		guardRail = policy.NewStrictPolicy(dryRun, ciMode)
-	} else {
-		policyConfig, _ := policy.LoadPolicy(filepath.Join(rootDir, "policy.json"))
-		guardRail = policy.NewEnforcer(*policyConfig, dryRun)
+	if err != nil {
+		return nil, err
 	}
 
-	// 5. Agents
-	worker := agent.NewReActAgent(
-		llmClient,
-		allTools,
-		eventBus,
-		logger,
-		guardRail,
-		costTracker,
-		rateLimiter,
-		cfg.LLM.BudgetCap,
-		cfg.Agent.MaxTurns,
-	)
-	worker.SetVerbose(verbose)
-
-	// UPDATE: Planner now takes standard client, but internally uses StructuredAdapter
-	planner := agent.NewPlanner(llmClient)
-
-	executor := agent.NewPlanExecutor(worker, repo, workspaceMgr, shadowMgr)
-
-	auditor := agent.NewAuditor(
-		llmClient,
-		repo,
-		allTools,
-		guardRail,
-		logger,
-		costTracker,
-		rateLimiter,
-		eventBus,
-		cfg.LLM.BudgetCap,
-	)
-
-	// UPDATE: Pass budget and tracker
-	explainer := agent.NewExplainer(llmClient, repo, costTracker, cfg.LLM.BudgetCap)
-
-	// 6. Two-Pass Engine
-	packedContent := ""
-	// UPDATE: Pass budget and tracker
-	twoPass := agent.NewTwoPassEngine(
-		llmClient,
-		repo,
-		allTools,
-		guardRail,
-		logger,
-		costTracker,
-		rateLimiter,
-		cfg.LLM.BudgetCap,
-		packedContent,
-	)
-
-	// 7. Context & Verification
 	slicer := indexer.NewCodeSlicer()
 	indexManager := indexer.NewIndexManager(slicer, repo, embedClient)
-
-	// UPDATE: Pass budget and tracker
-	reranker := ctxAdapters.NewReranker(llmClient, costTracker, cfg.LLM.BudgetCap)
-
 	ctxBuilder := ctxAdapters.NewSmartBuilder(repo, embedClient, reranker, cfg.Agent.MaxContextSize)
 	primer := ctxAdapters.NewProjectPrimer(rootDir)
 	verifierPipeline := verifier.NewPipeline(rootDir)
 
-	// Create container context for lifecycle management
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// 8. Background Cleanup (Managed)
+	// 8. Background Cleanup (Managed) - Race condition fixed with Ticker
 	go func() {
-		// Wait for shutdown or run cleanup
-		select {
-		case <-ctx.Done():
-			return // Container closing, skip cleanup
-		default:
-			cleanupPolicy := audit.CleanupPolicy{
-				MaxAge:   30 * 24 * time.Hour,
-				MaxCount: 100,
+		ticker := time.NewTicker(12 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return // Container closing, skip cleanup
+			case <-ticker.C:
+				cleanupPolicy := audit.CleanupPolicy{
+					MaxAge:   30 * 24 * time.Hour,
+					MaxCount: 100,
+				}
+				auditDir := filepath.Join(rootDir, ".codepicker", "audit")
+				_ = audit.CleanupAudits(auditDir, cleanupPolicy)
 			}
-			auditDir := filepath.Join(rootDir, ".codepicker", "audit")
-			_ = audit.CleanupAudits(auditDir, cleanupPolicy)
 		}
 	}()
 
@@ -212,7 +135,6 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 		EventBus:         eventBus,
 		Logger:           logger,
 		CostTracker:      costTracker,
-		RateLimiter:      rateLimiter,
 		Config:           cfg,
 		ctx:              ctx,
 		cancel:           cancel,
@@ -223,7 +145,6 @@ func (c *Container) Close() {
 	if c.cancel != nil {
 		c.cancel()
 	}
-
 	if c.Logger != nil {
 		_ = c.Logger.Sync()
 	}

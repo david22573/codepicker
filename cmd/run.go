@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 
 	"github.com/david22573/codepicker/app"
 	"github.com/david22573/codepicker/domain/task"
@@ -30,7 +32,6 @@ var runCmd = &cobra.Command{
 		taskDescription := args[0]
 		cwd, _ := os.Getwd()
 
-		// Initialize Container
 		container, err := app.NewContainer(apiKey, cwd, runLlmModel, runDryRun, runCiMode, GetVerbose())
 		if err != nil {
 			fmt.Printf("❌ Container Init Failed: %v\n", err)
@@ -38,13 +39,12 @@ var runCmd = &cobra.Command{
 		}
 		defer container.Close()
 
-		ctx := context.Background()
+		// 4.4 Signal Handling
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+
 		fmt.Printf("🚀 Running task: %s\n", taskDescription)
 
-		// 1. Load Context (The Primer)
-		// FIX: Use a Smart Primer strategy.
-		// If the user has manually packed context, use it.
-		// Otherwise, generate a SHALLOW (Depth 2) primer to save tokens during the planning phase.
 		var primer string
 		manualContextPath := filepath.Join(cwd, "codepicker_context.txt")
 
@@ -56,8 +56,6 @@ var runCmd = &cobra.Command{
 			primer = container.ProjectPrimer.GenerateShallow()
 		}
 
-		// 2. Generate a Plan
-		// We pass the primer as context so the planner knows the high-level file structure
 		fmt.Println("🧠 Generating execution plan...")
 		plan, err := container.Planner.CreatePlan(ctx, taskDescription, "", primer)
 		if err != nil {
@@ -67,20 +65,16 @@ var runCmd = &cobra.Command{
 
 		fmt.Printf("📝 Plan generated: %s (%d steps)\n", plan.ID, len(plan.Steps))
 
-		// 3. Configure Execution Mode
-		// If CI mode is on, we skip the interactive confirmation prompts
 		if runCiMode {
 			container.PlanExecutor.SetAutoConfirm(true)
 		}
 
-		// 4. Execute the Plan
 		err = container.PlanExecutor.Execute(ctx, plan)
 		if err != nil {
 			fmt.Printf("❌ Execution failed: %v\n", err)
 			os.Exit(1)
 		}
 
-		// 5. Final Report
 		fmt.Println("\n✅ Task Execution Completed.")
 		for _, step := range plan.Steps {
 			icon := "✅"
