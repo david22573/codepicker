@@ -10,11 +10,11 @@ import (
 	"syscall"
 	"time"
 
-	"[github.com/david22573/codepicker/app](https://github.com/david22573/codepicker/app)"
-	"[github.com/david22573/codepicker/domain/task](https://github.com/david22573/codepicker/domain/task)"
-	"[github.com/david22573/codepicker/infra/metrics](https://github.com/david22573/codepicker/infra/metrics)"
-	"[github.com/fatih/color](https://github.com/fatih/color)"
-	"[github.com/spf13/cobra](https://github.com/spf13/cobra)"
+	"github.com/david22573/codepicker/app"
+	"github.com/david22573/codepicker/domain/task"
+	"github.com/david22573/codepicker/infra/metrics"
+	"github.com/fatih/color"
+	"github.com/spf13/cobra"
 )
 
 var agentDryRun bool
@@ -68,7 +68,7 @@ var agentCmd = &cobra.Command{
 		container.PlanExecutor.UpdateSystemPrompt(cachedPrompt)
 
 		reader := bufio.NewReader(os.Stdin)
-		
+
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 
@@ -143,3 +143,4 @@ func init() {
 	agentCmd.Flags().BoolVarP(&agentVerbose, "verbose", "v", false, "Enable verbose output")
 	rootCmd.AddCommand(agentCmd)
 }
+
