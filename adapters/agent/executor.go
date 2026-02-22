@@ -96,6 +96,11 @@ func (e *PlanExecutor) Execute(ctx context.Context, plan *task.Plan) error {
 		}
 
 		if infraCtx.IsCancelled(ctx) {
+			// FIX: Mark step as failed due to cancellation, and use context.Background() to ensure it saves
+			plan.MarkStepFailed(step.ID, fmt.Errorf("aborted by user"))
+			if err := e.repo.SavePlan(context.Background(), plan); err != nil {
+				e.logger.Error("failed to persist plan state on cancel", zap.Error(err))
+			}
 			return fmt.Errorf("cancelled")
 		}
 
@@ -143,14 +148,17 @@ Execute the instruction NOW using your tools.`, step.Instruction, step.Files)
 		result, err := e.worker.Run(ctx, workerInput)
 		if err != nil {
 			plan.MarkStepFailed(step.ID, err)
-			if err := e.repo.SavePlan(ctx, plan); err != nil {
-				e.logger.Error("failed to persist plan state", zap.Error(err))
+
+			// FIX: Use context.Background() here as well to safely write the failure to SQLite
+			if err := e.repo.SavePlan(context.Background(), plan); err != nil {
+				e.logger.Error("failed to persist plan state on error", zap.Error(err))
 			}
 			return err
 		}
 
 		plan.MarkStepComplete(step.ID, result)
-		if err := e.repo.SavePlan(ctx, plan); err != nil {
+		// It's safe to use context.Background() here too to ensure DB state updates reliably
+		if err := e.repo.SavePlan(context.Background(), plan); err != nil {
 			e.logger.Error("failed to persist plan state", zap.Error(err))
 		}
 
@@ -179,9 +187,11 @@ Execute the instruction NOW using your tools.`, step.Instruction, step.Files)
 	}
 
 	plan.Status = task.StatusCompleted
-	if err := e.repo.SavePlan(ctx, plan); err != nil {
+	// Ensure the final completed state is strictly saved
+	if err := e.repo.SavePlan(context.Background(), plan); err != nil {
 		e.logger.Error("failed to persist plan state", zap.Error(err))
 	}
 
 	return nil
 }
+
