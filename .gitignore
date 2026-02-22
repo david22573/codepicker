@@ -31,16 +31,10 @@ go.work.sum
 # .idea/
 # .vscode/
 
+
+# CodePicker
+.codepicker/
+codepicker.yaml
+policy.json
+codepicker_context.txt
 codepicker
-codepicker_context.md
-.codepicker/
-
-# CodePicker
-.codepicker/
-codepicker.yaml
-policy.json
-
-# CodePicker
-.codepicker/
-codepicker.yaml
-policy.json
