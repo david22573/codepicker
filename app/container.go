@@ -83,7 +83,8 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 
 	eventBus := event.NewDataBus()
 
-	worker, planner, executor, auditor, explainer, twoPass, reranker, err := NewAgentStack(
+	// FIX: Use blank identifier to discard unused worker instance
+	_, planner, executor, auditor, explainer, twoPass, reranker, err := NewAgentStack(
 		cfg, llmClient, costTracker, repo, workspaceMgr, shadowMgr, embedClient,
 		eventBus, logger, rootDir, dryRun, ciMode, verbose,
 	)
@@ -99,7 +100,7 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// 8. Background Cleanup (Managed) - Race condition fixed with Ticker
+	// Background Cleanup (Managed)
 	go func() {
 		ticker := time.NewTicker(12 * time.Hour)
 		defer ticker.Stop()
