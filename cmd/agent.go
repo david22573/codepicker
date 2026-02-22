@@ -10,11 +10,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/david22573/codepicker/app"
-	"github.com/david22573/codepicker/domain/task"
-	"github.com/david22573/codepicker/infra/metrics"
-	"github.com/fatih/color"
-	"github.com/spf13/cobra"
+	"[github.com/david22573/codepicker/app](https://github.com/david22573/codepicker/app)"
+	"[github.com/david22573/codepicker/domain/task](https://github.com/david22573/codepicker/domain/task)"
+	"[github.com/david22573/codepicker/infra/metrics](https://github.com/david22573/codepicker/infra/metrics)"
+	"[github.com/fatih/color](https://github.com/fatih/color)"
+	"[github.com/spf13/cobra](https://github.com/spf13/cobra)"
 )
 
 var agentDryRun bool
@@ -69,14 +69,15 @@ var agentCmd = &cobra.Command{
 
 		reader := bufio.NewReader(os.Stdin)
 		
-		// 4.4 Signal Handling
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 
 		for {
 			fmt.Print(color.GreenString("\n> "))
 
-			// Handle input reading in a way that respects context cancellation
+			// Handle input reading in a way that respects context cancellation.
+			// Note: This goroutine may leak at shutdown if context is cancelled before input is read.
+			// This is accepted cosmetic behavior for a CLI app that is immediately exiting.
 			inputChan := make(chan string)
 			go func() {
 				in, _ := reader.ReadString('\n')

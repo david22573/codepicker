@@ -5,9 +5,10 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/david22573/codepicker/infra/pathutil"
 )
 
-// Enforcer implements agent.Policy with robust regex-based rules and whitelisting.
 type Enforcer struct {
 	config           PolicySchema
 	readOnly         bool
@@ -15,7 +16,6 @@ type Enforcer struct {
 	commandWhitelist map[string]bool
 }
 
-// NewEnforcer creates a production-hardened policy engine.
 func NewEnforcer(config PolicySchema, readOnly bool) *Enforcer {
 	var regexList []*regexp.Regexp
 	for _, keyword := range config.ForbiddenKeywords {
@@ -102,7 +102,6 @@ func (e *Enforcer) validateCommand(args string) (bool, string) {
 		return false, "BLOCKED: Command cannot be empty"
 	}
 
-	// FIX 1: Check for path traversal in command arguments
 	if strings.Contains(cleanCmd, "..") {
 		return false, "BLOCKED: Path traversal (..) detected in command"
 	}
@@ -117,7 +116,6 @@ func (e *Enforcer) validateCommand(args string) (bool, string) {
 		return false, fmt.Sprintf("BLOCKED: Command '%s' is not in the whitelist", baseCmd)
 	}
 
-	// FIX 2: Add missing dangerous operators to block list
 	dangerous := []string{"|", ">", "&&", "||", ";", "`", "$(", "<", ">>", "&"}
 	for _, d := range dangerous {
 		if strings.Contains(cleanCmd, d) {
@@ -140,8 +138,8 @@ func (e *Enforcer) validateFileSystemAccess(toolName, args string) (bool, string
 		return false, "BLOCKED: Path argument is missing"
 	}
 
-	if strings.Contains(input.Path, "..") {
-		return false, "BLOCKED: Path traversal (..) detected"
+	if _, err := pathutil.Clean(input.Path); err != nil {
+		return false, fmt.Sprintf("BLOCKED: %s", err.Error())
 	}
 
 	return true, ""

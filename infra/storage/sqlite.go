@@ -20,9 +20,6 @@ type SQLiteRepository struct {
 }
 
 func NewSQLiteRepository(dbPath string) (*SQLiteRepository, error) {
-	// FIX: Enable Write-Ahead Logging (WAL) and set a busy timeout (5000ms).
-	// WAL allows concurrent readers and one writer.
-	// busy_timeout ensures we wait for locks rather than failing immediately.
 	dsn := fmt.Sprintf("%s?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on", dbPath)
 
 	db, err := sql.Open("sqlite3", dsn)
@@ -30,14 +27,10 @@ func NewSQLiteRepository(dbPath string) (*SQLiteRepository, error) {
 		return nil, err
 	}
 
-	// FIX: Enforce strict serialization.
-	// While WAL supports concurrency, high-write pressure from the Indexer
-	// can still cause contention. Using 1 connection guarantees safety.
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(0)
 
-	// Schema Updated for Embeddings and Plans
 	schema := `
 	CREATE TABLE IF NOT EXISTS code_slices (
 		id TEXT PRIMARY KEY,
@@ -49,7 +42,7 @@ func NewSQLiteRepository(dbPath string) (*SQLiteRepository, error) {
 		slice_type TEXT,
 		symbols TEXT,
 		hash TEXT,
-		embedding TEXT  -- Stored as JSON array of floats
+		embedding TEXT
 	);
 	CREATE INDEX IF NOT EXISTS idx_code_slices_file_path ON code_slices(file_path);
 	
@@ -75,7 +68,6 @@ func NewSQLiteRepository(dbPath string) (*SQLiteRepository, error) {
 		return nil, err
 	}
 
-	// Auto-migrations: Robustly fix older DB schemas
 	migrations := []string{
 		"ALTER TABLE executions ADD COLUMN cost REAL DEFAULT 0.0",
 		"ALTER TABLE executions ADD COLUMN tokens INTEGER DEFAULT 0",
@@ -88,16 +80,12 @@ func NewSQLiteRepository(dbPath string) (*SQLiteRepository, error) {
 	}
 
 	for _, stmt := range migrations {
-		// Ignore errors for existing columns
 		_, _ = db.Exec(stmt)
 	}
 
 	return &SQLiteRepository{db: db}, nil
 }
 
-// --- Embedding Support (Vector Search) ---
-
-// UpdateSliceEmbedding saves the vector for a specific slice
 func (r *SQLiteRepository) UpdateSliceEmbedding(ctx context.Context, sliceID string, embedding []float32) error {
 	data, err := json.Marshal(embedding)
 	if err != nil {
@@ -107,9 +95,7 @@ func (r *SQLiteRepository) UpdateSliceEmbedding(ctx context.Context, sliceID str
 	return err
 }
 
-// VectorSearch implements the interface for semantic search
 func (r *SQLiteRepository) VectorSearch(ctx context.Context, vector []float32, limit int) ([]agent.SearchResult, error) {
-	// Re-use the logic from SearchByVector but map to SearchResult
 	slices, err := r.SearchByVector(ctx, vector, limit)
 	if err != nil {
 		return nil, err
@@ -120,13 +106,12 @@ func (r *SQLiteRepository) VectorSearch(ctx context.Context, vector []float32, l
 		results = append(results, agent.SearchResult{
 			FilePath: s.FilePath,
 			Content:  s.Content,
-			Score:    0.0, // Score calculation is internal to SearchByVector right now
+			Score:    0.0, 
 		})
 	}
 	return results, nil
 }
 
-// SearchByVector performs Cosine Similarity search in Go (Fast for local usage)
 func (r *SQLiteRepository) SearchByVector(ctx context.Context, queryVector []float32, limit int) ([]domainContext.CodeSlice, error) {
 	rows, err := r.db.QueryContext(ctx, "SELECT id, embedding FROM code_slices WHERE embedding IS NOT NULL")
 	if err != nil {
@@ -152,7 +137,9 @@ func (r *SQLiteRepository) SearchByVector(ctx context.Context, queryVector []flo
 		}
 
 		score := cosineSimilarity(queryVector, vec)
-		candidates = append(candidates, candidate{id: id, score: score})
+		if score > 0.3 {
+			candidates = append(candidates, candidate{id: id, score: score})
+		}
 	}
 
 	sort.Slice(candidates, func(i, j int) bool {
@@ -190,7 +177,6 @@ func cosineSimilarity(a, b []float32) float64 {
 	return dot / (math.Sqrt(magA) * math.Sqrt(magB))
 }
 
-// Helper to fetch single slice
 func (r *SQLiteRepository) GetSliceByID(ctx context.Context, id string) (*domainContext.CodeSlice, error) {
 	var s domainContext.CodeSlice
 	var symbolsStr, typeStr, hash string
@@ -211,8 +197,6 @@ func (r *SQLiteRepository) GetSliceByID(ctx context.Context, id string) (*domain
 	return &s, nil
 }
 
-// --- Existing Methods ---
-
 func (r *SQLiteRepository) SavePlan(ctx context.Context, plan *task.Plan) error {
 	data, err := json.Marshal(plan)
 	if err != nil {
@@ -225,7 +209,7 @@ func (r *SQLiteRepository) SavePlan(ctx context.Context, plan *task.Plan) error 
 
 func (r *SQLiteRepository) GetPlan(ctx context.Context, id string) (*task.Plan, error) {
 	var data string
-	err := r.db.QueryRowContext(ctx, "SELECT data FROM plans WHERE id = ?", id).Scan(&data)
+	err := r.db.QueryRowContext(ctx, "SELECT data FROM plans WHERE id = ?").Scan(&data)
 	if err != nil {
 		return nil, err
 	}
@@ -345,7 +329,6 @@ func (r *SQLiteRepository) SaveSlices(ctx context.Context, filePath string, slic
 }
 
 func (r *SQLiteRepository) SearchSlices(ctx context.Context, query string, limit int) ([]domainContext.CodeSlice, error) {
-	// Fallback legacy search using LIKE
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id, file_path, content, start_line, end_line, language, slice_type, symbols, hash, embedding 
 		FROM code_slices 

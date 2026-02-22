@@ -10,23 +10,20 @@ import (
 	"github.com/david22573/codepicker/domain/agent"
 	"github.com/david22573/codepicker/domain/task"
 	"github.com/david22573/codepicker/infra/llm"
+	"github.com/david22573/codepicker/infra/pathutil"
 )
 
-// Planner generates execution plans for complex tasks using structured JSON output.
 type Planner struct {
 	model llm.StructuredLLM
 }
 
-// NewPlanner creates a new planner with the structured LLM adapter.
 func NewPlanner(client agent.LLMClient) *Planner {
 	return &Planner{
 		model: llm.NewStructuredAdapter(client),
 	}
 }
 
-// CreatePlan creates a step-by-step plan for the given task.
 func (p *Planner) CreatePlan(ctx context.Context, taskDesc, fileContext, primer string) (*task.Plan, error) {
-	// Detailed prompt to guide the LLM toward a high-quality JSON response
 	systemPrompt := fmt.Sprintf(`You are CodePicker Planner. Your job is to create a detailed execution plan.
 
 PROJECT STRUCTURE:
@@ -56,7 +53,6 @@ You must output a single JSON object matching this schema:
 
 	userPrompt := fmt.Sprintf("Create a plan for: %s", taskDesc)
 
-	// Container for the structured response
 	var schema task.PlanSchema
 
 	if err := p.model.ChatJSON(ctx, systemPrompt, userPrompt, &schema); err != nil {
@@ -66,13 +62,10 @@ You must output a single JSON object matching this schema:
 	return p.convertSchemaToPlan(schema, taskDesc)
 }
 
-// OptimizePlan uses AI to refine an existing plan based on feedback.
 func (p *Planner) OptimizePlan(ctx context.Context, plan *task.Plan, feedback string) (*task.Plan, error) {
-	// Placeholder for future implementation (Reflexion loop)
 	return plan, nil
 }
 
-// convertSchemaToPlan transforms the JSON schema into the internal domain model.
 func (p *Planner) convertSchemaToPlan(schema task.PlanSchema, taskDesc string) (*task.Plan, error) {
 	planID := fmt.Sprintf("plan-%d", time.Now().UnixNano())
 	plan := task.NewPlan(planID, taskDesc, schema.Reasoning)
@@ -89,7 +82,6 @@ func (p *Planner) convertSchemaToPlan(schema task.PlanSchema, taskDesc string) (
 	return plan, nil
 }
 
-// cleanFilePaths sanitizes the file list returned by the LLM.
 func cleanFilePaths(paths []string) []string {
 	var cleaned []string
 	seen := make(map[string]bool)
@@ -99,18 +91,20 @@ func cleanFilePaths(paths []string) []string {
 		if path == "" || strings.HasSuffix(path, "/") {
 			continue
 		}
-		path = filepath.Clean(path)
+		
+		clean, err := pathutil.Clean(path)
+		if err != nil {
+			continue 
+		}
 
-		// Deduplicate and filter obvious non-files
-		if !seen[path] && looksLikeFile(path) {
-			cleaned = append(cleaned, path)
-			seen[path] = true
+		if !seen[clean] && looksLikeFile(clean) {
+			cleaned = append(cleaned, clean)
+			seen[clean] = true
 		}
 	}
 	return cleaned
 }
 
-// looksLikeFile checks if the path has an extension or is a known config file.
 func looksLikeFile(path string) bool {
 	base := filepath.Base(path)
 	if strings.Contains(base, ".") {

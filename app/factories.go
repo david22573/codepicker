@@ -20,6 +20,22 @@ import (
 	"github.com/david22573/codepicker/infra/storage"
 )
 
+type AgentStackOpts struct {
+	Config       *config.AppConfig
+	LLMClient    *llm.OpenRouterAdapter
+	CostTracker  *llm.CostTracker
+	Repo         *storage.SQLiteRepository
+	WorkspaceMgr *fs.WorkspaceManager
+	ShadowMgr    *fs.ShadowManager
+	EmbedClient  *llm.EmbeddingClient
+	EventBus     *event.DataBus
+	Logger       *logging.Logger
+	RootDir      string
+	DryRun       bool
+	CIMode       bool
+	Verbose      bool
+}
+
 func NewLLMStack(apiKey string, cfg *config.AppConfig) (*llm.OpenRouterAdapter, *llm.CostTracker, *llm.EmbeddingClient, error) {
 	costTracker := llm.NewCostTracker(cfg.LLM.InputCostPer1M, cfg.LLM.OutputCostPer1M)
 	llmClient := llm.NewOpenRouterAdapter(
@@ -42,77 +58,63 @@ func NewStorageStack(rootDir string, dryRun bool) (*storage.SQLiteRepository, *f
 	return repo, workspaceMgr, shadowMgr, nil
 }
 
-func NewAgentStack(
-	cfg *config.AppConfig,
-	llmClient *llm.OpenRouterAdapter,
-	costTracker *llm.CostTracker,
-	repo *storage.SQLiteRepository,
-	workspaceMgr *fs.WorkspaceManager,
-	shadowMgr *fs.ShadowManager,
-	embedClient *llm.EmbeddingClient,
-	eventBus *event.DataBus,
-	logger *logging.Logger,
-	rootDir string,
-	dryRun bool,
-	ciMode bool,
-	verbose bool,
-) (*agent.ReActAgent, *agent.Planner, *agent.PlanExecutor, *agent.Auditor, *agent.Explainer, *agent.TwoPassEngine, *ctxAdapters.Reranker, error) {
+func NewAgentStack(opts AgentStackOpts) (*agent.ReActAgent, *agent.Planner, *agent.PlanExecutor, *agent.Auditor, *agent.Explainer, *agent.TwoPassEngine, *ctxAdapters.Reranker, error) {
 
-	shellExec := shell.NewExecutor(30*time.Second, 5000, dryRun, rootDir)
-	allTools := tools.DefaultSet(shadowMgr, shellExec, rootDir, embedClient, repo)
+	shellExec := shell.NewExecutor(30*time.Second, 5000, opts.DryRun, opts.RootDir)
+	allTools := tools.DefaultSet(opts.ShadowMgr, shellExec, opts.RootDir, opts.EmbedClient, opts.Repo)
 	rateLimiter := ratelimit.NewToolRateLimiter(20)
 
 	var guardRail domainAgent.Policy
-	if ciMode {
-		guardRail = policy.NewStrictPolicy(dryRun, ciMode)
+	if opts.CIMode {
+		guardRail = policy.NewStrictPolicy(opts.DryRun, opts.CIMode)
 	} else {
-		policyConfig, _ := policy.LoadPolicy(filepath.Join(rootDir, "policy.json"))
-		guardRail = policy.NewEnforcer(*policyConfig, dryRun)
+		policyConfig, _ := policy.LoadPolicy(filepath.Join(opts.RootDir, "policy.json"))
+		guardRail = policy.NewEnforcer(*policyConfig, opts.DryRun)
 	}
 
 	worker := agent.NewReActAgent(
-		llmClient,
+		opts.LLMClient,
 		allTools,
-		eventBus,
-		logger,
+		opts.EventBus,
+		opts.Logger,
 		guardRail,
-		costTracker,
+		opts.CostTracker,
 		rateLimiter,
-		cfg.LLM.BudgetCap,
-		cfg.Agent.MaxTurns,
+		opts.Config.LLM.BudgetCap,
+		opts.Config.Agent.MaxTurns,
 	)
-	worker.SetVerbose(verbose)
+	worker.SetVerbose(opts.Verbose)
 
-	planner := agent.NewPlanner(llmClient)
-	executor := agent.NewPlanExecutor(worker, repo, workspaceMgr, shadowMgr, logger)
+	planner := agent.NewPlanner(opts.LLMClient)
+	executor := agent.NewPlanExecutor(worker, opts.Repo, opts.WorkspaceMgr, opts.ShadowMgr, opts.Logger)
 
 	auditor := agent.NewAuditor(
-		llmClient,
-		repo,
+		opts.LLMClient,
+		opts.Repo,
 		allTools,
 		guardRail,
-		logger,
-		costTracker,
+		opts.Logger,
+		opts.CostTracker,
 		rateLimiter,
-		eventBus,
-		cfg.LLM.BudgetCap,
+		opts.EventBus,
+		opts.Config.LLM.BudgetCap,
 	)
 
-	explainer := agent.NewExplainer(llmClient, repo, costTracker, cfg.LLM.BudgetCap)
+	explainer := agent.NewExplainer(opts.LLMClient, opts.Repo, opts.CostTracker, opts.Config.LLM.BudgetCap)
 
 	twoPass := agent.NewTwoPassEngine(
-		llmClient,
-		repo,
+		opts.LLMClient,
+		opts.Repo,
 		allTools,
 		guardRail,
-		logger,
-		costTracker,
+		opts.Logger,
+		opts.CostTracker,
 		rateLimiter,
-		cfg.LLM.BudgetCap,
+		opts.Config.LLM.BudgetCap,
 		"",
 	)
 
-	reranker := ctxAdapters.NewReranker(llmClient, costTracker, cfg.LLM.BudgetCap)
+	reranker := ctxAdapters.NewReranker(opts.LLMClient, opts.CostTracker, opts.Config.LLM.BudgetCap)
 
 	return worker, planner, executor, auditor, explainer, twoPass, reranker, nil
 }

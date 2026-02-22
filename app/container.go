@@ -21,7 +21,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// Container holds all the dependencies for the application.
 type Container struct {
 	Planner          *agent.Planner
 	PlanExecutor     *agent.PlanExecutor
@@ -41,7 +40,6 @@ type Container struct {
 	CostTracker      *llm.CostTracker
 	Config           *config.AppConfig
 
-	// Lifecycle management
 	ctx    context.Context
 	cancel context.CancelFunc
 }
@@ -83,11 +81,21 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 
 	eventBus := event.NewDataBus()
 
-	// FIX: Use blank identifier to discard unused worker instance
-	_, planner, executor, auditor, explainer, twoPass, reranker, err := NewAgentStack(
-		cfg, llmClient, costTracker, repo, workspaceMgr, shadowMgr, embedClient,
-		eventBus, logger, rootDir, dryRun, ciMode, verbose,
-	)
+	_, planner, executor, auditor, explainer, twoPass, reranker, err := NewAgentStack(AgentStackOpts{
+		Config:       cfg,
+		LLMClient:    llmClient,
+		CostTracker:  costTracker,
+		Repo:         repo,
+		WorkspaceMgr: workspaceMgr,
+		ShadowMgr:    shadowMgr,
+		EmbedClient:  embedClient,
+		EventBus:     eventBus,
+		Logger:       logger,
+		RootDir:      rootDir,
+		DryRun:       dryRun,
+		CIMode:       ciMode,
+		Verbose:      verbose,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -100,14 +108,13 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Background Cleanup (Managed)
 	go func() {
 		ticker := time.NewTicker(12 * time.Hour)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
-				return // Container closing, skip cleanup
+				return 
 			case <-ticker.C:
 				cleanupPolicy := audit.CleanupPolicy{
 					MaxAge:   30 * 24 * time.Hour,
