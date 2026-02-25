@@ -18,6 +18,7 @@ func DefaultSet(
 	return []agent.Tool{
 		// 1. File Modification (Safe - goes to shadow)
 		NewWriteFileTool(shadow),
+		NewEditFileTool(root, shadow),
 
 		// 2. File Reading & Exploration
 		NewReadFileTool(root, shadow),
@@ -33,3 +34,4 @@ func DefaultSet(
 		NewShellTool(sh, shadow),
 	}
 }
+

@@ -45,7 +45,7 @@ func NewSQLiteRepository(dbPath string) (*SQLiteRepository, error) {
 		embedding TEXT
 	);
 	CREATE INDEX IF NOT EXISTS idx_code_slices_file_path ON code_slices(file_path);
-	
+
 	CREATE TABLE IF NOT EXISTS plans (
 		id TEXT PRIMARY KEY,
 		task TEXT,
@@ -54,6 +54,7 @@ func NewSQLiteRepository(dbPath string) (*SQLiteRepository, error) {
 		data TEXT,
 		created_at DATETIME
 	);
+
 	CREATE TABLE IF NOT EXISTS executions (
 		id TEXT PRIMARY KEY,
 		plan_id TEXT,
@@ -106,7 +107,7 @@ func (r *SQLiteRepository) VectorSearch(ctx context.Context, vector []float32, l
 		results = append(results, agent.SearchResult{
 			FilePath: s.FilePath,
 			Content:  s.Content,
-			Score:    0.0, 
+			Score:    0.0,
 		})
 	}
 	return results, nil
@@ -203,7 +204,7 @@ func (r *SQLiteRepository) SavePlan(ctx context.Context, plan *task.Plan) error 
 		return err
 	}
 	query := `INSERT OR REPLACE INTO plans (id, task, reasoning, status, data, created_at) VALUES (?, ?, ?, ?, ?, ?)`
-	_, err = r.db.ExecContext(ctx, query, plan.ID, plan.OriginalTask, plan.Reasoning, plan.Status, string(data), plan.CreatedAt)
+	_, err = r.db.ExecContext(ctx, query, plan.ID, plan.OriginalTask, plan.Reasoning, string(plan.Status), string(data), plan.CreatedAt)
 	return err
 }
 
@@ -228,21 +229,21 @@ func (r *SQLiteRepository) ListPlans(ctx context.Context, limit int) ([]agent.Pl
 	var summaries []agent.PlanSummary
 	for rows.Next() {
 		var id, taskStr, statusStr, createdStr string
-		
+
 		if err := rows.Scan(&id, &taskStr, &statusStr, &createdStr); err != nil {
 			continue
 		}
-		
+
 		s := agent.PlanSummary{
 			ID:           id,
 			OriginalTask: taskStr,
 			Status:       task.Status(statusStr),
 		}
-		
+
 		if t, err := time.Parse(time.RFC3339, createdStr); err == nil {
 			s.CreatedAt = t
 		}
-		
+
 		summaries = append(summaries, s)
 	}
 	return summaries, nil
@@ -256,18 +257,29 @@ func (r *SQLiteRepository) DeletePlan(ctx context.Context, id string) error {
 func (r *SQLiteRepository) SaveExecution(ctx context.Context, exec *agent.Execution) error {
 	history, _ := json.Marshal(exec.History)
 	query := `INSERT OR REPLACE INTO executions (id, plan_id, status, history, start_time, cost, tokens) VALUES (?, ?, ?, ?, ?, ?, ?)`
-	_, err := r.db.ExecContext(ctx, query, exec.ID, exec.PlanID, exec.Status, string(history), exec.StartTime, exec.Cost, exec.Tokens)
+	_, err := r.db.ExecContext(ctx, query, exec.ID, exec.PlanID, string(exec.Status), string(history), exec.StartTime, exec.Cost, exec.Tokens)
 	return err
 }
 
 func (r *SQLiteRepository) GetExecution(ctx context.Context, id string) (*agent.Execution, error) {
 	var exec agent.Execution
-	var historyStr string
+	var historyStr, statusStr string
 	query := `SELECT id, plan_id, status, history, start_time, cost, tokens FROM executions WHERE id = ?`
-	err := r.db.QueryRowContext(ctx, query, id).Scan(&exec.ID, &exec.PlanID, &exec.Status, &historyStr, &exec.StartTime, &exec.Cost, &exec.Tokens)
+
+	err := r.db.QueryRowContext(ctx, query, id).Scan(
+		&exec.ID,
+		&exec.PlanID,
+		&statusStr,
+		&historyStr,
+		&exec.StartTime,
+		&exec.Cost,
+		&exec.Tokens,
+	)
 	if err != nil {
 		return nil, err
 	}
+
+	exec.Status = task.Status(statusStr)
 	json.Unmarshal([]byte(historyStr), &exec.History)
 	return &exec, nil
 }
@@ -282,9 +294,11 @@ func (r *SQLiteRepository) ListExecutions(ctx context.Context, limit int) ([]age
 	var list []agent.ExecutionSummary
 	for rows.Next() {
 		var s agent.ExecutionSummary
-		if err := rows.Scan(&s.ID, &s.PlanID, &s.Status, &s.StartTime); err != nil {
+		var statusStr string
+		if err := rows.Scan(&s.ID, &s.PlanID, &statusStr, &s.StartTime); err != nil {
 			return nil, err
 		}
+		s.Status = task.Status(statusStr)
 		list = append(list, s)
 	}
 	return list, nil
@@ -332,7 +346,8 @@ func (r *SQLiteRepository) SearchSlices(ctx context.Context, query string, limit
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id, file_path, content, start_line, end_line, language, slice_type, symbols, hash, embedding 
 		FROM code_slices 
-		WHERE content LIKE ? LIMIT ?`, "%"+query+"%", limit)
+		WHERE content LIKE ?
+		LIMIT ?`, "%"+query+"%", limit)
 	if err != nil {
 		return nil, err
 	}
@@ -373,9 +388,11 @@ func (r *SQLiteRepository) scanSlices(rows *sql.Rows) ([]domainContext.CodeSlice
 		var s domainContext.CodeSlice
 		var symbolsStr, typeStr string
 		var embedding sql.NullString
+
 		if err := rows.Scan(&s.ID, &s.FilePath, &s.Content, &s.StartLine, &s.EndLine, &s.Language, &typeStr, &symbolsStr, &s.Hash, &embedding); err != nil {
 			return nil, err
 		}
+
 		s.SliceType = domainContext.SliceType(typeStr)
 		json.Unmarshal([]byte(symbolsStr), &s.Symbols)
 		slices = append(slices, s)

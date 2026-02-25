@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/david22573/codepicker/domain/agent"
+	domainAgent "github.com/david22573/codepicker/domain/agent"
 	"github.com/david22573/codepicker/domain/event"
 	infraCtx "github.com/david22573/codepicker/infra/context"
 	"github.com/david22573/codepicker/infra/llm"
@@ -24,11 +24,11 @@ const (
 // ReActAgent implements the autonomous agent loop using Native Tool Calling.
 type ReActAgent struct {
 	model       *llm.OpenRouterAdapter
-	tools       map[string]agent.Tool
+	tools       map[string]domainAgent.Tool
 	toolSchemas []llm.ToolDefinition
 	bus         *event.DataBus
 	logger      *logging.Logger
-	policy      agent.Policy
+	policy      domainAgent.Policy
 	controller  *AdaptiveController
 	processor   *ObservationProcessor
 	rateLimiter *ratelimit.ToolRateLimiter
@@ -43,16 +43,16 @@ type ReActAgent struct {
 // NewReActAgent initializes the agent with a native tool-calling configuration.
 func NewReActAgent(
 	model *llm.OpenRouterAdapter,
-	tools []agent.Tool,
+	tools []domainAgent.Tool,
 	bus *event.DataBus,
 	logger *logging.Logger,
-	policy agent.Policy,
+	policy domainAgent.Policy,
 	costTracker *llm.CostTracker,
 	rateLimiter *ratelimit.ToolRateLimiter,
 	budget float64,
 	maxTurns int,
 ) *ReActAgent {
-	toolMap := make(map[string]agent.Tool)
+	toolMap := make(map[string]domainAgent.Tool)
 	var schemas []llm.ToolDefinition
 
 	for _, t := range tools {
@@ -96,40 +96,40 @@ func NewReActAgent(
 		sysMsg: `You are CodePicker, an autonomous code execution agent with direct filesystem access.
 
 🎯 PRIMARY MODE: EXECUTION WITH TOOLS
-Your default behavior is to EXECUTE tasks using tools.
-You are not a consultant - you are a doer.
+Your default behavior is to EXECUTE tasks using tools. You are not a consultant - you are a doer.
 
 CRITICAL RULES:
-1. ALWAYS use tools to accomplish tasks - NEVER just describe what should be done
-2. To modify any file, you MUST call write_file with the COMPLETE new file content
-3. To read any file, you MUST call read_file - never assume or guess file contents
-4. You work iteratively: read → analyze → write → verify
-5. When writing files, provide the FULL, COMPLETE file content - no partial updates or snippets
-6. The ONLY acceptable "Final Answer" is after you've used tools to complete the work
+1. ALWAYS use tools to accomplish tasks - NEVER just describe what should be done.
+2. To MODIFY an EXISTING file, you MUST use the edit_file tool with SEARCH/REPLACE blocks.
+3. To CREATE a NEW file, you MUST use the write_file tool.
+4. To read any file, you MUST call read_file - never assume or guess file contents.
+5. You work iteratively: read → analyze → edit → verify.
+6. The ONLY acceptable "Final Answer" is after you've used tools to complete the work.
 
 AVAILABLE TOOLS:
-• read_file: Read any file to understand its current state (MANDATORY before modifications)
-• write_file: Write complete file content (MANDATORY for making any code changes)
-• list_dir: List directory contents to explore the project structure
-• search_code: Semantic search across the codebase to find relevant code
-• run_cmd: Execute shell commands (use cautiously, mainly for verification)
+• read_file: Read a file to understand its current state (MANDATORY before modifications)
+• edit_file: Modify an existing file using SEARCH/REPLACE blocks
+• write_file: Create a completely new file
+• list_dir: List directory contents
+• search_code: Semantic search across the codebase
+• run_cmd: Execute shell commands for verification
 
-EXECUTION WORKFLOW:
-Step 1: Call read_file("service.go") to see the current implementation
-Step 2: Analyze what needs to change
-Step 3: Call write_file("service.go", "<COMPLETE modified file content>")
-Step 4: (Optional) Verify with read_file or run_cmd
-Step 5: Respond with "Final Answer: Successfully updated service.go..."
+EDITING FILES (edit_file format):
+When using edit_file, your "blocks" argument must look exactly like this:
+<<<<
+exact original code lines here
+====
+new replacement code lines here
+>>>>
+You can include multiple blocks in one call. The SEARCH block MUST match the file exactly (including whitespace).
 
 FORBIDDEN BEHAVIORS:
-❌ Responding "I would modify line 45 to..." without calling write_file
-❌ Providing code snippets/diffs without calling write_file
-❌ Making assumptions about file contents without calling read_file first
-❌ Writing partial updates like "replace this function with..."
-❌ Using tools only to "check" without making changes when changes are requested
+❌ Using write_file to modify an existing file (use edit_file instead!).
+❌ Responding "I would modify line 45 to..." without calling a tool.
+❌ Providing code snippets in your thought process without calling a tool.
+❌ Making assumptions about file contents without calling read_file first.
 
-DEFAULT BEHAVIOR: Execute with tools.
-Actions speak louder than words.`,
+DEFAULT BEHAVIOR: Execute with tools. Actions speak louder than words.`,
 	}
 }
 
@@ -162,7 +162,7 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 		{Role: "user", Content: taskInput},
 	}
 
-	for i := range maxTurns {
+	for i := 0; i < maxTurns; i++ {
 		if infraCtx.IsCancelled(ctx) {
 			if a.bus != nil {
 				a.bus.Publish(event.Event{Type: event.EventError, Payload: map[string]any{"error": "cancelled"}})
@@ -338,6 +338,10 @@ var toolInputRegistry = map[string]any{
 	"write_file": struct {
 		Path    string `json:"path" desc:"The file path to write to"`
 		Content string `json:"content" desc:"The complete file content to write"`
+	}{},
+	"edit_file": struct {
+		Path   string `json:"path" desc:"The existing file path to edit"`
+		Blocks string `json:"blocks" desc:"The SEARCH/REPLACE blocks"`
 	}{},
 	"list_dir": struct {
 		Path string `json:"path"`

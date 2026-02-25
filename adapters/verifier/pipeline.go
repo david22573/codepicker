@@ -3,7 +3,6 @@ package verifier
 import (
 	"context"
 	"fmt"
-	"os/exec"
 
 	"github.com/david22573/codepicker/infra/fs"
 )
@@ -20,11 +19,11 @@ func NewPipeline(root string) *Pipeline {
 // VerifyResult holds the outcome of the verification process.
 type VerifyResult struct {
 	Success bool
-	Stage   string // which stage failed (e.g., "go test")
-	Logs    string // output from the failed command
+	Stage   string
+	Logs    string
 }
 
-// Verify creates a sandbox, applies the patch, and runs the standard Go checks.
+// Verify creates a sandbox, applies the block replacements, and runs standard Go checks.
 func (p *Pipeline) Verify(ctx context.Context, patchDiff string) (*VerifyResult, error) {
 	fmt.Println("🧪 [VERIFY] Creating Sandbox Environment...")
 
@@ -34,18 +33,17 @@ func (p *Pipeline) Verify(ctx context.Context, patchDiff string) (*VerifyResult,
 	}
 	defer sandbox.Cleanup()
 
-	// 1. Apply Patch
-	fmt.Println("🧪 [VERIFY] Applying Patch to Sandbox...")
+	// 1. Apply Blocks
+	fmt.Println("🧪 [VERIFY] Applying Blocks to Sandbox...")
 	if err := sandbox.ApplyPatch([]byte(patchDiff)); err != nil {
 		return &VerifyResult{
 			Success: false,
-			Stage:   "git apply",
+			Stage:   "apply blocks",
 			Logs:    err.Error(),
 		}, nil
 	}
 
 	// 2. Run Checks
-	// We define the standard pipeline: Vet -> Test -> Build
 	checks := []struct {
 		Name string
 		Args []string
@@ -59,7 +57,6 @@ func (p *Pipeline) Verify(ctx context.Context, patchDiff string) (*VerifyResult,
 		fmt.Printf("🧪 [VERIFY] Running '%s'...\n", check.Name)
 		out, err := sandbox.RunGoCommand(ctx, check.Args...)
 		if err != nil {
-			// Verification Failed
 			return &VerifyResult{
 				Success: false,
 				Stage:   check.Name,
@@ -71,13 +68,10 @@ func (p *Pipeline) Verify(ctx context.Context, patchDiff string) (*VerifyResult,
 	return &VerifyResult{Success: true}, nil
 }
 
-// ApplyToReal effectively "merges" the verified patch to the real codebase.
-func (p *Pipeline) ApplyToReal(patchPath string) error {
-	cmd := exec.Command("git", "apply", patchPath)
-	cmd.Dir = p.ProjectRoot
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("apply failed: %s", string(out))
+// ApplyToReal directly applies the verified SEARCH/REPLACE blocks to the actual project files.
+func (p *Pipeline) ApplyToReal(patchDiff string) error {
+	if err := fs.ApplySearchReplaceBlocks(p.ProjectRoot, patchDiff); err != nil {
+		return fmt.Errorf("failed to apply verified blocks to real filesystem: %w", err)
 	}
 	return nil
 }

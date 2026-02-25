@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/david22573/codepicker/domain/agent"
+	domainAgent "github.com/david22573/codepicker/domain/agent"
 	"github.com/david22573/codepicker/domain/task"
 	infraCtx "github.com/david22573/codepicker/infra/context"
 	"github.com/david22573/codepicker/infra/fs"
@@ -18,15 +18,15 @@ import (
 )
 
 type PlanExecutor struct {
-	worker       agent.Agent
-	repo         agent.Repository
+	worker       domainAgent.Agent
+	repo         domainAgent.Repository
 	workspaceMgr *fs.WorkspaceManager
 	shadowMgr    *fs.ShadowManager
 	logger       *logging.Logger
 	autoConfirm  bool
 }
 
-func NewPlanExecutor(worker agent.Agent, repo agent.Repository, ws *fs.WorkspaceManager, shadow *fs.ShadowManager, logger *logging.Logger) *PlanExecutor {
+func NewPlanExecutor(worker domainAgent.Agent, repo domainAgent.Repository, ws *fs.WorkspaceManager, shadow *fs.ShadowManager, logger *logging.Logger) *PlanExecutor {
 	return &PlanExecutor{
 		worker:       worker,
 		repo:         repo,
@@ -42,14 +42,14 @@ func (e *PlanExecutor) SetAutoConfirm(auto bool) {
 }
 
 func (e *PlanExecutor) UpdateSystemPrompt(msg string) {
-	if agent, ok := e.worker.(interface{ UpdateSystemPrompt(string) }); ok {
-		agent.UpdateSystemPrompt(msg)
+	if agentInterface, ok := e.worker.(interface{ UpdateSystemPrompt(string) }); ok {
+		agentInterface.UpdateSystemPrompt(msg)
 	}
 }
 
 func (e *PlanExecutor) GetSystemPrompt() string {
-	if agent, ok := e.worker.(interface{ GetSystemPrompt() string }); ok {
-		return agent.GetSystemPrompt()
+	if agentInterface, ok := e.worker.(interface{ GetSystemPrompt() string }); ok {
+		return agentInterface.GetSystemPrompt()
 	}
 	return ""
 }
@@ -96,7 +96,6 @@ func (e *PlanExecutor) Execute(ctx context.Context, plan *task.Plan) error {
 		}
 
 		if infraCtx.IsCancelled(ctx) {
-			// FIX: Mark step as failed due to cancellation, and use context.Background() to ensure it saves
 			plan.MarkStepFailed(step.ID, fmt.Errorf("aborted by user"))
 			if err := e.repo.SavePlan(context.Background(), plan); err != nil {
 				e.logger.Error("failed to persist plan state on cancel", zap.Error(err))
@@ -131,16 +130,15 @@ INSTRUCTION: %s
 TARGET FILES: %v
 
 MANDATORY EXECUTION REQUIREMENTS:
-1. You MUST call read_file on each target file to see the current state
-2. You MUST call write_file with the COMPLETE modified file content
-3. You MUST NOT just describe what should be changed
-4. Providing code snippets without calling write_file = FAILURE
-5. Only respond "Final Answer:" after you have actually used write_file
+1. You MUST call read_file on each target file to see the current state.
+2. To modify files, you MUST call edit_file and provide precise SEARCH/REPLACE blocks.
+3. You MUST NOT just describe what should be changed.
+4. Only respond "Final Answer:" after you have actually used tools to make the code changes.
 
 EXECUTION PATTERN:
 → Call read_file for each target file
 → Analyze what needs to change based on the instruction
-→ Call write_file with the complete new file content
+→ Call edit_file with the exact <<<< ==== >>>> blocks 
 → Respond: "Final Answer: [description of what you actually did]"
 
 Execute the instruction NOW using your tools.`, step.Instruction, step.Files)
@@ -148,8 +146,6 @@ Execute the instruction NOW using your tools.`, step.Instruction, step.Files)
 		result, err := e.worker.Run(ctx, workerInput)
 		if err != nil {
 			plan.MarkStepFailed(step.ID, err)
-
-			// FIX: Use context.Background() here as well to safely write the failure to SQLite
 			if err := e.repo.SavePlan(context.Background(), plan); err != nil {
 				e.logger.Error("failed to persist plan state on error", zap.Error(err))
 			}
@@ -157,7 +153,6 @@ Execute the instruction NOW using your tools.`, step.Instruction, step.Files)
 		}
 
 		plan.MarkStepComplete(step.ID, result)
-		// It's safe to use context.Background() here too to ensure DB state updates reliably
 		if err := e.repo.SavePlan(context.Background(), plan); err != nil {
 			e.logger.Error("failed to persist plan state", zap.Error(err))
 		}
@@ -165,7 +160,7 @@ Execute the instruction NOW using your tools.`, step.Instruction, step.Files)
 		changes, _ := e.shadowMgr.ListShadowFiles()
 
 		if len(changes) == 0 {
-			fmt.Printf("⚠️  WARNING: Step completed but no files were modified.\nAgent may not have used write_file.\n")
+			fmt.Printf("⚠️  WARNING: Step completed but no files were modified.\nAgent may not have used edit_file or write_file.\n")
 			fmt.Printf("   Agent response: %s\n", result)
 		}
 
@@ -187,11 +182,9 @@ Execute the instruction NOW using your tools.`, step.Instruction, step.Files)
 	}
 
 	plan.Status = task.StatusCompleted
-	// Ensure the final completed state is strictly saved
 	if err := e.repo.SavePlan(context.Background(), plan); err != nil {
 		e.logger.Error("failed to persist plan state", zap.Error(err))
 	}
 
 	return nil
 }
-

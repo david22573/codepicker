@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/david22573/codepicker/domain/agent"
+	domainAgent "github.com/david22573/codepicker/domain/agent"
 	"github.com/david22573/codepicker/domain/event"
 	"github.com/david22573/codepicker/domain/interaction"
 	"github.com/david22573/codepicker/infra/llm"
@@ -15,25 +15,25 @@ import (
 
 type TwoPassEngine struct {
 	model         *llm.OpenRouterAdapter
-	repo          agent.Repository
-	tools         []agent.Tool
-	policy        agent.Policy
+	repo          domainAgent.Repository
+	tools         []domainAgent.Tool
+	policy        domainAgent.Policy
 	logger        *logging.Logger
 	costTracker   *llm.CostTracker
-	budgetGuard   *llm.BudgetGuard 
+	budgetGuard   *llm.BudgetGuard
 	rateLimiter   *ratelimit.ToolRateLimiter
 	PackedContext string
 }
 
 func NewTwoPassEngine(
 	model *llm.OpenRouterAdapter,
-	repo agent.Repository,
-	tools []agent.Tool,
-	policy agent.Policy,
+	repo domainAgent.Repository,
+	tools []domainAgent.Tool,
+	policy domainAgent.Policy,
 	logger *logging.Logger,
 	costTracker *llm.CostTracker,
 	rateLimiter *ratelimit.ToolRateLimiter,
-	budget float64, 
+	budget float64,
 	packedContext string,
 ) *TwoPassEngine {
 	bg := llm.NewBudgetGuard(costTracker, budget)
@@ -52,7 +52,7 @@ func NewTwoPassEngine(
 }
 
 func (e *TwoPassEngine) RunAnalysis(ctx context.Context, task, contextFile, primer string) (*interaction.Analysis, error) {
-	var readTools []agent.Tool
+	var readTools []domainAgent.Tool
 	for _, t := range e.tools {
 		name := t.Name()
 		if name != "write_file" && name != "run_cmd" {
@@ -62,8 +62,10 @@ func (e *TwoPassEngine) RunAnalysis(ctx context.Context, task, contextFile, prim
 
 	systemPrompt := fmt.Sprintf(`%s
 
-You are the CodePicker Analyst. Your goal is to diagnose the issue described in the TASK.
-You have READ-ONLY access. Locate the specific lines of code that need changing.
+You are the CodePicker Analyst.
+Your goal is to diagnose the issue described in the TASK.
+You have READ-ONLY access.
+Locate the specific lines of code that need changing.
 Provide a clear, technical explanation of the bug and the required fix as your Final Answer.`, primer)
 
 	bus := event.NewDataBus()
@@ -87,11 +89,21 @@ Provide a clear, technical explanation of the bug and the required fix as your F
 }
 
 func (e *TwoPassEngine) GeneratePatch(ctx context.Context, task string, analysis *interaction.Analysis) (*interaction.Patch, error) {
-	basePrompt := `You are the CodePicker Engineer. Write a Git Unified Diff to fix the issue.
+	basePrompt := `You are the CodePicker Engineer.
+Write SEARCH/REPLACE blocks to fix the issue.
+
 RULES:
-1. Output ONLY raw diff content.
-2. Context lines must match the original file EXACTLY (including whitespace).
-3. If you are unsure about exact context matching, use larger context blocks.`
+1. Output ONLY SEARCH/REPLACE blocks. Do not explain your changes.
+2. The SEARCH block MUST match the existing file exactly, including whitespace and indentation.
+3. You may use multiple blocks for multiple changes.
+
+FORMAT:
+### relative/path/to/file.go
+<<<<
+exact original code to be replaced
+====
+new replacement code
+>>>>`
 
 	systemPrompt := basePrompt
 	if e.PackedContext != "" {
@@ -121,9 +133,12 @@ RULES:
 }
 
 func (e *TwoPassEngine) RefinePatch(ctx context.Context, task string, analysis *interaction.Analysis, originalDiff string, feedback string) (*interaction.Patch, error) {
-	systemPrompt := `You are the CodePicker Repair Engineer. The previous patch failed. Correct the Git Unified Diff based on the error feedback. Output ONLY the raw diff.`
+	systemPrompt := `You are the CodePicker Repair Engineer.
+The previous SEARCH/REPLACE block failed to apply. Correct it based on the error feedback.
+Ensure your SEARCH block matches the file exactly.
+Output ONLY the raw SEARCH/REPLACE block.`
 
-	userPrompt := fmt.Sprintf("TASK: %s FAILED\nPATCH: %s\nERROR: %s", task, originalDiff, feedback)
+	userPrompt := fmt.Sprintf("TASK: %s FAILED\nBLOCK:\n%s\nERROR: %s", task, originalDiff, feedback)
 
 	messages := []llm.Message{
 		{Role: "system", Content: systemPrompt},
@@ -149,8 +164,13 @@ func (e *TwoPassEngine) RefinePatch(ctx context.Context, task string, analysis *
 
 func cleanPatch(raw string) string {
 	raw = strings.TrimSpace(raw)
-	raw = strings.TrimPrefix(raw, "```diff")
-	raw = strings.TrimPrefix(raw, "```")
-	raw = strings.TrimSuffix(raw, "```")
+	// Strip markdown formatting if the LLM wraps the blocks
+	if strings.HasPrefix(raw, "```") {
+		lines := strings.Split(raw, "\n")
+		if len(lines) > 2 {
+			raw = strings.Join(lines[1:len(lines)-1], "\n")
+		}
+	}
 	return strings.TrimSpace(raw)
 }
+
