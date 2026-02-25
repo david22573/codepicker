@@ -15,6 +15,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
+// SQLiteRepository is the SQLite-based implementation of the persistence layer for plans, executions, and code slices.
 type SQLiteRepository struct {
 	db *sql.DB
 }

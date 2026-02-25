@@ -13,7 +13,13 @@ func NewObservationProcessor(maxChars int) *ObservationProcessor {
 }
 
 // Process sanitizes and truncates tool output for the next turn.
-func (p *ObservationProcessor) Process(output string) string {
+// It explicitly bypasses truncation for file reads to ensure the LLM has exact context for patching.
+func (p *ObservationProcessor) Process(toolName, output string) string {
+	// DO NOT truncate file reads or git diffs, as the LLM needs exact strings to write SEARCH blocks.
+	if toolName == "read_file" || toolName == "git_diff" {
+		return output
+	}
+
 	if len(output) <= p.maxChars {
 		return output
 	}
@@ -31,6 +37,6 @@ func (p *ObservationProcessor) Process(output string) string {
 
 // FormatForKimi adds specific cues that help K2.5 distinguish system vs tool output.
 func (p *ObservationProcessor) FormatForKimi(toolName, output string) string {
-	processed := p.Process(output)
+	processed := p.Process(toolName, output)
 	return fmt.Sprintf("[TOOL_RESULT: %s]\n%s\n[END_RESULT]", toolName, processed)
 }

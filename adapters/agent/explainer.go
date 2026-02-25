@@ -5,17 +5,17 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/david22573/codepicker/domain/agent"
+	domainAgent "github.com/david22573/codepicker/domain/agent"
 	"github.com/david22573/codepicker/infra/llm"
 )
 
 type Explainer struct {
-	model       agent.LLMClient
-	repo        agent.Repository
-	budgetGuard *llm.BudgetGuard // Added
+	model       domainAgent.LLMClient
+	repo        domainAgent.Repository
+	budgetGuard *llm.BudgetGuard
 }
 
-func NewExplainer(model agent.LLMClient, repo agent.Repository, costTracker *llm.CostTracker, budget float64) *Explainer {
+func NewExplainer(model domainAgent.LLMClient, repo domainAgent.Repository, costTracker *llm.CostTracker, budget float64) *Explainer {
 	return &Explainer{
 		model:       model,
 		repo:        repo,
@@ -49,7 +49,7 @@ func (e *Explainer) Explain(ctx context.Context, executionID string) (string, er
 	}
 
 	// 3. Prompt the LLM for analysis
-	systemPrompt := `You are an AI Explainability Specialist. 
+	systemPrompt := `You are an AI Explainability Specialist.
 Your goal is to analyze the execution trace of an autonomous coding agent.
 Explain the agent's strategy, identify any errors in reasoning, and summarize the outcome.
 Be concise and objective.`
@@ -57,7 +57,6 @@ Be concise and objective.`
 	userPrompt := fmt.Sprintf("Analyze this execution trace:\n\n%s", trace.String())
 
 	// --- BUDGET PROTECTION ---
-	// Explanations can be long, reserve $0.002
 	estCost := 0.002
 	if err := e.budgetGuard.Reserve(estCost); err != nil {
 		return "", fmt.Errorf("explanation halted by budget: %w", err)

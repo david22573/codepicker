@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/david22573/codepicker/domain/agent"
+	domainAgent "github.com/david22573/codepicker/domain/agent"
 	"github.com/david22573/codepicker/domain/audit"
 	"github.com/david22573/codepicker/domain/event"
 	"github.com/david22573/codepicker/infra/llm"
@@ -18,27 +18,27 @@ import (
 
 type Auditor struct {
 	model       *llm.OpenRouterAdapter
-	repo        agent.Repository
-	tools       []agent.Tool
-	policy      agent.Policy
+	repo        domainAgent.Repository
+	tools       []domainAgent.Tool
+	policy      domainAgent.Policy
 	logger      *logging.Logger
 	costTracker *llm.CostTracker
 	rateLimiter *ratelimit.ToolRateLimiter
 	bus         *event.DataBus
-	budget      float64 // FIX: Store budget to allocate to sub-agents
+	budget      float64
 }
 
 // NewAuditor initializes the auditor with a budget cap.
 func NewAuditor(
 	model *llm.OpenRouterAdapter,
-	repo agent.Repository,
-	tools []agent.Tool,
-	policy agent.Policy,
+	repo domainAgent.Repository,
+	tools []domainAgent.Tool,
+	policy domainAgent.Policy,
 	logger *logging.Logger,
 	costTracker *llm.CostTracker,
 	rateLimiter *ratelimit.ToolRateLimiter,
 	bus *event.DataBus,
-	budget float64, // FIX: Added budget argument
+	budget float64,
 ) *Auditor {
 	return &Auditor{
 		model:       model,
@@ -70,7 +70,6 @@ RULES:
 1. You MUST use tools to see the code.
 2. Your Final Answer must list the improvements, each starting with "TASK: ".`, primer)
 
-	// FIX: Allocate 20% of budget to the Scout (cheap, fast scan)
 	scoutBudget := a.budget * 0.20
 	if scoutBudget < 0.2 {
 		scoutBudget = 0.2 // Minimum floor
@@ -118,7 +117,6 @@ Your goal is to AUDIT the codebase for vulnerabilities, technical debt, and arch
 STRICT READ-ONLY MODE: You cannot modify any files.
 Your Final Answer MUST be a comprehensive Markdown report.`
 
-	// FIX: Allocate 80% of budget to the Auditor (expensive, deep analysis)
 	auditBudget := a.budget * 0.80
 	if auditBudget < 1.0 {
 		auditBudget = 1.0 // Minimum floor
@@ -157,3 +155,4 @@ Your Final Answer MUST be a comprehensive Markdown report.`
 		Artifact:  fileName,
 	}, nil
 }
+

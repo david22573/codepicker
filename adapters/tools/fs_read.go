@@ -51,20 +51,33 @@ func (t *ReadFileTool) Execute(ctx context.Context, args string) (string, error)
 		return "", fmt.Errorf("path cannot be empty")
 	}
 
+	var content []byte
+	var err error
+
 	// 1. Check Shadow Layer first (Agent's pending changes)
-	if content, err := t.Shadow.Read(cleanPath); err == nil {
-		return string(content), nil
-	}
-
-	// 2. Read from Real Filesystem (Safe Mode)
-	fullPath := filepath.Join(t.ProjectRoot, cleanPath)
-
-	// Use SafeReadFile to enforce size limits and binary detection
-	content, err := fs.SafeReadFile(ctx, fullPath)
+	content, err = t.Shadow.Read(cleanPath)
 	if err != nil {
-		return "", fmt.Errorf("failed to read file '%s': %w", cleanPath, err)
+		// 2. Read from Real Filesystem (Safe Mode)
+		fullPath := filepath.Join(t.ProjectRoot, cleanPath)
+		content, err = fs.SafeReadFile(ctx, fullPath)
+		if err != nil {
+			return "", fmt.Errorf("failed to read file '%s': %w", cleanPath, err)
+		}
 	}
-	return string(content), nil
+
+	// Add line numbers for spatial anchoring
+	lines := strings.Split(string(content), "\n")
+	var builder strings.Builder
+
+	builder.WriteString(fmt.Sprintf("--- Contents of %s ---\n", cleanPath))
+	builder.WriteString("IMPORTANT: Line numbers are provided for reference only.\n")
+	builder.WriteString("DO NOT include the line numbers in your edit_file SEARCH/REPLACE blocks!\n\n")
+
+	for i, line := range lines {
+		builder.WriteString(fmt.Sprintf("%4d | %s\n", i+1, line))
+	}
+
+	return builder.String(), nil
 }
 
 // --- ListDirTool ---
@@ -120,3 +133,4 @@ func (t *ListDirTool) Execute(ctx context.Context, args string) (string, error) 
 	}
 	return strings.Join(results, "\n"), nil
 }
+

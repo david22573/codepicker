@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/david22573/codepicker/domain/agent"
+	domainAgent "github.com/david22573/codepicker/domain/agent"
 	"github.com/david22573/codepicker/domain/task"
 	"github.com/david22573/codepicker/infra/llm"
 	"github.com/david22573/codepicker/infra/pathutil"
@@ -17,7 +17,7 @@ type Planner struct {
 	model llm.StructuredLLM
 }
 
-func NewPlanner(client agent.LLMClient) *Planner {
+func NewPlanner(client domainAgent.LLMClient) *Planner {
 	return &Planner{
 		model: llm.NewStructuredAdapter(client),
 	}
@@ -91,10 +91,10 @@ func cleanFilePaths(paths []string) []string {
 		if path == "" || strings.HasSuffix(path, "/") {
 			continue
 		}
-		
+
 		clean, err := pathutil.Clean(path)
 		if err != nil {
-			continue 
+			continue
 		}
 
 		if !seen[clean] && looksLikeFile(clean) {
@@ -118,3 +118,4 @@ func looksLikeFile(path string) bool {
 	}
 	return false
 }
+

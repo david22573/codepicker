@@ -3,8 +3,10 @@ package context
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
+	domainCtx "github.com/david22573/codepicker/domain/context"
 	"github.com/david22573/codepicker/domain/errors"
 	"github.com/david22573/codepicker/infra/indexer"
 	"github.com/david22573/codepicker/infra/llm"
@@ -31,18 +33,17 @@ func (b *SmartBuilder) BuildForTask(query string) (string, error) {
 }
 
 func (b *SmartBuilder) BuildContext(ctx context.Context, query string) (string, error) {
-	// 1. Vector Retrieval (Fetch top 50 candidates)
+	// 1. Vector Retrieval (Increased to 100 candidates to cast a wider net)
 	vectors, _, err := b.embedder.CreateEmbeddings(ctx, []string{query})
 	if err != nil {
 		return "", errors.NewSystem("context.build", "embedding failed", err)
 	}
 
-	// FIX: Check if we actually got a vector back
 	if len(vectors) == 0 {
 		return "", errors.NewSystem("context.build", "no embedding generated", nil)
 	}
 
-	candidates, err := b.repo.SearchByVector(ctx, vectors[0], 50)
+	candidates, err := b.repo.SearchByVector(ctx, vectors[0], 100)
 	if err != nil {
 		return "", errors.NewSystem("context.build", "vector search failed", err)
 	}
@@ -51,40 +52,72 @@ func (b *SmartBuilder) BuildContext(ctx context.Context, query string) (string, 
 		return "No relevant code found.", nil
 	}
 
-	// 2. Re-Ranking (LLM filters and orders them)
+	// 2. Re-Ranking (LLM filters and orders them by semantic importance)
 	ranked, err := b.reranker.Rank(ctx, query, candidates)
 	if err != nil {
-		// Log warning but continue with vector results
 		ranked = candidates
 	}
 
-	// 3. Packing (Token Budgeting)
+	// 3. Grouping and Chronological Sorting
+	// Instead of scattering snippets, group them by file and sort by line number
+	// to provide the LLM with contiguous, readable logic blocks.
+	grouped := make(map[string][]domainCtx.CodeSlice)
+	var orderedFiles []string
+	seenFiles := make(map[string]bool)
+
+	for _, slice := range ranked {
+		grouped[slice.FilePath] = append(grouped[slice.FilePath], slice)
+
+		// Maintain the LLM's file-level priority based on the first occurrence of a file in the ranked list
+		if !seenFiles[slice.FilePath] {
+			orderedFiles = append(orderedFiles, slice.FilePath)
+			seenFiles[slice.FilePath] = true
+		}
+	}
+
+	// 4. Packing (Token Budgeting)
 	var builder strings.Builder
 	builder.WriteString("### RELEVANT CODE CONTEXT (RAG Optimized)\n")
 
 	usedTokens := 0
 	includedCount := 0
 
-	for _, slice := range ranked {
-		// Estimate tokens: 4 chars / token
-		contentTokens := len(slice.Content) / 4
-		overhead := 20
-		cost := contentTokens + overhead
+	for _, filePath := range orderedFiles {
+		slices := grouped[filePath]
 
-		if usedTokens+cost > b.maxTokens {
-			continue
+		// Sort slices within the file chronologically by StartLine
+		sort.Slice(slices, func(i, j int) bool {
+			return slices[i].StartLine < slices[j].StartLine
+		})
+
+		fileHeaderAdded := false
+
+		for _, slice := range slices {
+			// Estimate tokens: 4 chars / token
+			contentTokens := len(slice.Content) / 4
+			overhead := 30
+			cost := contentTokens + overhead
+
+			if usedTokens+cost > b.maxTokens {
+				continue
+			}
+
+			if !fileHeaderAdded {
+				builder.WriteString(fmt.Sprintf("\n#### FILE: %s\n", filePath))
+				fileHeaderAdded = true
+			}
+
+			builder.WriteString(fmt.Sprintf("--- Lines %d-%d [%s] ---\n", slice.StartLine, slice.EndLine, slice.SliceType))
+			builder.WriteString(slice.Content)
+			builder.WriteString("\n\n")
+
+			usedTokens += cost
+			includedCount++
 		}
-
-		builder.WriteString(fmt.Sprintf("--- File: %s (Lines %d-%d) [%s] ---\n", slice.FilePath, slice.StartLine, slice.EndLine, slice.SliceType))
-		builder.WriteString(slice.Content)
-		builder.WriteString("\n\n")
-
-		usedTokens += cost
-		includedCount++
 	}
 
 	if includedCount < len(ranked) {
-		builder.WriteString(fmt.Sprintf("\n... (Truncated %d less relevant snippets)\n", len(ranked)-includedCount))
+		builder.WriteString(fmt.Sprintf("\n... (Truncated %d less relevant snippets to fit token limits)\n", len(ranked)-includedCount))
 	}
 
 	return builder.String(), nil

@@ -276,7 +276,8 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 					output = fmt.Sprintf("Error: %v", toolErr)
 				}
 
-				processedOutput := a.processor.Process(output)
+				// The critical fix: Pass the tool name so the processor knows not to truncate file reads
+				processedOutput := a.processor.Process(call.Function.Name, output)
 
 				if a.bus != nil {
 					a.bus.Publish(event.Event{
