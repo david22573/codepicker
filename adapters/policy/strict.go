@@ -37,8 +37,8 @@ func (p *StrictPolicy) CanExecute(toolName string, args string) (bool, string) {
 	// CI should allow writes/exec. By requiring !p.ciMode, we ensure CI mode bypasses the read-only block.
 	if p.readOnly && !p.ciMode {
 		// Strictly block side effects in Dry-Run
-		if toolName == "write_file" {
-			return false, "BLOCKED (Read-Only): File writes are disabled in this mode."
+		if toolName == "write_file" || toolName == "edit_file" {
+			return false, "BLOCKED (Read-Only): File writes and edits are disabled in this mode."
 		}
 		if toolName == "run_cmd" {
 			return false, "BLOCKED (Read-Only): Shell commands are disabled in this mode."
@@ -54,12 +54,13 @@ func (p *StrictPolicy) CanExecute(toolName string, args string) (bool, string) {
 		}
 	}
 
-	// 2. Policy on File Writes
-	if toolName == "write_file" {
+	// 2. Policy on File Writes and Edits
+	if toolName == "write_file" || toolName == "edit_file" {
 		if strings.Contains(args, "..") {
 			return false, "Path traversal (..) is not allowed"
 		}
-		if strings.Contains(args, "/.git/") {
+		// FIX: Use .git/ to catch relative path payloads correctly
+		if strings.Contains(args, ".git/") {
 			return false, "Modifying .git internals is prohibited"
 		}
 	}

@@ -7,6 +7,3 @@ codepicker_context.*
 ./../*.md
 *.yml
 Dockerfile
-*_test.go
-./../*_test.go
-

@@ -68,7 +68,7 @@ func (e *Enforcer) Mode() string {
 
 func (e *Enforcer) CanExecute(toolName string, args string) (bool, string) {
 	if e.readOnly {
-		if toolName == "write_file" || toolName == "run_cmd" {
+		if toolName == "write_file" || toolName == "edit_file" || toolName == "run_cmd" {
 			return false, "BLOCKED: Side-effects are disabled in READ-ONLY mode."
 		}
 	}
@@ -82,7 +82,7 @@ func (e *Enforcer) CanExecute(toolName string, args string) (bool, string) {
 	switch toolName {
 	case "run_cmd":
 		return e.validateCommand(args)
-	case "write_file", "read_file":
+	case "write_file", "edit_file", "read_file":
 		return e.validateFileSystemAccess(toolName, args)
 	}
 
