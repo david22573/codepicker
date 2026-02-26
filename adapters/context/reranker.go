@@ -35,7 +35,6 @@ func (r *Reranker) Rank(ctx context.Context, task string, candidates []domainCtx
 
 	// 1. Prepare Prompt
 	var sb strings.Builder
-	sb.WriteString("CANDIDATES:\n")
 
 	sliceMap := make(map[string]domainCtx.CodeSlice)
 	for _, s := range candidates {
@@ -45,22 +44,28 @@ func (r *Reranker) Rank(ctx context.Context, task string, candidates []domainCtx
 			preview = strings.Join(lines[:3], "\n") + "\n..."
 		}
 
-		sb.WriteString(fmt.Sprintf("ID: %s | File: %s | Code: %s\n\n", s.ID, s.FilePath, preview))
+		sb.WriteString(fmt.Sprintf("<snippet id=\"%s\" file=\"%s\">\n%s\n</snippet>\n\n", s.ID, s.FilePath, preview))
 		sliceMap[s.ID] = s
 	}
 
-	system := `You are a Senior Tech Lead.
-Rank the provided code snippets by their relevance to the user's TASK.
-Return a JSON object with a list of IDs in descending order of importance.
-Example: {"ranked_ids": ["main.go-Func-10", "utils.go-Struct-5"]}`
+	system := `<role>
+You are a Senior Tech Lead.
+</role>
 
-	user := fmt.Sprintf("TASK: %s\n\n%s", task, sb.String())
+<objective>
+Rank the provided code snippets by their relevance to the user's TASK.
+</objective>
+
+<json_output_format>
+Return a JSON object with a list of IDs in descending order of importance.
+Example: {"ranked_ids": ["main.go-Func-10", "utils.go-Struct-5"]}
+</json_output_format>`
+
+	user := fmt.Sprintf("<task>\n%s\n</task>\n\n<candidates>\n%s</candidates>", task, sb.String())
 
 	// --- BUDGET PROTECTION ---
-	// Ranking is cheap ($0.001) but frequent
 	estCost := 0.001
 	if err := r.budgetGuard.Reserve(estCost); err != nil {
-		// Fallback: Return original candidates if budget is tight
 		return candidates, nil
 	}
 	defer r.budgetGuard.Commit(estCost)

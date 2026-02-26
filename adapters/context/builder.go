@@ -49,7 +49,7 @@ func (b *SmartBuilder) BuildContext(ctx context.Context, query string) (string, 
 	}
 
 	if len(candidates) == 0 {
-		return "No relevant code found.", nil
+		return "<relevant_code_context>\n  \n</relevant_code_context>", nil
 	}
 
 	// 2. Re-Ranking (LLM filters and orders them by semantic importance)
@@ -59,8 +59,6 @@ func (b *SmartBuilder) BuildContext(ctx context.Context, query string) (string, 
 	}
 
 	// 3. Grouping and Chronological Sorting
-	// Instead of scattering snippets, group them by file and sort by line number
-	// to provide the LLM with contiguous, readable logic blocks.
 	grouped := make(map[string][]domainCtx.CodeSlice)
 	var orderedFiles []string
 	seenFiles := make(map[string]bool)
@@ -68,16 +66,15 @@ func (b *SmartBuilder) BuildContext(ctx context.Context, query string) (string, 
 	for _, slice := range ranked {
 		grouped[slice.FilePath] = append(grouped[slice.FilePath], slice)
 
-		// Maintain the LLM's file-level priority based on the first occurrence of a file in the ranked list
 		if !seenFiles[slice.FilePath] {
 			orderedFiles = append(orderedFiles, slice.FilePath)
 			seenFiles[slice.FilePath] = true
 		}
 	}
 
-	// 4. Packing (Token Budgeting)
+	// 4. Packing (Token Budgeting with XML Formatting)
 	var builder strings.Builder
-	builder.WriteString("### RELEVANT CODE CONTEXT (RAG Optimized)\n")
+	builder.WriteString("<relevant_code_context>\n")
 
 	usedTokens := 0
 	includedCount := 0
@@ -85,7 +82,6 @@ func (b *SmartBuilder) BuildContext(ctx context.Context, query string) (string, 
 	for _, filePath := range orderedFiles {
 		slices := grouped[filePath]
 
-		// Sort slices within the file chronologically by StartLine
 		sort.Slice(slices, func(i, j int) bool {
 			return slices[i].StartLine < slices[j].StartLine
 		})
@@ -95,7 +91,8 @@ func (b *SmartBuilder) BuildContext(ctx context.Context, query string) (string, 
 		for _, slice := range slices {
 			// Estimate tokens: 4 chars / token
 			contentTokens := len(slice.Content) / 4
-			overhead := 30
+			// Increased overhead for XML tag structures
+			overhead := 40
 			cost := contentTokens + overhead
 
 			if usedTokens+cost > b.maxTokens {
@@ -103,22 +100,31 @@ func (b *SmartBuilder) BuildContext(ctx context.Context, query string) (string, 
 			}
 
 			if !fileHeaderAdded {
-				builder.WriteString(fmt.Sprintf("\n#### FILE: %s\n", filePath))
+				builder.WriteString(fmt.Sprintf("  <file path=\"%s\">\n", filePath))
 				fileHeaderAdded = true
 			}
 
-			builder.WriteString(fmt.Sprintf("--- Lines %d-%d [%s] ---\n", slice.StartLine, slice.EndLine, slice.SliceType))
+			builder.WriteString(fmt.Sprintf("    <slice start_line=\"%d\" end_line=\"%d\" type=\"%s\">\n", slice.StartLine, slice.EndLine, slice.SliceType))
 			builder.WriteString(slice.Content)
-			builder.WriteString("\n\n")
+			if !strings.HasSuffix(slice.Content, "\n") {
+				builder.WriteString("\n")
+			}
+			builder.WriteString("    </slice>\n")
 
 			usedTokens += cost
 			includedCount++
 		}
+
+		if fileHeaderAdded {
+			builder.WriteString("  </file>\n")
+		}
 	}
 
 	if includedCount < len(ranked) {
-		builder.WriteString(fmt.Sprintf("\n... (Truncated %d less relevant snippets to fit token limits)\n", len(ranked)-includedCount))
+		builder.WriteString(fmt.Sprintf("  \n", len(ranked)-includedCount))
 	}
+
+	builder.WriteString("</relevant_code_context>\n")
 
 	return builder.String(), nil
 }

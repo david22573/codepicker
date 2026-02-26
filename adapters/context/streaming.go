@@ -25,47 +25,49 @@ func NewStreamingBuilder(store domainCtx.SliceStore, maxTokens int) *StreamingBu
 // BuildContextWithBudget generates a prompt-ready context string that fits within specific constraints.
 func (b *StreamingBuilder) BuildContextWithBudget(ctx context.Context, query string, budget int) (string, error) {
 	// 1. Fetch more candidates than we need (oversampling) to allow for prioritization
-	// We ask for up to 50 slices initially.
 	candidates, err := b.store.SearchSlices(ctx, query, 50)
 	if err != nil {
 		return "", fmt.Errorf("search failed: %w", err)
 	}
 
 	if len(candidates) == 0 {
-		return "No relevant code context found.", nil
+		return "<relevant_code_context>\n  \n</relevant_code_context>", nil
 	}
 
-	// 2. Packing Strategy
+	// 2. Packing Strategy with XML Formatting
 	var sb strings.Builder
-	sb.WriteString("### RELEVANT CODE CONTEXT\n")
+	sb.WriteString("<relevant_code_context>\n")
 
 	usedTokens := 0
 	includedCount := 0
 
 	for _, slice := range candidates {
-		// Estimate tokens: roughly 4 chars per token + formatting overhead
-		// Header overhead: "--- File: ... (Lines ..) ---\n\n\n" is approx 10-15 tokens
 		contentTokens := len(slice.Content) / 4
-		headerTokens := 15
+		headerTokens := 30 // Increased for XML overhead
 		sliceCost := contentTokens + headerTokens
 
 		if usedTokens+sliceCost > budget {
-			continue // Skip this slice, try next (or break if strict order matters)
+			continue
 		}
 
 		// 3. Format the slice
-		sb.WriteString(fmt.Sprintf("--- File: %s (Lines %d-%d) [%s] ---\n",
-			slice.FilePath, slice.StartLine, slice.EndLine, slice.SliceType))
+		sb.WriteString(fmt.Sprintf("  <file path=\"%s\">\n", slice.FilePath))
+		sb.WriteString(fmt.Sprintf("    <slice start_line=\"%d\" end_line=\"%d\" type=\"%s\">\n", slice.StartLine, slice.EndLine, slice.SliceType))
 		sb.WriteString(slice.Content)
-		sb.WriteString("\n\n")
+		if !strings.HasSuffix(slice.Content, "\n") {
+			sb.WriteString("\n")
+		}
+		sb.WriteString("    </slice>\n  </file>\n\n")
 
 		usedTokens += sliceCost
 		includedCount++
 	}
 
 	if includedCount < len(candidates) {
-		sb.WriteString(fmt.Sprintf("... (Truncated %d less relevant snippets to fit context window)\n", len(candidates)-includedCount))
+		sb.WriteString(fmt.Sprintf("  \n", len(candidates)-includedCount))
 	}
+	
+	sb.WriteString("</relevant_code_context>\n")
 
 	return sb.String(), nil
 }
