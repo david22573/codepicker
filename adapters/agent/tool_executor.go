@@ -81,6 +81,7 @@ func (te *ToolExecutor) executeSingle(ctx context.Context, call llm.ToolCall) st
 	if te.policy != nil {
 		allowed, reason := te.policy.CanExecute(call.Function.Name, call.Function.Arguments)
 		if !allowed {
+			te.emitter.PolicyBlocked(call.Function.Name, reason)
 			return fmt.Sprintf("Error: Policy Violation - %s", reason)
 		}
 	}
@@ -99,6 +100,7 @@ func (te *ToolExecutor) executeSingle(ctx context.Context, call llm.ToolCall) st
 
 	output, err := tool.Execute(ctx, call.Function.Arguments)
 	if err != nil {
+		// Log failures contextually back to the LLM (does not halt execution)
 		output = fmt.Sprintf("Error: %v", err)
 	}
 

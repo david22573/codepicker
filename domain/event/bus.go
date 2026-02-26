@@ -8,11 +8,20 @@ import (
 type EventType string
 
 const (
-	EventAgentThought EventType = "agent.thought"
-	EventToolStart    EventType = "tool.start"
-	EventToolEnd      EventType = "tool.end"
-	EventAgentFinish  EventType = "agent.finish"
-	EventError        EventType = "error"
+	EventAgentThought     EventType = "agent.thought"
+	EventToolStart        EventType = "tool.start"
+	EventToolEnd          EventType = "tool.end"
+	EventAgentFinish      EventType = "agent.finish"
+	EventError            EventType = "error"
+	
+	// Phase 4: Observability Expansion
+	EventBudgetReserve    EventType = "budget.reserve"
+	EventBudgetCommit     EventType = "budget.commit"
+	EventBudgetExhausted  EventType = "budget.exhausted"
+	EventTurnLimitReached EventType = "agent.turn_limit_reached"
+	EventMemoryPruned     EventType = "memory.pruned"
+	EventPolicyBlock      EventType = "policy.block"
+	EventToolRetry        EventType = "tool.retry"
 )
 
 // Event represents a single unit of activity in the system.

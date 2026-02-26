@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	domainAgent "github.com/david22573/codepicker/domain/agent"
+	"github.com/david22573/codepicker/domain/errors"
 	"github.com/david22573/codepicker/domain/event"
 	infraCtx "github.com/david22573/codepicker/infra/context"
 	"github.com/david22573/codepicker/infra/llm"
@@ -93,7 +94,7 @@ func (a *ReActAgent) SetVerbose(verbose bool) {
 
 func (a *ReActAgent) GetSystemPrompt() string { return a.sysMsg }
 
-// Run executes the core ReAct loop, coordinating the subsystems.
+// Run executes the core ReAct loop, coordinating the subsystems and mapping failures.
 func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) {
 	maxTurns := a.controller.CalculateAllowedTurns(0.5)
 
@@ -105,7 +106,7 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 	for i := 0; i < maxTurns; i++ {
 		if infraCtx.IsCancelled(ctx) {
 			a.emitter.Cancelled()
-			return "", fmt.Errorf("agent cancelled: %w", ctx.Err())
+			return "", errors.NewExecutionError(errors.CodeCancellation, "ReActAgent.Run", "agent cancelled by user/system", ctx.Err())
 		}
 
 		inputTokens := a.memory.Estimate(a.history)
@@ -113,13 +114,14 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 
 		if err := a.budgetGuard.Reserve(estimatedCost); err != nil {
 			a.emitter.BudgetExceeded()
-			return "", fmt.Errorf("halted by budget guard: %w", err)
+			return "", errors.NewExecutionError(errors.CodeBudgetExceeded, "ReActAgent.Run", "halted by budget guard", err)
 		}
+		a.emitter.BudgetReserved(estimatedCost)
 
 		respMsg, err := a.invokeModel(ctx, estimatedCost)
 		if err != nil {
 			a.emitter.Error(err)
-			return "", err
+			return "", errors.NewExecutionError(errors.CodeLLM, "ReActAgent.Run", "model invocation failed", err)
 		}
 
 		a.history = append(a.history, respMsg)
@@ -147,14 +149,20 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 			}
 		}
 
-		a.history = a.memory.Prune(a.history)
+		prunedCount := 0
+		a.history, prunedCount = a.memory.Prune(a.history)
+		a.emitter.MemoryPruned(prunedCount)
 	}
 
-	return "", fmt.Errorf("max turns exceeded (%d)", maxTurns)
+	a.emitter.TurnLimitReached(maxTurns)
+	return "", errors.NewExecutionError(errors.CodeTurnLimitExceeded, "ReActAgent.Run", fmt.Sprintf("max turns exceeded (%d)", maxTurns), nil)
 }
 
 func (a *ReActAgent) invokeModel(ctx context.Context, estimatedCost float64) (llm.Message, error) {
-	defer a.budgetGuard.Commit(estimatedCost)
+	defer func() {
+		a.budgetGuard.Commit(estimatedCost)
+		a.emitter.BudgetCommitted(estimatedCost)
+	}()
 	msg, _, err := a.model.ChatNative(ctx, a.history, a.toolSchemas)
 	return msg, err
 }

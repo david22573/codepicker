@@ -6,11 +6,18 @@ import "fmt"
 type ErrorCode string
 
 const (
-	CodeValidation ErrorCode = "VALIDATION" // User input error
-	CodeSystem     ErrorCode = "SYSTEM"     // Internal crash/failure
-	CodePolicy     ErrorCode = "POLICY"     // Security block
-	CodeLLM        ErrorCode = "LLM"        // AI Provider failure
-	CodeNotFound   ErrorCode = "NOT_FOUND"  // Resource missing
+	CodeValidation        ErrorCode = "VALIDATION" // User input error
+	CodeSystem            ErrorCode = "SYSTEM"     // Internal crash/failure
+	CodePolicy            ErrorCode = "POLICY"     // Security block
+	CodeLLM               ErrorCode = "LLM"        // AI Provider failure
+	CodeNotFound          ErrorCode = "NOT_FOUND"  // Resource missing
+
+	// Phase 4: Execution Classifications
+	CodeBudgetExceeded    ErrorCode = "BUDGET_EXCEEDED"
+	CodeTurnLimitExceeded ErrorCode = "TURN_LIMIT_EXCEEDED"
+	CodeToolFailure       ErrorCode = "TOOL_FAILURE"
+	CodePatchMismatch     ErrorCode = "PATCH_MISMATCH"
+	CodeCancellation      ErrorCode = "CANCELLATION"
 )
 
 // DomainError is the standard error type for the domain layer
@@ -46,4 +53,8 @@ func NewPolicy(op, msg string) *DomainError {
 
 func NewLLM(op string, cause error) *DomainError {
 	return &DomainError{Op: op, Code: CodeLLM, Message: "AI provider failure", Err: cause}
+}
+
+func NewExecutionError(code ErrorCode, op, msg string, cause error) *DomainError {
+	return &DomainError{Op: op, Code: code, Message: msg, Err: cause}
 }

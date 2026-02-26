@@ -18,19 +18,16 @@ func NewTurnMemory(maxTokens int) *TurnMemory {
 }
 
 // Prune reduces the history to fit within the token budget while preserving key context.
-// Strategy: Pinned System & Task (First 2 Messages) + Sliding Window (Recent History).
-func (m *TurnMemory) Prune(history []llm.Message) []llm.Message {
-	// If history is short, no need to prune
+// It returns the pruned history and the integer count of messages dropped for telemetry.
+func (m *TurnMemory) Prune(history []llm.Message) ([]llm.Message, int) {
 	if len(history) <= 3 {
-		return history
+		return history, 0
 	}
 
-	// 1. Check if we are actually over budget
 	if m.estimator.EstimateMessages(history) <= m.MaxTokens {
-		return history
+		return history, 0
 	}
 
-	// 2. Identify Pinned Messages (System Prompt + User Task)
 	var pinned []llm.Message
 	slidingStart := 0
 
@@ -42,17 +39,15 @@ func (m *TurnMemory) Prune(history []llm.Message) []llm.Message {
 		slidingStart = 1
 	}
 
-	// The rest is the "Sliding Window" of conversation
 	sliding := history[slidingStart:]
+	prunedCount := 0
 
-	// 3. Prune from the *front* of the sliding window until we fit
-	// We want to keep the most recent interactions, so we drop the oldest thoughts/tools.
 	for len(sliding) > 0 && m.estimator.EstimateMessages(append(pinned, sliding...)) > m.MaxTokens {
 		sliding = sliding[1:]
+		prunedCount++
 	}
 
-	// Reconstruct history
-	return append(pinned, sliding...)
+	return append(pinned, sliding...), prunedCount
 }
 
 // Estimate provides a robust approximation of token usage via the centralized estimator.
