@@ -7,11 +7,13 @@ import (
 // TurnMemory manages the conversation context using strict token budgeting.
 type TurnMemory struct {
 	MaxTokens int
+	estimator llm.TokenEstimator
 }
 
 func NewTurnMemory(maxTokens int) *TurnMemory {
 	return &TurnMemory{
 		MaxTokens: maxTokens,
+		estimator: llm.NewDefaultEstimator(),
 	}
 }
 
@@ -24,7 +26,7 @@ func (m *TurnMemory) Prune(history []llm.Message) []llm.Message {
 	}
 
 	// 1. Check if we are actually over budget
-	if m.estimateTokens(history) <= m.MaxTokens {
+	if m.estimator.EstimateMessages(history) <= m.MaxTokens {
 		return history
 	}
 
@@ -45,7 +47,7 @@ func (m *TurnMemory) Prune(history []llm.Message) []llm.Message {
 
 	// 3. Prune from the *front* of the sliding window until we fit
 	// We want to keep the most recent interactions, so we drop the oldest thoughts/tools.
-	for len(sliding) > 0 && m.estimateTokens(append(pinned, sliding...)) > m.MaxTokens {
+	for len(sliding) > 0 && m.estimator.EstimateMessages(append(pinned, sliding...)) > m.MaxTokens {
 		sliding = sliding[1:]
 	}
 
@@ -53,40 +55,7 @@ func (m *TurnMemory) Prune(history []llm.Message) []llm.Message {
 	return append(pinned, sliding...)
 }
 
-// estimateTokens provides a robust approximation of token usage.
-// OPTIMIZATION: Includes overhead for message structure and JSON tool calls.
-func (m *TurnMemory) estimateTokens(msgs []llm.Message) int {
-	tokens := 0
-
-	// Base overhead per message (role + formatting)
-	// OpenAI standard is ~3-4 tokens per message
-	const messageOverhead = 4
-
-	for _, msg := range msgs {
-		tokens += messageOverhead
-
-		// Content estimation (approx 3.5 chars per token for code/mixed text)
-		tokens += len(msg.Content) / 3
-
-		// Tool Call Overhead
-		if len(msg.ToolCalls) > 0 {
-			// JSON overhead + array structure
-			tokens += 50
-			for _, tc := range msg.ToolCalls {
-				tokens += len(tc.Function.Name) / 3
-				tokens += len(tc.Function.Arguments) / 3
-			}
-		}
-
-		// Tool Output Overhead (Role: tool)
-		if msg.Role == "tool" {
-			// Add extra buffer for tool output formatting tags
-			tokens += 10
-		}
-	}
-
-	// Reply buffer (safety margin)
-	tokens += 3
-
-	return tokens
+// Estimate provides a robust approximation of token usage via the centralized estimator.
+func (m *TurnMemory) Estimate(msgs []llm.Message) int {
+	return m.estimator.EstimateMessages(msgs)
 }

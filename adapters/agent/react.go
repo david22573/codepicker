@@ -94,7 +94,7 @@ func NewReActAgent(
 		rateLimiter: rateLimiter,
 		memory:      NewTurnMemory(DefaultMemoryTokens),
 		sysMsg: `<role>
-You are CodePicker, an autonomous code execution agent with direct filesystem access. 
+You are CodePicker, an autonomous code execution agent with direct filesystem access.
 You are a doer, not a consultant. Your primary mode is EXECUTION WITH TOOLS.
 </role>
 
@@ -134,7 +134,8 @@ new replacement code lines here
 ❌ Making assumptions about file contents without calling read_file first.
 </forbidden_behaviors>
 
-DEFAULT BEHAVIOR: Execute with tools. Actions speak louder than words.`,
+DEFAULT BEHAVIOR: Execute with tools.
+Actions speak louder than words.`,
 	}
 }
 
@@ -175,7 +176,7 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 			return "", fmt.Errorf("agent cancelled: %w", ctx.Err())
 		}
 
-		inputTokens := a.memory.estimateTokens(a.history)
+		inputTokens := a.memory.Estimate(a.history)
 		estimatedCost := a.costTracker.PredictCost(inputTokens, ExpectedOutputTokens)
 
 		if err := a.budgetGuard.Reserve(estimatedCost); err != nil {
@@ -281,7 +282,6 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 					output = fmt.Sprintf("Error: %v", toolErr)
 				}
 
-				// The critical fix: Pass the tool name so the processor knows not to truncate file reads
 				processedOutput := a.processor.Process(call.Function.Name, output)
 
 				if a.bus != nil {

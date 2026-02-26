@@ -70,7 +70,46 @@ You must output a single JSON object matching this exact schema:
 }
 
 func (p *Planner) OptimizePlan(ctx context.Context, plan *task.Plan, feedback string) (*task.Plan, error) {
-	return plan, nil
+	systemPrompt := `<role>
+You are the CodePicker Planner, a senior software architect.
+Your job is to optimize and fix an existing execution plan based on execution feedback.
+</role>
+
+<critical_rules>
+1. Analyze the feedback to understand why the previous plan failed or needs improvement.
+2. Output a complete, revised JSON plan replacing the old one.
+</critical_rules>
+
+<json_output_format>
+You must output a single JSON object matching this exact schema:
+{
+  "reasoning": "Explanation of how you fixed the plan based on feedback...",
+  "steps": [
+    {
+      "description": "Short summary of the step",
+      "instruction": "Detailed, actionable directive for the execution agent",
+      "files": ["relative/path/to/file.go"]
+    }
+  ]
+}
+</json_output_format>`
+
+	userPrompt := fmt.Sprintf("<original_task>\n%s\n</original_task>\n\n<feedback>\n%s\n</feedback>\n\nPlease provide the optimized plan.", plan.OriginalTask, feedback)
+
+	var schema task.PlanSchema
+
+	if err := p.model.ChatJSON(ctx, systemPrompt, userPrompt, &schema); err != nil {
+		return nil, fmt.Errorf("failed to generate optimized plan: %w", err)
+	}
+
+	optimizedPlan, err := p.convertSchemaToPlan(schema, plan.OriginalTask)
+	if err != nil {
+		return nil, err
+	}
+	
+	// Retain original plan ID to map back to the execution entity.
+	optimizedPlan.ID = plan.ID
+	return optimizedPlan, nil
 }
 
 func (p *Planner) convertSchemaToPlan(schema task.PlanSchema, taskDesc string) (*task.Plan, error) {

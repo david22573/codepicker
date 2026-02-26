@@ -17,6 +17,7 @@ type SmartBuilder struct {
 	embedder  *llm.EmbeddingClient
 	reranker  *Reranker
 	maxTokens int
+	estimator llm.TokenEstimator
 }
 
 func NewSmartBuilder(repo indexer.ContextRepository, embedder *llm.EmbeddingClient, reranker *Reranker, maxTokens int) *SmartBuilder {
@@ -25,6 +26,7 @@ func NewSmartBuilder(repo indexer.ContextRepository, embedder *llm.EmbeddingClie
 		embedder:  embedder,
 		reranker:  reranker,
 		maxTokens: maxTokens,
+		estimator: llm.NewDefaultEstimator(),
 	}
 }
 
@@ -89,9 +91,7 @@ func (b *SmartBuilder) BuildContext(ctx context.Context, query string) (string, 
 		fileHeaderAdded := false
 
 		for _, slice := range slices {
-			// Estimate tokens: 4 chars / token
-			contentTokens := len(slice.Content) / 4
-			// Increased overhead for XML tag structures
+			contentTokens := b.estimator.EstimateText(slice.Content)
 			overhead := 40
 			cost := contentTokens + overhead
 

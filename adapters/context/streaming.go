@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	domainCtx "github.com/david22573/codepicker/domain/context"
+	"github.com/david22573/codepicker/infra/llm"
 )
 
 // StreamingBuilder handles context construction for large codebases.
@@ -13,12 +14,14 @@ import (
 type StreamingBuilder struct {
 	store     domainCtx.SliceStore
 	maxTokens int
+	estimator llm.TokenEstimator
 }
 
 func NewStreamingBuilder(store domainCtx.SliceStore, maxTokens int) *StreamingBuilder {
 	return &StreamingBuilder{
 		store:     store,
 		maxTokens: maxTokens,
+		estimator: llm.NewDefaultEstimator(),
 	}
 }
 
@@ -42,7 +45,7 @@ func (b *StreamingBuilder) BuildContextWithBudget(ctx context.Context, query str
 	includedCount := 0
 
 	for _, slice := range candidates {
-		contentTokens := len(slice.Content) / 4
+		contentTokens := b.estimator.EstimateText(slice.Content)
 		headerTokens := 30 // Increased for XML overhead
 		sliceCost := contentTokens + headerTokens
 
@@ -72,7 +75,9 @@ func (b *StreamingBuilder) BuildContextWithBudget(ctx context.Context, query str
 	return sb.String(), nil
 }
 
-// EstimateTokens provides a quick utility for other components
+// EstimateTokens provides a quick utility for other components.
+// Maintained for backward compatibility but routes to the centralized estimator.
 func EstimateTokens(text string) int {
-	return len(text) / 4
+	estimator := llm.NewDefaultEstimator()
+	return estimator.EstimateText(text)
 }

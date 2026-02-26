@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/david22573/codepicker/infra/llm"
 	"github.com/spf13/cobra"
 )
 
@@ -27,12 +28,9 @@ var (
 
 const (
 	// Auto-switch threshold: 3MB
-	// If repo < 3MB -> Auto selects Full
-	// If repo > 3MB -> Auto selects Smart
 	AutoThresholdBytes = 3 * 1024 * 1024
 
 	// Hard cap for Full Mode: 20MB
-	// Prevents memory exhaustion/context window explosion
 	HardCapBytes = 20 * 1024 * 1024
 
 	// Ignore file name
@@ -236,12 +234,10 @@ func isIgnored(relPath string, patterns []string) bool {
 	relPath = filepath.ToSlash(relPath)
 
 	for _, p := range patterns {
-		// handle comments/empty again just in case
 		if p == "" || strings.HasPrefix(p, "#") {
 			continue
 		}
 
-		// Simple Directory Match: "node_modules/" matches "node_modules" and "node_modules/foo"
 		if strings.HasSuffix(p, "/") {
 			dirName := strings.TrimSuffix(p, "/")
 			if strings.HasPrefix(relPath, dirName) {
@@ -250,12 +246,10 @@ func isIgnored(relPath string, patterns []string) bool {
 			continue
 		}
 
-		// Exact Match
 		if relPath == p {
 			return true
 		}
 
-		// Glob Match (e.g. *.log) using filepath.Match
 		matched, _ := filepath.Match(p, filepath.Base(relPath))
 		if matched {
 			return true
@@ -316,7 +310,10 @@ func runFullPack(root string, files []FileEntry, outFile string) (int, int64, er
 	}
 
 	w.Flush()
-	return estimateTokens(totalChars), writtenBytes, nil
+	
+	estimator := llm.NewDefaultEstimator()
+	// Using a simulated string length to estimate tokens, since we're appending to a writer
+	return estimator.EstimateText(strings.Repeat("a", totalChars)), writtenBytes, nil
 }
 
 func runSmartPack(root string, files []FileEntry, outFile string, budget int) (int, int64, error) {
@@ -348,7 +345,8 @@ func runSmartPack(root string, files []FileEntry, outFile string, budget int) (i
 		totalChars += len(tree)
 	}
 
-	usedTokens := estimateTokens(totalChars)
+	estimator := llm.NewDefaultEstimator()
+	usedTokens := estimator.EstimateText(strings.Repeat("a", totalChars))
 
 	for _, file := range files {
 		content, err := os.ReadFile(file.Path)
@@ -357,7 +355,7 @@ func runSmartPack(root string, files []FileEntry, outFile string, budget int) (i
 		}
 
 		strContent := string(content)
-		fileTokens := estimateTokens(len(strContent))
+		fileTokens := estimator.EstimateText(strContent)
 
 		if usedTokens+fileTokens > budget {
 			fmt.Printf("  ➖ Skipped (Budget): %s (%d tokens)\n", file.RelPath, fileTokens)
@@ -403,10 +401,6 @@ func appendManifest(path string, m PackManifest) error {
 	return err
 }
 
-func estimateTokens(chars int) int {
-	return chars / 4
-}
-
 func formatBytes(b int64) string {
 	const unit = 1024
 	if b < unit {
@@ -432,7 +426,7 @@ func generateTree(files []FileEntry) string {
 }
 
 func shouldPack(path string, info fs.FileInfo) bool {
-	// Skip hidden files (unless explicitly unignored, but usually we skip them)
+	// Skip hidden files
 	if strings.HasPrefix(info.Name(), ".") {
 		return false
 	}
