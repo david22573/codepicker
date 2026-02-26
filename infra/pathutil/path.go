@@ -12,14 +12,14 @@ func Clean(relPath string) (string, error) {
 		return "", fmt.Errorf("path cannot be empty")
 	}
 
+	if strings.Contains(relPath, "..") {
+		return "", fmt.Errorf("path traversal (..) detected")
+	}
+
 	clean := filepath.Clean(relPath)
 
 	if filepath.IsAbs(clean) {
 		return "", fmt.Errorf("absolute paths are not allowed")
-	}
-
-	if strings.Contains(clean, "..") {
-		return "", fmt.Errorf("path traversal (..) detected")
 	}
 
 	return clean, nil

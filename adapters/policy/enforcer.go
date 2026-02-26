@@ -102,7 +102,8 @@ func (e *Enforcer) validateCommand(args string) (bool, string) {
 		return false, "BLOCKED: Command cannot be empty"
 	}
 
-	if strings.Contains(cleanCmd, "..") {
+	cmdToCheck := strings.ReplaceAll(cleanCmd, "./...", "")
+	if strings.Contains(cmdToCheck, "..") {
 		return false, "BLOCKED: Path traversal (..) detected in command"
 	}
 

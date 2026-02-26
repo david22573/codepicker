@@ -106,5 +106,6 @@ func (ct *CostTracker) PrintSummary() {
 	fmt.Printf("     - Input:    %d\n", stats.PromptTokens)
 	fmt.Printf("     - Output:   %d\n", stats.CompletionTokens)
 	fmt.Printf("   Est. Cost:    $%.5f\n", stats.TotalCost)
-	fmt.Println("===================================================\n")
+	fmt.Println("===================================================")
+	fmt.Println()
 }
