@@ -85,6 +85,19 @@ var initCmd = &cobra.Command{
 			}
 		}
 
+		// 5. Create .codepickerignore with defaults
+		codepickerIgnorePath := filepath.Join(cwd, ".codepickerignore")
+		if _, err := os.Stat(codepickerIgnorePath); os.IsNotExist(err) {
+			defaultIgnore := "go.mod\nLICENSE\nREADME.md\ngo.sum\ncodepicker_context.*\n*.md\n./../*.md\n*.yml\nDockerfile\n"
+			if err := os.WriteFile(codepickerIgnorePath, []byte(defaultIgnore), 0644); err != nil {
+				fmt.Printf("❌ Failed to create .codepickerignore file: %v\n", err)
+			} else {
+				fmt.Println("✅ Created default ignore file (.codepickerignore)")
+			}
+		} else {
+			fmt.Println("ℹ️  Ignore file (.codepickerignore) already exists, skipping.")
+		}
+
 		fmt.Println(color.GreenString("\n🎉 Initialization Complete!"))
 		fmt.Println("You can now run: codepicker run \"Refactor main.go to use a structured logger\"")
 	},
