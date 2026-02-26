@@ -2,7 +2,6 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/david22573/codepicker/domain/errors"
 	"github.com/david22573/codepicker/infra/fs"
+	"github.com/david22573/codepicker/infra/validation"
 )
 
 type DefinitionSearchTool struct {
@@ -33,8 +33,9 @@ func (t *DefinitionSearchTool) Execute(ctx context.Context, args string) (string
 	var input struct {
 		Name string `json:"name"`
 	}
-	if err := json.Unmarshal([]byte(args), &input); err != nil {
-		return "", errors.NewValidation("tool.search_definition", "invalid JSON arguments")
+
+	if err := validation.DecodeStrict(args, &input); err != nil {
+		return "", errors.NewValidation("tool.search_definition", "invalid JSON arguments: "+err.Error())
 	}
 
 	if input.Name == "" {
@@ -49,7 +50,6 @@ func (t *DefinitionSearchTool) Execute(ctx context.Context, args string) (string
 		if err != nil {
 			return nil
 		}
-		// Skip non-Go files and hidden directories
 		if info.IsDir() {
 			if strings.HasPrefix(info.Name(), ".") && info.Name() != "." {
 				return filepath.SkipDir
@@ -60,20 +60,16 @@ func (t *DefinitionSearchTool) Execute(ctx context.Context, args string) (string
 			return nil
 		}
 
-		// FIX: Use SafeReadFile to get content before parsing to avoid reading huge files
 		content, err := fs.SafeReadFile(ctx, path)
 		if err != nil {
-			// Skip files that are unsafe to read
 			return nil
 		}
 
-		// Parse the file using the safe content
 		node, err := parser.ParseFile(fset, path, content, parser.ParseComments)
 		if err != nil {
 			return nil
 		}
 
-		// Inspect the AST for the symbol
 		ast.Inspect(node, func(n ast.Node) bool {
 			var matchType string
 			var matchName string
@@ -101,9 +97,6 @@ func (t *DefinitionSearchTool) Execute(ctx context.Context, args string) (string
 			if matchName != "" {
 				relPath, _ := filepath.Rel(t.projectRoot, path)
 				position := fset.Position(matchPos)
-
-				// Capture the exact line of code
-				// FIX: Reuse the content we already safely read
 				lineContent := getLineFromContent(string(content), position.Line)
 
 				results.WriteString(fmt.Sprintf("[%s] %s:%d\n%s\n\n", matchType, relPath, position.Line, lineContent))
@@ -126,7 +119,6 @@ func (t *DefinitionSearchTool) Execute(ctx context.Context, args string) (string
 	return results.String(), nil
 }
 
-// Helper to extract line from string content (memory safe)
 func getLineFromContent(content string, lineNum int) string {
 	lines := strings.Split(content, "\n")
 	if lineNum > 0 && lineNum <= len(lines) {

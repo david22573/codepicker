@@ -11,6 +11,7 @@ import (
 	"github.com/david22573/codepicker/domain/task"
 	"github.com/david22573/codepicker/infra/llm"
 	"github.com/david22573/codepicker/infra/pathutil"
+	"github.com/david22573/codepicker/infra/prompts"
 )
 
 type Planner struct {
@@ -24,39 +25,13 @@ func NewPlanner(client domainAgent.LLMClient) *Planner {
 }
 
 func (p *Planner) CreatePlan(ctx context.Context, taskDesc, fileContext, primer string) (*task.Plan, error) {
-	systemPrompt := fmt.Sprintf(`<role>
-You are the CodePicker Planner, a senior software architect. Your job is to create a detailed, logical execution plan for an autonomous coding agent.
-</role>
-
-<project_structure>
-%s
-</project_structure>
-
-<user_task>
-%s
-</user_task>
-
-<critical_rules>
-1. Break down the task into small, isolated steps (1-3 files per step).
-2. Each step must be independently executable.
-3. Order steps by dependency (e.g., read interfaces before modifying implementations, imports before usage).
-4. Instructions must be ACTIONABLE - explicitly tell the executing agent WHAT TO DO and WHICH TOOLS TO USE.
-</critical_rules>
-
-<json_output_format>
-You must output a single JSON object matching this exact schema:
-{
-  "reasoning": "Explanation of your architectural strategy...",
-  "steps": [
-    {
-      "description": "Short summary of the step",
-      "instruction": "Detailed, actionable directive for the execution agent",
-      "files": ["relative/path/to/file.go"]
-    }
-  ]
-}
-</json_output_format>
-`, primer, taskDesc)
+	systemPrompt, err := prompts.Render("planner_system", map[string]any{
+		"ProjectStructure": primer,
+		"UserTask":         taskDesc,
+	})
+	if err != nil {
+		return nil, err
+	}
 
 	userPrompt := fmt.Sprintf("Create a plan for: %s", taskDesc)
 
@@ -70,29 +45,10 @@ You must output a single JSON object matching this exact schema:
 }
 
 func (p *Planner) OptimizePlan(ctx context.Context, plan *task.Plan, feedback string) (*task.Plan, error) {
-	systemPrompt := `<role>
-You are the CodePicker Planner, a senior software architect.
-Your job is to optimize and fix an existing execution plan based on execution feedback.
-</role>
-
-<critical_rules>
-1. Analyze the feedback to understand why the previous plan failed or needs improvement.
-2. Output a complete, revised JSON plan replacing the old one.
-</critical_rules>
-
-<json_output_format>
-You must output a single JSON object matching this exact schema:
-{
-  "reasoning": "Explanation of how you fixed the plan based on feedback...",
-  "steps": [
-    {
-      "description": "Short summary of the step",
-      "instruction": "Detailed, actionable directive for the execution agent",
-      "files": ["relative/path/to/file.go"]
-    }
-  ]
-}
-</json_output_format>`
+	systemPrompt, err := prompts.Render("planner_optimize_system", nil)
+	if err != nil {
+		return nil, err
+	}
 
 	userPrompt := fmt.Sprintf("<original_task>\n%s\n</original_task>\n\n<feedback>\n%s\n</feedback>\n\nPlease provide the optimized plan.", plan.OriginalTask, feedback)
 
@@ -106,8 +62,7 @@ You must output a single JSON object matching this exact schema:
 	if err != nil {
 		return nil, err
 	}
-	
-	// Retain original plan ID to map back to the execution entity.
+
 	optimizedPlan.ID = plan.ID
 	return optimizedPlan, nil
 }

@@ -10,7 +10,9 @@ import (
 	"github.com/david22573/codepicker/domain/interaction"
 	"github.com/david22573/codepicker/infra/llm"
 	"github.com/david22573/codepicker/infra/logging"
+	"github.com/david22573/codepicker/infra/prompts"
 	"github.com/david22573/codepicker/infra/ratelimit"
+	"github.com/david22573/codepicker/runtime"
 )
 
 type TwoPassEngine struct {
@@ -60,19 +62,12 @@ func (e *TwoPassEngine) RunAnalysis(ctx context.Context, task, contextFile, prim
 		}
 	}
 
-	systemPrompt := fmt.Sprintf(`<project_context>
-%s
-</project_context>
-
-<role>
-You are the CodePicker Analyst. Your goal is to diagnose the issue described in the TASK.
-</role>
-
-<constraints>
-- You have READ-ONLY access.
-- Locate the specific lines of code that need changing.
-- Provide a clear, technical explanation of the bug and the required fix as your Final Answer.
-</constraints>`, primer)
+	systemPrompt, err := prompts.Render("twopass_analyst", map[string]any{
+		"Primer": primer,
+	})
+	if err != nil {
+		return nil, err
+	}
 
 	bus := event.NewDataBus()
 	defer bus.Close()
@@ -95,28 +90,11 @@ You are the CodePicker Analyst. Your goal is to diagnose the issue described in 
 }
 
 func (e *TwoPassEngine) GeneratePatch(ctx context.Context, task string, analysis *interaction.Analysis) (*interaction.Patch, error) {
-	basePrompt := `<role>
-You are the CodePicker Engineer. Write SEARCH/REPLACE blocks to fix the issue.
-</role>
-
-<rules>
-1. Output ONLY SEARCH/REPLACE blocks. Do not explain your changes.
-2. The SEARCH block MUST match the existing file exactly, including whitespace and indentation.
-3. You may use multiple blocks for multiple changes.
-</rules>
-
-<format>
-### relative/path/to/file.go
-<<<<
-exact original code to be replaced
-====
-new replacement code
->>>>
-</format>`
-
-	systemPrompt := basePrompt
-	if e.PackedContext != "" {
-		systemPrompt = fmt.Sprintf("%s\n\n<project_structure>\n%s\n</project_structure>", basePrompt, e.PackedContext)
+	systemPrompt, err := prompts.Render("twopass_engineer", map[string]any{
+		"PackedContext": e.PackedContext,
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	messages := []llm.Message{
@@ -124,7 +102,7 @@ new replacement code
 		{Role: "user", Content: fmt.Sprintf("<task>\n%s\n</task>\n\n<analysis>\n%s\n</analysis>", task, analysis.Markdown)},
 	}
 
-	estCost := 0.005
+	estCost := runtime.Global.PatchGenEstCost
 	if err := e.budgetGuard.Reserve(estCost); err != nil {
 		return nil, fmt.Errorf("patch generation halted by budget: %w", err)
 	}
@@ -142,18 +120,10 @@ new replacement code
 }
 
 func (e *TwoPassEngine) RefinePatch(ctx context.Context, task string, analysis *interaction.Analysis, originalDiff string, feedback string) (*interaction.Patch, error) {
-	systemPrompt := `<role>
-You are the CodePicker Repair Engineer.
-</role>
-
-<objective>
-The previous SEARCH/REPLACE block failed to apply. Correct it based on the error feedback.
-</objective>
-
-<rules>
-1. Ensure your SEARCH block matches the file exactly.
-2. Output ONLY the raw SEARCH/REPLACE block. No conversational filler.
-</rules>`
+	systemPrompt, err := prompts.Render("twopass_refiner", nil)
+	if err != nil {
+		return nil, err
+	}
 
 	userPrompt := fmt.Sprintf("<task>\n%s FAILED\n</task>\n\n<failed_block>\n%s\n</failed_block>\n\n<error>\n%s\n</error>", task, originalDiff, feedback)
 
@@ -162,7 +132,7 @@ The previous SEARCH/REPLACE block failed to apply. Correct it based on the error
 		{Role: "user", Content: userPrompt},
 	}
 
-	estCost := 0.003
+	estCost := runtime.Global.PatchRefineEstCost
 	if err := e.budgetGuard.Reserve(estCost); err != nil {
 		return nil, fmt.Errorf("patch refinement halted by budget: %w", err)
 	}
@@ -181,7 +151,6 @@ The previous SEARCH/REPLACE block failed to apply. Correct it based on the error
 
 func cleanPatch(raw string) string {
 	raw = strings.TrimSpace(raw)
-	// Strip markdown formatting if the LLM wraps the blocks
 	if strings.HasPrefix(raw, "```") {
 		lines := strings.Split(raw, "\n")
 		if len(lines) > 2 {

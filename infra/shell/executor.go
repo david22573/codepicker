@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -21,7 +22,6 @@ type Executor struct {
 }
 
 // NewExecutor creates a new shell executor locked to a specific directory.
-// UPDATED: Now requires rootDir to enforce workspace isolation.
 func NewExecutor(timeout time.Duration, maxOutput int, dryRun bool, rootDir string) *Executor {
 	abs, _ := filepath.Abs(rootDir)
 	return &Executor{
@@ -30,6 +30,18 @@ func NewExecutor(timeout time.Duration, maxOutput int, dryRun bool, rootDir stri
 		DryRun:        dryRun,
 		RestrictedDir: abs,
 	}
+}
+
+// safeEnv strips context from the host OS, maintaining only essential routing variables.
+func (e *Executor) safeEnv() []string {
+	allowed := []string{"PATH", "HOME", "USER", "GOPATH", "GOROOT", "GOCACHE"}
+	var env []string
+	for _, k := range allowed {
+		if v := os.Getenv(k); v != "" {
+			env = append(env, fmt.Sprintf("%s=%s", k, v))
+		}
+	}
+	return env
 }
 
 // Run executes a command and returns its output (stdout + stderr).
@@ -43,13 +55,13 @@ func (e *Executor) Run(ctx context.Context, command string, args ...string) (str
 	// 2. Security: Validate arguments for escape attempts
 	for _, arg := range args {
 		// Block flags that tools use to change directory context despite cmd.Dir
-		if strings.Contains(arg, "-C ") || arg == "-C" { // Common in git, tar, make
+		if strings.Contains(arg, "-C ") || arg == "-C" {
 			return "", errors.NewPolicy("shell.Run", "forbidden flag detected: -C (directory change)")
 		}
-		if strings.Contains(arg, "--work-tree") { // Git specific escape
+		if strings.Contains(arg, "--work-tree") { 
 			return "", errors.NewPolicy("shell.Run", "forbidden flag detected: --work-tree")
 		}
-		if strings.Contains(arg, "--git-dir") { // Git specific escape
+		if strings.Contains(arg, "--git-dir") { 
 			return "", errors.NewPolicy("shell.Run", "forbidden flag detected: --git-dir")
 		}
 	}
@@ -63,9 +75,9 @@ func (e *Executor) Run(ctx context.Context, command string, args ...string) (str
 
 	cmd := exec.CommandContext(ctx, command, args...)
 
-	// 4. Security: Enforce Working Directory
-	// This ensures "ls" lists the project, not the system root.
+	// 4. Security: Enforce Working Directory & Strip Environment
 	cmd.Dir = e.RestrictedDir
+	cmd.Env = e.safeEnv()
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

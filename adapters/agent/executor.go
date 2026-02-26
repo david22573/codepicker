@@ -13,6 +13,7 @@ import (
 	infraCtx "github.com/david22573/codepicker/infra/context"
 	"github.com/david22573/codepicker/infra/fs"
 	"github.com/david22573/codepicker/infra/logging"
+	"github.com/david22573/codepicker/infra/prompts"
 	"github.com/fatih/color"
 	"go.uber.org/zap"
 )
@@ -124,33 +125,13 @@ func (e *PlanExecutor) Execute(ctx context.Context, plan *task.Plan) error {
 			}
 		}
 
-		workerInput := fmt.Sprintf(`<execution_mode>
-You MUST use tools to complete this task.
-</execution_mode>
-
-<instruction>
-%s
-</instruction>
-
-<target_files>
-%v
-</target_files>
-
-<mandatory_requirements>
-1. You MUST call read_file on each target file to see the current state.
-2. To modify files, you MUST call edit_file and provide precise SEARCH/REPLACE blocks.
-3. You MUST NOT just describe what should be changed.
-4. Only respond "Final Answer:" after you have actually used tools to make the code changes.
-</mandatory_requirements>
-
-<execution_pattern>
-→ Call read_file for each target file
-→ Analyze what needs to change based on the instruction
-→ Call edit_file with the exact <<<< ==== >>>> blocks 
-→ Respond: "Final Answer: [description of what you actually did]"
-</execution_pattern>
-
-Execute the instruction NOW using your tools.`, step.Instruction, step.Files)
+		workerInput, err := prompts.Render("executor_instruction", map[string]any{
+			"Instruction": step.Instruction,
+			"Files":       step.Files,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to render executor instructions: %w", err)
+		}
 
 		result, err := e.worker.Run(ctx, workerInput)
 		if err != nil {

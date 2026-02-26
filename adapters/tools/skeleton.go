@@ -3,7 +3,6 @@ package tools
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"go/ast"
 	"go/format"
@@ -15,6 +14,7 @@ import (
 
 	"github.com/david22573/codepicker/domain/errors"
 	"github.com/david22573/codepicker/infra/fs"
+	"github.com/david22573/codepicker/infra/validation"
 )
 
 type SkeletonTool struct {
@@ -35,8 +35,8 @@ func (t *SkeletonTool) Execute(ctx context.Context, args string) (string, error)
 	var input struct {
 		Path string `json:"path"`
 	}
-	if err := json.Unmarshal([]byte(args), &input); err != nil {
-		return "", errors.NewValidation("tool.read_skeleton", "invalid JSON arguments")
+	if err := validation.DecodeStrict(args, &input); err != nil {
+		return "", errors.NewValidation("tool.read_skeleton", "invalid JSON arguments: "+err.Error())
 	}
 
 	if input.Path == "" {
@@ -52,7 +52,6 @@ func (t *SkeletonTool) Execute(ctx context.Context, args string) (string, error)
 	var results strings.Builder
 	fset := token.NewFileSet()
 
-	// Handler for a single file
 	processFile := func(currPath string) error {
 		if !strings.HasSuffix(currPath, ".go") {
 			return nil
@@ -60,25 +59,21 @@ func (t *SkeletonTool) Execute(ctx context.Context, args string) (string, error)
 
 		content, err := fs.SafeReadFile(ctx, currPath)
 		if err != nil {
-			// Skip files that are too large or binary
 			return nil
 		}
 
-		// Parse using the safely read content
 		node, err := parser.ParseFile(fset, currPath, content, parser.ParseComments)
 		if err != nil {
-			return nil // Skip unparsable
+			return nil
 		}
 
-		// Prune the AST: Remove function bodies
 		ast.Inspect(node, func(n ast.Node) bool {
 			if fn, ok := n.(*ast.FuncDecl); ok {
-				fn.Body = nil // Remove implementation
+				fn.Body = nil
 			}
 			return true
 		})
 
-		// Render the skeleton back to source code
 		var buf bytes.Buffer
 		if err := format.Node(&buf, fset, node); err != nil {
 			return err
@@ -89,13 +84,11 @@ func (t *SkeletonTool) Execute(ctx context.Context, args string) (string, error)
 		return nil
 	}
 
-	// Logic for Dir vs File
 	if !info.IsDir() {
 		if err := processFile(targetPath); err != nil {
 			return "", err
 		}
 	} else {
-		// Walk the directory
 		files, err := os.ReadDir(targetPath)
 		if err != nil {
 			return "", err

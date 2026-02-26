@@ -8,6 +8,8 @@ import (
 	"github.com/david22573/codepicker/domain/agent"
 	domainCtx "github.com/david22573/codepicker/domain/context"
 	"github.com/david22573/codepicker/infra/llm"
+	"github.com/david22573/codepicker/infra/prompts"
+	"github.com/david22573/codepicker/runtime"
 )
 
 type Reranker struct {
@@ -48,23 +50,15 @@ func (r *Reranker) Rank(ctx context.Context, task string, candidates []domainCtx
 		sliceMap[s.ID] = s
 	}
 
-	system := `<role>
-You are a Senior Tech Lead.
-</role>
-
-<objective>
-Rank the provided code snippets by their relevance to the user's TASK.
-</objective>
-
-<json_output_format>
-Return a JSON object with a list of IDs in descending order of importance.
-Example: {"ranked_ids": ["main.go-Func-10", "utils.go-Struct-5"]}
-</json_output_format>`
+	system, err := prompts.Render("reranker_system", nil)
+	if err != nil {
+		return candidates, nil
+	}
 
 	user := fmt.Sprintf("<task>\n%s\n</task>\n\n<candidates>\n%s</candidates>", task, sb.String())
 
 	// --- BUDGET PROTECTION ---
-	estCost := 0.001
+	estCost := runtime.Global.RerankerEstCost
 	if err := r.budgetGuard.Reserve(estCost); err != nil {
 		return candidates, nil
 	}
@@ -73,7 +67,7 @@ Example: {"ranked_ids": ["main.go-Func-10", "utils.go-Struct-5"]}
 
 	// 2. Call LLM
 	var resp RankResponse
-	err := r.model.ChatJSON(ctx, system, user, &resp)
+	err = r.model.ChatJSON(ctx, system, user, &resp)
 	if err != nil {
 		return candidates, nil
 	}

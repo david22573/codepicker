@@ -2,13 +2,13 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/david22573/codepicker/infra/fs"
+	"github.com/david22573/codepicker/infra/validation"
 )
 
 // --- ReadFileTool ---
@@ -39,16 +39,13 @@ func (t *ReadFileTool) Execute(ctx context.Context, args string) (string, error)
 		Path string `json:"path"`
 	}
 
-	cleanPath := ""
-	if err := json.Unmarshal([]byte(args), &input); err != nil {
-		// Fallback: treat entire string as path (for backward compat if LLM forgets JSON)
-		cleanPath = strings.Trim(strings.TrimSpace(args), `"' `)
-	} else {
-		cleanPath = filepath.Clean(strings.TrimSpace(input.Path))
+	if err := validation.DecodeStrict(args, &input); err != nil {
+		return "", err
 	}
 
-	if cleanPath == "" {
-		return "", fmt.Errorf("path cannot be empty")
+	cleanPath := filepath.Clean(strings.TrimSpace(input.Path))
+	if cleanPath == "" || cleanPath == "." {
+		return "", fmt.Errorf("validation error: missing or invalid required field 'path'")
 	}
 
 	var content []byte
@@ -104,14 +101,11 @@ func (t *ListDirTool) Execute(ctx context.Context, args string) (string, error) 
 		Path string `json:"path"`
 	}
 
-	cleanPath := ""
-	if err := json.Unmarshal([]byte(args), &input); err != nil {
-		// Fallback handling
-		cleanPath = strings.TrimSpace(strings.ReplaceAll(args, `"`, ""))
-	} else {
-		cleanPath = filepath.Clean(strings.TrimSpace(input.Path))
+	if err := validation.DecodeStrict(args, &input); err != nil {
+		return "", err
 	}
 
+	cleanPath := filepath.Clean(strings.TrimSpace(input.Path))
 	fullPath := filepath.Join(t.ProjectRoot, cleanPath)
 
 	entries, err := os.ReadDir(fullPath)
@@ -133,4 +127,3 @@ func (t *ListDirTool) Execute(ctx context.Context, args string) (string, error) 
 	}
 	return strings.Join(results, "\n"), nil
 }
-

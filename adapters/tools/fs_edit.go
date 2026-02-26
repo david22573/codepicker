@@ -2,13 +2,12 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/david22573/codepicker/infra/fs"
+	"github.com/david22573/codepicker/infra/validation"
 )
 
 type EditFileTool struct {
@@ -38,21 +37,14 @@ func (t *EditFileTool) Execute(ctx context.Context, args string) (string, error)
 		Blocks string `json:"blocks"`
 	}
 
-	cleanArgs := strings.TrimSpace(args)
-	if strings.HasPrefix(cleanArgs, "```json") {
-		cleanArgs = cleanArgs[7:]
-	} else if strings.HasPrefix(cleanArgs, "```") {
-		cleanArgs = cleanArgs[3:]
-	}
-	if strings.HasSuffix(cleanArgs, "```") {
-		cleanArgs = cleanArgs[:len(cleanArgs)-3]
+	if err := validation.DecodeStrict(args, &input); err != nil {
+		return "", err
 	}
 
-	if err := json.Unmarshal([]byte(cleanArgs), &input); err != nil {
-		return "", fmt.Errorf("JSON parsing failed: %w. Ensure you are sending a valid JSON object.", err)
+	if input.Path == "" || input.Blocks == "" {
+		return "", fmt.Errorf("validation error: missing required fields 'path' or 'blocks'")
 	}
 
-	// Read existing content: check shadow first, fallback to real filesystem
 	var content []byte
 	var err error
 	content, err = t.shadow.Read(input.Path)
@@ -64,13 +56,11 @@ func (t *EditFileTool) Execute(ctx context.Context, args string) (string, error)
 		}
 	}
 
-	// Parse and apply blocks natively using the centralized fuzzy matcher
 	newContent, err := fs.ApplyBlocksToString(string(content), input.Blocks)
 	if err != nil {
 		return "", err
 	}
 
-	// Write the modified content back to the shadow layer
 	shadowPath, err := t.shadow.Write(input.Path, []byte(newContent))
 	if err != nil {
 		return "", err

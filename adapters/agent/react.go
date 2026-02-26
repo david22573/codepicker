@@ -4,43 +4,34 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"sync"
-	"time"
 
 	domainAgent "github.com/david22573/codepicker/domain/agent"
 	"github.com/david22573/codepicker/domain/event"
 	infraCtx "github.com/david22573/codepicker/infra/context"
 	"github.com/david22573/codepicker/infra/llm"
 	"github.com/david22573/codepicker/infra/logging"
+	"github.com/david22573/codepicker/infra/prompts"
 	"github.com/david22573/codepicker/infra/ratelimit"
-)
-
-const (
-	MaxObservationLength = 4000
-	ExpectedOutputTokens = 1024
-	DefaultMemoryTokens  = 16000
+	"github.com/david22573/codepicker/runtime"
 )
 
 // ReActAgent implements the autonomous agent loop using Native Tool Calling.
 type ReActAgent struct {
 	model       *llm.OpenRouterAdapter
-	tools       map[string]domainAgent.Tool
 	toolSchemas []llm.ToolDefinition
-	bus         *event.DataBus
 	logger      *logging.Logger
-	policy      domainAgent.Policy
 	controller  *AdaptiveController
-	processor   *ObservationProcessor
-	rateLimiter *ratelimit.ToolRateLimiter
 	budgetGuard *llm.BudgetGuard
 	costTracker *llm.CostTracker
 	memory      *TurnMemory
+	emitter     *EventEmitter
+	executor    *ToolExecutor
 	history     []llm.Message
 	sysMsg      string
 	verbose     bool
 }
 
-// NewReActAgent initializes the agent with a native tool-calling configuration.
+// NewReActAgent initializes the agent with its decomposed subsystems.
 func NewReActAgent(
 	model *llm.OpenRouterAdapter,
 	tools []domainAgent.Tool,
@@ -65,276 +56,107 @@ func NewReActAgent(
 				Input string `json:"input" desc:"The input argument for the tool"`
 			}{}
 		}
-
-		schemas = append(schemas, llm.GenerateToolDefinition(
-			name,
-			t.Description(),
-			inputStruct,
-		))
+		schemas = append(schemas, llm.GenerateToolDefinition(name, t.Description(), inputStruct))
 	}
-
-	bg := llm.NewBudgetGuard(costTracker, budget)
 
 	baseTurns := maxTurns / 2
 	if baseTurns < 10 {
 		baseTurns = 10
 	}
 
+	emitter := NewEventEmitter(bus)
+	processor := NewObservationProcessor(runtime.Global.MaxObservationLength)
+	sysMsg, _ := prompts.Render("agent_system", nil)
+
 	return &ReActAgent{
 		model:       model,
-		tools:       toolMap,
 		toolSchemas: schemas,
-		bus:         bus,
 		logger:      logger,
-		policy:      policy,
 		costTracker: costTracker,
 		controller:  NewAdaptiveController(baseTurns, maxTurns, costTracker, budget),
-		budgetGuard: bg,
-		processor:   NewObservationProcessor(MaxObservationLength),
-		rateLimiter: rateLimiter,
-		memory:      NewTurnMemory(DefaultMemoryTokens),
-		sysMsg: `<role>
-You are CodePicker, an autonomous code execution agent with direct filesystem access.
-You are a doer, not a consultant. Your primary mode is EXECUTION WITH TOOLS.
-</role>
-
-<critical_rules>
-1. ALWAYS use tools to accomplish tasks - NEVER just describe what should be done.
-2. To MODIFY an EXISTING file, you MUST use the edit_file tool with SEARCH/REPLACE blocks.
-3. To CREATE a NEW file, you MUST use the write_file tool.
-4. To read any file, you MUST call read_file - never assume or guess file contents.
-5. You work iteratively: read → analyze → edit → verify.
-6. The ONLY acceptable "Final Answer" is after you have actually used tools to complete the work.
-</critical_rules>
-
-<tools_usage>
-• read_file: Read a file to understand its current state (MANDATORY before modifications).
-• edit_file: Modify an existing file using SEARCH/REPLACE blocks.
-• write_file: Create a completely new file.
-• list_dir: List directory contents.
-• search_code: Semantic search across the codebase.
-• run_cmd: Execute shell commands for verification.
-</tools_usage>
-
-<formatting_edit_file>
-When using the edit_file tool, your "blocks" argument MUST use this exact format:
-<<<<
-exact original code lines here
-====
-new replacement code lines here
->>>>
-- The SEARCH block MUST match the file exactly, including whitespace and indentation.
-- You can include multiple blocks in one call.
-</formatting_edit_file>
-
-<forbidden_behaviors>
-❌ Using write_file to modify an existing file (use edit_file instead!).
-❌ Responding "I would modify line 45 to..." without calling a tool.
-❌ Providing code snippets in your thought process without calling a tool.
-❌ Making assumptions about file contents without calling read_file first.
-</forbidden_behaviors>
-
-DEFAULT BEHAVIOR: Execute with tools.
-Actions speak louder than words.`,
+		budgetGuard: llm.NewBudgetGuard(costTracker, budget),
+		memory:      NewTurnMemory(runtime.Global.DefaultMemoryTokens),
+		emitter:     emitter,
+		executor:    NewToolExecutor(toolMap, policy, rateLimiter, processor, emitter, false),
+		sysMsg:      sysMsg,
 	}
 }
 
-func (a *ReActAgent) Name() string { return "CodePicker-Native-v1" }
+func (a *ReActAgent) Name() string { return "CodePicker-Native-v2" }
 
-func (a *ReActAgent) UpdateSystemPrompt(msg string) {
-	a.sysMsg = msg
-}
+func (a *ReActAgent) UpdateSystemPrompt(msg string) { a.sysMsg = msg }
 
 func (a *ReActAgent) SetVerbose(verbose bool) {
 	a.verbose = verbose
+	a.executor.verbose = verbose
 }
 
-func (a *ReActAgent) GetSystemPrompt() string {
-	return a.sysMsg
-}
+func (a *ReActAgent) GetSystemPrompt() string { return a.sysMsg }
 
-// Run executes the ReAct loop using native function calling.
+// Run executes the core ReAct loop, coordinating the subsystems.
 func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) {
 	maxTurns := a.controller.CalculateAllowedTurns(0.5)
 
-	sysMsg := llm.Message{
-		Role:         "system",
-		Content:      a.sysMsg,
-		CacheControl: &llm.CacheControl{Type: "ephemeral"},
-	}
-
 	a.history = []llm.Message{
-		sysMsg,
+		{Role: "system", Content: a.sysMsg, CacheControl: &llm.CacheControl{Type: "ephemeral"}},
 		{Role: "user", Content: taskInput},
 	}
 
 	for i := 0; i < maxTurns; i++ {
 		if infraCtx.IsCancelled(ctx) {
-			if a.bus != nil {
-				a.bus.Publish(event.Event{Type: event.EventError, Payload: map[string]any{"error": "cancelled"}})
-			}
+			a.emitter.Cancelled()
 			return "", fmt.Errorf("agent cancelled: %w", ctx.Err())
 		}
 
 		inputTokens := a.memory.Estimate(a.history)
-		estimatedCost := a.costTracker.PredictCost(inputTokens, ExpectedOutputTokens)
+		estimatedCost := a.costTracker.PredictCost(inputTokens, runtime.Global.ExpectedOutputTokens)
 
 		if err := a.budgetGuard.Reserve(estimatedCost); err != nil {
-			if a.bus != nil {
-				a.bus.Publish(event.Event{Type: event.EventError, Payload: map[string]any{"error": "budget_exceeded"}})
-			}
+			a.emitter.BudgetExceeded()
 			return "", fmt.Errorf("halted by budget guard: %w", err)
 		}
 
-		respMsg, err := func() (llm.Message, error) {
-			defer a.budgetGuard.Commit(estimatedCost)
-			msg, _, err := a.model.ChatNative(ctx, a.history, a.toolSchemas)
-			return msg, err
-		}()
-
+		respMsg, err := a.invokeModel(ctx, estimatedCost)
 		if err != nil {
-			if a.bus != nil {
-				a.bus.Publish(event.Event{Type: event.EventError, Payload: map[string]any{"error": err.Error()}})
-			}
+			a.emitter.Error(err)
 			return "", err
 		}
 
 		a.history = append(a.history, respMsg)
-
-		if a.bus != nil {
-			a.bus.Publish(event.Event{
-				Type: event.EventAgentThought,
-				Payload: map[string]any{
-					"turn":    i,
-					"content": respMsg.Content,
-				},
-				Timestamp: time.Now().Unix(),
-			})
-		}
+		a.emitter.Thought(i, respMsg.Content)
 
 		if len(respMsg.ToolCalls) == 0 {
 			if strings.Contains(respMsg.Content, "Final Answer:") || i > 0 {
-				if a.bus != nil {
-					a.bus.Publish(event.Event{Type: event.EventAgentFinish, Payload: map[string]any{"result": respMsg.Content}})
-				}
+				a.emitter.Finish(respMsg.Content)
 				return respMsg.Content, nil
 			}
 		}
 
-		var wg sync.WaitGroup
-		var mu sync.Mutex
+		toolResults := a.executor.ExecuteConcurrent(ctx, respMsg.ToolCalls)
 
-		type toolResult struct {
-			callID  string
-			name    string
-			content string
-		}
-		results := make([]toolResult, 0, len(respMsg.ToolCalls))
-
-		for _, tc := range respMsg.ToolCalls {
-			wg.Add(1)
-			go func(call llm.ToolCall) {
-				defer wg.Done()
-
-				if infraCtx.IsCancelled(ctx) {
-					return
-				}
-
-				if err := a.rateLimiter.Wait(ctx, call.Function.Name); err != nil {
-					mu.Lock()
-					results = append(results, toolResult{call.ID, call.Function.Name, fmt.Sprintf("Error: %v", err)})
-					mu.Unlock()
-					return
-				}
-
-				if a.policy != nil {
-					allowed, reason := a.policy.CanExecute(call.Function.Name, call.Function.Arguments)
-					if !allowed {
-						mu.Lock()
-						results = append(results, toolResult{call.ID, call.Function.Name, fmt.Sprintf("Error: Policy Violation - %s", reason)})
-						mu.Unlock()
-						return
-					}
-				}
-
-				tool, exists := a.tools[call.Function.Name]
-				if !exists {
-					mu.Lock()
-					results = append(results, toolResult{call.ID, call.Function.Name, "Error: Tool not found"})
-					mu.Unlock()
-					return
-				}
-
-				if a.verbose {
-					fmt.Printf("   🔧 [TOOL] Calling: %s\n", call.Function.Name)
-					fmt.Printf("   📥 Input: %s\n", truncate(call.Function.Arguments, 200))
-				}
-
-				if a.bus != nil {
-					a.bus.Publish(event.Event{
-						Type:    event.EventToolStart,
-						Payload: map[string]any{"tool": call.Function.Name, "input": call.Function.Arguments},
-					})
-				}
-
-				output, toolErr := tool.Execute(ctx, call.Function.Arguments)
-				if toolErr != nil {
-					output = fmt.Sprintf("Error: %v", toolErr)
-				}
-
-				processedOutput := a.processor.Process(call.Function.Name, output)
-
-				if a.bus != nil {
-					a.bus.Publish(event.Event{
-						Type:    event.EventToolEnd,
-						Payload: map[string]any{"tool": call.Function.Name, "status": "finished", "output": processedOutput},
-					})
-				}
-
-				if a.verbose {
-					status := "✅"
-					if toolErr != nil {
-						status = "❌"
-					}
-					fmt.Printf("   %s Output: %s\n", status, truncate(processedOutput, 300))
-				}
-
-				mu.Lock()
-				results = append(results, toolResult{call.ID, call.Function.Name, processedOutput})
-				mu.Unlock()
-
-			}(tc)
-		}
-
-		wg.Wait()
-
-		if len(results) > 0 {
-			for _, res := range results {
-				a.recordToolResult(res.callID, res.name, res.content)
-			}
-			a.pruneHistory()
+		if len(toolResults) > 0 {
+			a.history = append(a.history, toolResults...)
 		} else if len(respMsg.ToolCalls) > 0 {
 			for _, tc := range respMsg.ToolCalls {
-				a.recordToolResult(tc.ID, tc.Function.Name, "Error: Execution blocked or failed internally.")
+				a.history = append(a.history, llm.Message{
+					Role:       "tool",
+					ToolCallID: tc.ID,
+					Name:       tc.Function.Name,
+					Content:    "Error: Execution blocked or failed internally.",
+				})
 			}
-			a.pruneHistory()
 		}
+
+		a.history = a.memory.Prune(a.history)
 	}
 
 	return "", fmt.Errorf("max turns exceeded (%d)", maxTurns)
 }
 
-func (a *ReActAgent) recordToolResult(callID, name, content string) {
-	a.history = append(a.history, llm.Message{
-		Role:       "tool",
-		ToolCallID: callID,
-		Name:       name,
-		Content:    content,
-	})
-}
-
-func (a *ReActAgent) pruneHistory() {
-	a.history = a.memory.Prune(a.history)
+func (a *ReActAgent) invokeModel(ctx context.Context, estimatedCost float64) (llm.Message, error) {
+	defer a.budgetGuard.Commit(estimatedCost)
+	msg, _, err := a.model.ChatNative(ctx, a.history, a.toolSchemas)
+	return msg, err
 }
 
 var toolInputRegistry = map[string]any{
@@ -365,11 +187,4 @@ var toolInputRegistry = map[string]any{
 		Path string `json:"path"`
 	}{},
 	"git_diff": struct{}{},
-}
-
-func truncate(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	return s[:max] + "...(truncated)"
 }

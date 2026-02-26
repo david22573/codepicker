@@ -42,7 +42,7 @@ func (s *Sandbox) Cleanup() {
 	_ = os.RemoveAll(s.SandboxRoot)
 }
 
-// ApplyPatch runs 'git apply' or native block patching inside the sandbox.
+// ApplyPatch runs native block patching inside the sandbox.
 func (s *Sandbox) ApplyPatch(patchContent []byte) error {
 	return ApplySearchReplaceBlocks(s.SandboxRoot, string(patchContent))
 }
@@ -115,7 +115,7 @@ func copyFile(src, dst string) error {
 	return err
 }
 
-// ApplySearchReplaceBlocks parses a multi-file patch string and applies it to the filesystem.
+// ApplySearchReplaceBlocks parses a multi-file patch string and applies it to the filesystem atomically.
 func ApplySearchReplaceBlocks(rootDir string, text string) error {
 	lines := strings.Split(text, "\n")
 	var currentFile string
@@ -148,15 +148,21 @@ func ApplySearchReplaceBlocks(rootDir string, text string) error {
 			return fmt.Errorf("failed to apply blocks to %s: %w", file, err)
 		}
 
-		if err := os.WriteFile(fullPath, []byte(newContent), 0644); err != nil {
+		// Write atomically to avoid corrupted files on crash
+		tmpPath := fullPath + ".tmp"
+		if err := os.WriteFile(tmpPath, []byte(newContent), 0644); err != nil {
 			return err
+		}
+		if err := os.Rename(tmpPath, fullPath); err != nil {
+			os.Remove(tmpPath) // Cleanup tmp if rename fails
+			return fmt.Errorf("failed to atomically commit %s: %w", file, err)
 		}
 	}
 	return nil
 }
 
 // ApplyBlocksToString takes the original file content and the LLM's SEARCH/REPLACE blocks
-// and returns the modified content using fuzzy whitespace matching.
+// and returns the modified content enforcing strict exact matching.
 func ApplyBlocksToString(original string, blocks string) (string, error) {
 	original = strings.ReplaceAll(original, "\r\n", "\n")
 	blocks = strings.ReplaceAll(blocks, "\r\n", "\n")
@@ -178,11 +184,7 @@ func ApplyBlocksToString(original string, blocks string) (string, error) {
 			continue
 		}
 		if line == ">>>>" && state == 2 {
-			if len(search) == 0 {
-				return "", fmt.Errorf("empty SEARCH block detected")
-			}
-
-			newResult, err := fuzzyReplace(result, search, replace)
+			newResult, err := exactReplace(result, search, replace)
 			if err != nil {
 				return "", err
 			}
@@ -205,48 +207,23 @@ func ApplyBlocksToString(original string, blocks string) (string, error) {
 	return result, nil
 }
 
-// fuzzyReplace ignores leading and trailing whitespace on a line-by-line basis
-// to locate and replace the search block even if the LLM's indentation is sloppy.
-func fuzzyReplace(content string, search, replace []string) (string, error) {
-	// Strip trailing empty lines from the LLM's search block just in case
-	for len(search) > 0 && strings.TrimSpace(search[len(search)-1]) == "" {
-		search = search[:len(search)-1]
-	}
-	for len(search) > 0 && strings.TrimSpace(search[0]) == "" {
-		search = search[1:]
-	}
+// exactReplace mandates an exact character-for-character match of the search block
+// to prevent logic corruption via fuzzy matching.
+func exactReplace(content string, search, replace []string) (string, error) {
+	searchStr := strings.Join(search, "\n")
+	replaceStr := strings.Join(replace, "\n")
 
-	if len(search) == 0 {
-		return "", fmt.Errorf("SEARCH block contains only whitespace")
+	if searchStr == "" || strings.TrimSpace(searchStr) == "" {
+		return "", fmt.Errorf("SEARCH block contains only whitespace or is empty")
 	}
 
-	fileLines := strings.Split(content, "\n")
-	matchIdx := -1
-
-	// Sliding window search through the file
-	for i := 0; i <= len(fileLines)-len(search); i++ {
-		match := true
-		for j := 0; j < len(search); j++ {
-			// Fuzzy match: ignore leading/trailing whitespace and tabs
-			if strings.TrimSpace(fileLines[i+j]) != strings.TrimSpace(search[j]) {
-				match = false
-				break
-			}
-		}
-		if match {
-			matchIdx = i
-			break
-		}
+	count := strings.Count(content, searchStr)
+	if count == 0 {
+		return "", fmt.Errorf("SEARCH block not found exactly as written. Ensure whitespace and indentation match the file perfectly")
+	}
+	if count > 1 {
+		return "", fmt.Errorf("SEARCH block matches multiple locations. Add more context lines to make it unique")
 	}
 
-	if matchIdx == -1 {
-		return "", fmt.Errorf("SEARCH block not found. Check for significant divergence in the code")
-	}
-
-	var newLines []string
-	newLines = append(newLines, fileLines[:matchIdx]...)
-	newLines = append(newLines, replace...)
-	newLines = append(newLines, fileLines[matchIdx+len(search):]...)
-
-	return strings.Join(newLines, "\n"), nil
+	return strings.Replace(content, searchStr, replaceStr, 1), nil
 }
