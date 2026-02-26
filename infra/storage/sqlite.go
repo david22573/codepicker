@@ -12,7 +12,7 @@ import (
 	"github.com/david22573/codepicker/domain/agent"
 	domainContext "github.com/david22573/codepicker/domain/context"
 	"github.com/david22573/codepicker/domain/task"
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 // SQLiteRepository is the SQLite-based implementation of the persistence layer for plans, executions, and code slices.
@@ -21,9 +21,9 @@ type SQLiteRepository struct {
 }
 
 func NewSQLiteRepository(dbPath string) (*SQLiteRepository, error) {
-	dsn := fmt.Sprintf("%s?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on", dbPath)
+	dsn := fmt.Sprintf("%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)", dbPath)
 
-	db, err := sql.Open("sqlite3", dsn)
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
@@ -55,7 +55,6 @@ func NewSQLiteRepository(dbPath string) (*SQLiteRepository, error) {
 		data TEXT,
 		created_at DATETIME
 	);
-
 	CREATE TABLE IF NOT EXISTS executions (
 		id TEXT PRIMARY KEY,
 		plan_id TEXT,
@@ -347,8 +346,7 @@ func (r *SQLiteRepository) SearchSlices(ctx context.Context, query string, limit
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id, file_path, content, start_line, end_line, language, slice_type, symbols, hash, embedding 
 		FROM code_slices 
-		WHERE content LIKE ?
-		LIMIT ?`, "%"+query+"%", limit)
+		WHERE content LIKE ? LIMIT ?`, "%"+query+"%", limit)
 	if err != nil {
 		return nil, err
 	}
