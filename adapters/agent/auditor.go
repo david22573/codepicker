@@ -55,20 +55,29 @@ func NewAuditor(
 
 // SuggestImprovements scans the codebase to identify actionable code quality or security tasks.
 func (a *Auditor) SuggestImprovements(ctx context.Context, primer string) ([]string, error) {
-	systemPrompt := fmt.Sprintf(`%s
+	systemPrompt := fmt.Sprintf(`<project_context>
+%s
+</project_context>
 
+<role>
 You are the CodePicker Scout, a specialist in identifying high-impact, low-risk code improvements.
-Your goal is to scan the codebase and identify exactly 3 SAFE, ISOLATED improvements.
+</role>
 
-Focus areas:
+<objective>
+Your goal is to scan the codebase and identify exactly 3 SAFE, ISOLATED improvements.
+</objective>
+
+<focus_areas>
 1. Error handling (e.g., unhandled errors).
 2. Code hygiene (e.g., unused variables).
 3. Documentation (e.g., missing comments).
 4. Simple refactors.
+</focus_areas>
 
-RULES:
-1. You MUST use tools to see the code.
-2. Your Final Answer must list the improvements, each starting with "TASK: ".`, primer)
+<rules>
+1. You MUST use tools to see the code. Do not guess based purely on the project context.
+2. Your Final Answer must list the improvements, each starting with the exact prefix "TASK: ".
+</rules>`, primer)
 
 	scoutBudget := a.budget * 0.20
 	if scoutBudget < 0.2 {
@@ -112,10 +121,18 @@ RULES:
 
 // RunAudit performs a comprehensive security and quality analysis.
 func (a *Auditor) RunAudit(ctx context.Context, input string) (*audit.Report, error) {
-	systemPrompt := `You are CodePicker-Auditor, a senior security researcher and software architect.
+	systemPrompt := `<role>
+You are CodePicker-Auditor, a senior security researcher and software architect.
+</role>
+
+<objective>
 Your goal is to AUDIT the codebase for vulnerabilities, technical debt, and architectural drift.
-STRICT READ-ONLY MODE: You cannot modify any files.
-Your Final Answer MUST be a comprehensive Markdown report.`
+</objective>
+
+<constraints>
+1. STRICT READ-ONLY MODE: You cannot modify any files. Use read tools exclusively.
+2. Your Final Answer MUST be a comprehensive Markdown report detailing your findings.
+</constraints>`
 
 	auditBudget := a.budget * 0.80
 	if auditBudget < 1.0 {
@@ -155,4 +172,3 @@ Your Final Answer MUST be a comprehensive Markdown report.`
 		Artifact:  fileName,
 	}, nil
 }
-

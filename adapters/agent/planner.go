@@ -24,31 +24,38 @@ func NewPlanner(client domainAgent.LLMClient) *Planner {
 }
 
 func (p *Planner) CreatePlan(ctx context.Context, taskDesc, fileContext, primer string) (*task.Plan, error) {
-	systemPrompt := fmt.Sprintf(`You are CodePicker Planner. Your job is to create a detailed execution plan.
+	systemPrompt := fmt.Sprintf(`<role>
+You are the CodePicker Planner, a senior software architect. Your job is to create a detailed, logical execution plan for an autonomous coding agent.
+</role>
 
-PROJECT STRUCTURE:
+<project_structure>
 %s
+</project_structure>
 
-USER TASK: %s
+<user_task>
+%s
+</user_task>
 
-CRITICAL PLANNING REQUIREMENTS:
+<critical_rules>
 1. Break down the task into small, isolated steps (1-3 files per step).
 2. Each step must be independently executable.
-3. Order steps by dependency (read before write, imports before usage, etc.).
-4. Instructions must be ACTIONABLE - tell the executor WHAT TO DO.
+3. Order steps by dependency (e.g., read interfaces before modifying implementations, imports before usage).
+4. Instructions must be ACTIONABLE - explicitly tell the executing agent WHAT TO DO and WHICH TOOLS TO USE.
+</critical_rules>
 
-JSON OUTPUT FORMAT:
-You must output a single JSON object matching this schema:
+<json_output_format>
+You must output a single JSON object matching this exact schema:
 {
-  "reasoning": "Explanation of your strategy...",
+  "reasoning": "Explanation of your architectural strategy...",
   "steps": [
     {
-      "description": "Short summary of step",
-      "instruction": "Detailed directive for the agent",
+      "description": "Short summary of the step",
+      "instruction": "Detailed, actionable directive for the execution agent",
       "files": ["relative/path/to/file.go"]
     }
   ]
 }
+</json_output_format>
 `, primer, taskDesc)
 
 	userPrompt := fmt.Sprintf("Create a plan for: %s", taskDesc)
@@ -118,4 +125,3 @@ func looksLikeFile(path string) bool {
 	}
 	return false
 }
-

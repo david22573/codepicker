@@ -49,12 +49,21 @@ func (e *Explainer) Explain(ctx context.Context, executionID string) (string, er
 	}
 
 	// 3. Prompt the LLM for analysis
-	systemPrompt := `You are an AI Explainability Specialist.
+	systemPrompt := `<role>
+You are an AI Explainability Specialist.
+</role>
+
+<objective>
 Your goal is to analyze the execution trace of an autonomous coding agent.
 Explain the agent's strategy, identify any errors in reasoning, and summarize the outcome.
-Be concise and objective.`
+</objective>
 
-	userPrompt := fmt.Sprintf("Analyze this execution trace:\n\n%s", trace.String())
+<constraints>
+- Be concise and objective.
+- Focus heavily on the decision-making process, tool selection, and logical flow.
+</constraints>`
+
+	userPrompt := fmt.Sprintf("<execution_trace>\n%s\n</execution_trace>", trace.String())
 
 	// --- BUDGET PROTECTION ---
 	estCost := 0.002

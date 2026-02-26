@@ -124,22 +124,31 @@ func (e *PlanExecutor) Execute(ctx context.Context, plan *task.Plan) error {
 			}
 		}
 
-		workerInput := fmt.Sprintf(`EXECUTION MODE - You MUST use tools to complete this task.
-INSTRUCTION: %s
+		workerInput := fmt.Sprintf(`<execution_mode>
+You MUST use tools to complete this task.
+</execution_mode>
 
-TARGET FILES: %v
+<instruction>
+%s
+</instruction>
 
-MANDATORY EXECUTION REQUIREMENTS:
+<target_files>
+%v
+</target_files>
+
+<mandatory_requirements>
 1. You MUST call read_file on each target file to see the current state.
 2. To modify files, you MUST call edit_file and provide precise SEARCH/REPLACE blocks.
 3. You MUST NOT just describe what should be changed.
 4. Only respond "Final Answer:" after you have actually used tools to make the code changes.
+</mandatory_requirements>
 
-EXECUTION PATTERN:
+<execution_pattern>
 → Call read_file for each target file
 → Analyze what needs to change based on the instruction
 → Call edit_file with the exact <<<< ==== >>>> blocks 
 → Respond: "Final Answer: [description of what you actually did]"
+</execution_pattern>
 
 Execute the instruction NOW using your tools.`, step.Instruction, step.Files)
 

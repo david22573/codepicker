@@ -60,13 +60,19 @@ func (e *TwoPassEngine) RunAnalysis(ctx context.Context, task, contextFile, prim
 		}
 	}
 
-	systemPrompt := fmt.Sprintf(`%s
+	systemPrompt := fmt.Sprintf(`<project_context>
+%s
+</project_context>
 
-You are the CodePicker Analyst.
-Your goal is to diagnose the issue described in the TASK.
-You have READ-ONLY access.
-Locate the specific lines of code that need changing.
-Provide a clear, technical explanation of the bug and the required fix as your Final Answer.`, primer)
+<role>
+You are the CodePicker Analyst. Your goal is to diagnose the issue described in the TASK.
+</role>
+
+<constraints>
+- You have READ-ONLY access.
+- Locate the specific lines of code that need changing.
+- Provide a clear, technical explanation of the bug and the required fix as your Final Answer.
+</constraints>`, primer)
 
 	bus := event.NewDataBus()
 	defer bus.Close()
@@ -74,7 +80,7 @@ Provide a clear, technical explanation of the bug and the required fix as your F
 	analyst := NewReActAgent(e.model, readTools, bus, e.logger, e.policy, e.costTracker, e.rateLimiter, e.budgetGuard.Remaining(), 100)
 	analyst.UpdateSystemPrompt(systemPrompt)
 
-	input := fmt.Sprintf("TASK: %s\nInitial focus file: %s", task, contextFile)
+	input := fmt.Sprintf("<task>\n%s\n</task>\n\n<initial_focus_file>\n%s\n</initial_focus_file>", task, contextFile)
 
 	fmt.Println("🔍 [PHASE 1] Analyst is diagnosing issue...")
 	summary, err := analyst.Run(ctx, input)
@@ -89,30 +95,33 @@ Provide a clear, technical explanation of the bug and the required fix as your F
 }
 
 func (e *TwoPassEngine) GeneratePatch(ctx context.Context, task string, analysis *interaction.Analysis) (*interaction.Patch, error) {
-	basePrompt := `You are the CodePicker Engineer.
-Write SEARCH/REPLACE blocks to fix the issue.
+	basePrompt := `<role>
+You are the CodePicker Engineer. Write SEARCH/REPLACE blocks to fix the issue.
+</role>
 
-RULES:
+<rules>
 1. Output ONLY SEARCH/REPLACE blocks. Do not explain your changes.
 2. The SEARCH block MUST match the existing file exactly, including whitespace and indentation.
 3. You may use multiple blocks for multiple changes.
+</rules>
 
-FORMAT:
+<format>
 ### relative/path/to/file.go
 <<<<
 exact original code to be replaced
 ====
 new replacement code
->>>>`
+>>>>
+</format>`
 
 	systemPrompt := basePrompt
 	if e.PackedContext != "" {
-		systemPrompt = fmt.Sprintf("%s\nPROJECT_STRUCTURE:\n%s", basePrompt, e.PackedContext)
+		systemPrompt = fmt.Sprintf("%s\n\n<project_structure>\n%s\n</project_structure>", basePrompt, e.PackedContext)
 	}
 
 	messages := []llm.Message{
 		{Role: "system", Content: systemPrompt},
-		{Role: "user", Content: fmt.Sprintf("TASK: %s\nANALYSIS:\n%s", task, analysis.Markdown)},
+		{Role: "user", Content: fmt.Sprintf("<task>\n%s\n</task>\n\n<analysis>\n%s\n</analysis>", task, analysis.Markdown)},
 	}
 
 	estCost := 0.005
@@ -133,12 +142,20 @@ new replacement code
 }
 
 func (e *TwoPassEngine) RefinePatch(ctx context.Context, task string, analysis *interaction.Analysis, originalDiff string, feedback string) (*interaction.Patch, error) {
-	systemPrompt := `You are the CodePicker Repair Engineer.
-The previous SEARCH/REPLACE block failed to apply. Correct it based on the error feedback.
-Ensure your SEARCH block matches the file exactly.
-Output ONLY the raw SEARCH/REPLACE block.`
+	systemPrompt := `<role>
+You are the CodePicker Repair Engineer.
+</role>
 
-	userPrompt := fmt.Sprintf("TASK: %s FAILED\nBLOCK:\n%s\nERROR: %s", task, originalDiff, feedback)
+<objective>
+The previous SEARCH/REPLACE block failed to apply. Correct it based on the error feedback.
+</objective>
+
+<rules>
+1. Ensure your SEARCH block matches the file exactly.
+2. Output ONLY the raw SEARCH/REPLACE block. No conversational filler.
+</rules>`
+
+	userPrompt := fmt.Sprintf("<task>\n%s FAILED\n</task>\n\n<failed_block>\n%s\n</failed_block>\n\n<error>\n%s\n</error>", task, originalDiff, feedback)
 
 	messages := []llm.Message{
 		{Role: "system", Content: systemPrompt},
@@ -173,4 +190,3 @@ func cleanPatch(raw string) string {
 	}
 	return strings.TrimSpace(raw)
 }
-
