@@ -99,13 +99,11 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 
 	eventBus := event.NewDataBus()
 
-	// Intercept Provider & Tools for Phase 6 (Trace & Replay)
 	recordTraceDir := os.Getenv("CODEPICKER_RECORD_TRACE")
 	replayTracePath := os.Getenv("CODEPICKER_REPLAY_TRACE")
 
 	var activeLLM llm.Provider = llmClient
 	
-	// FIX: Provide the proper shell executor and feed it to the tools
 	shellExec := shell.NewExecutor(30*time.Second, 5000, dryRun, rootDir)
 	activeTools := tools.DefaultSet(shadowMgr, shellExec, rootDir, embedClient, repo)
 
@@ -127,7 +125,8 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 		activeTools = tools.WrapToolsWithTrace(activeTools, activeRecorder)
 	}
 
-	_, planner, executor, auditor, explainer, twoPass, reranker, err := NewAgentStack(AgentStackOpts{
+	// Capture the 8 exact returned variables
+	_, planner, executor, auditor, explainer, twoPass, ctxBuilder, err := NewAgentStack(AgentStackOpts{
 		Config:       cfg,
 		LLMClient:    activeLLM,
 		CostTracker:  costTracker,
@@ -149,7 +148,6 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 
 	slicer := indexer.NewCodeSlicer()
 	indexManager := indexer.NewIndexManager(slicer, repo, embedClient)
-	ctxBuilder := ctxAdapters.NewSmartBuilder(repo, embedClient, reranker, cfg.Agent.MaxContextSize)
 	primer := ctxAdapters.NewProjectPrimer(rootDir)
 	verifierPipeline := verifier.NewPipeline(rootDir)
 

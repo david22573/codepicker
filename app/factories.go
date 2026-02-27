@@ -2,12 +2,14 @@ package app
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/david22573/codepicker/adapters/agent"
 	ctxAdapters "github.com/david22573/codepicker/adapters/context"
 	"github.com/david22573/codepicker/adapters/policy"
+	"github.com/david22573/codepicker/adapters/tools"
 	domainAgent "github.com/david22573/codepicker/domain/agent"
 	"github.com/david22573/codepicker/domain/config"
 	"github.com/david22573/codepicker/domain/event"
@@ -16,6 +18,7 @@ import (
 	"github.com/david22573/codepicker/infra/logging"
 	"github.com/david22573/codepicker/infra/ratelimit"
 	"github.com/david22573/codepicker/infra/storage"
+	"go.uber.org/zap"
 )
 
 type AgentStackOpts struct {
@@ -56,7 +59,7 @@ func NewStorageStack(rootDir string, dryRun bool) (*storage.SQLiteRepository, *f
 	return repo, workspaceMgr, shadowMgr, nil
 }
 
-func NewAgentStack(opts AgentStackOpts, toolsOverride []domainAgent.Tool) (*agent.ReActAgent, *agent.Planner, *agent.PlanExecutor, *agent.Auditor, *agent.Explainer, *agent.TwoPassEngine, *ctxAdapters.Reranker, error) {
+func NewAgentStack(opts AgentStackOpts, toolsOverride []domainAgent.Tool) (*agent.ReActAgent, *agent.Planner, *agent.PlanExecutor, *agent.Auditor, *agent.Explainer, *agent.TwoPassEngine, *ctxAdapters.SmartBuilder, error) {
 
 	rateLimiter := ratelimit.NewToolRateLimiter(20)
 
@@ -68,14 +71,18 @@ func NewAgentStack(opts AgentStackOpts, toolsOverride []domainAgent.Tool) (*agen
 		guardRail = policy.NewEnforcer(*policyConfig, opts.DryRun)
 	}
 
-	// Phase 3: LLM Caching Layer
 	cacheDir := filepath.Join(opts.RootDir, ".codepicker", "cache")
 	enableCaching := opts.CIMode || opts.DryRun
 	cachedLLM := llm.NewCachedAdapter(opts.LLMClient, cacheDir, enableCaching)
 
-	// Phase 4: Wire Concurrency & Throughput mechanisms
 	backpressuredLLM := llm.NewBackpressureAdapter(cachedLLM, 5, 30*time.Second)
 	toolPool := agent.NewBoundedWorkerPool(10)
+
+	workerNodeURL := os.Getenv("CODEPICKER_WORKER_URL")
+	if workerNodeURL != "" {
+		toolsOverride = tools.MapDistributed(toolsOverride, workerNodeURL, []string{"run_cmd"})
+		opts.Logger.Info("Distributed tool execution enabled", zap.String("worker_url", workerNodeURL))
+	}
 
 	worker := agent.NewReActAgent(
 		backpressuredLLM,
@@ -123,6 +130,7 @@ func NewAgentStack(opts AgentStackOpts, toolsOverride []domainAgent.Tool) (*agen
 	)
 
 	reranker := ctxAdapters.NewReranker(backpressuredLLM, opts.CostTracker, opts.Config.LLM.BudgetCap)
+	ctxBuilder := ctxAdapters.NewSmartBuilder(opts.Repo, opts.EmbedClient, reranker, opts.ShadowMgr, opts.Config.Agent.MaxContextSize)
 
-	return worker, planner, executor, auditor, explainer, twoPass, reranker, nil
+	return worker, planner, executor, auditor, explainer, twoPass, ctxBuilder, nil
 }

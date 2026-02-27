@@ -9,6 +9,7 @@ import (
 
 	domainCtx "github.com/david22573/codepicker/domain/context"
 	"github.com/david22573/codepicker/domain/errors"
+	"github.com/david22573/codepicker/infra/fs"
 	"github.com/david22573/codepicker/infra/indexer"
 	"github.com/david22573/codepicker/infra/llm"
 	"github.com/david22573/codepicker/infra/metrics"
@@ -20,15 +21,25 @@ type SmartBuilder struct {
 	reranker  *Reranker
 	maxTokens int
 	estimator llm.TokenEstimator
+	dedup     *SemanticDeduplicator
+	shadow    *fs.ShadowManager
 }
 
-func NewSmartBuilder(repo indexer.ContextRepository, embedder *llm.EmbeddingClient, reranker *Reranker, maxTokens int) *SmartBuilder {
+func NewSmartBuilder(
+	repo indexer.ContextRepository,
+	embedder *llm.EmbeddingClient,
+	reranker *Reranker,
+	shadow *fs.ShadowManager,
+	maxTokens int,
+) *SmartBuilder {
 	return &SmartBuilder{
 		repo:      repo,
 		embedder:  embedder,
 		reranker:  reranker,
 		maxTokens: maxTokens,
 		estimator: llm.NewDefaultEstimator(),
+		dedup:     NewSemanticDeduplicator(),
+		shadow:    shadow,
 	}
 }
 
@@ -42,7 +53,6 @@ func (b *SmartBuilder) BuildContext(ctx context.Context, query string) (string, 
 		metrics.GetRegistry().ObserveDuration("codepicker_context_build_latency_seconds", time.Since(start))
 	}()
 
-	// 1. Vector Retrieval (Increased to 100 candidates to cast a wider net)
 	vectors, _, err := b.embedder.CreateEmbeddings(ctx, []string{query})
 	if err != nil {
 		return "", errors.NewSystem("context.build", "embedding failed", err)
@@ -61,27 +71,23 @@ func (b *SmartBuilder) BuildContext(ctx context.Context, query string) (string, 
 		return "<relevant_code_context>\n  \n</relevant_code_context>", nil
 	}
 
-	// 2. Re-Ranking (LLM filters and orders them by semantic importance)
 	ranked, err := b.reranker.Rank(ctx, query, candidates)
 	if err != nil {
 		ranked = candidates
 	}
 
-	// 3. Grouping and Chronological Sorting
 	grouped := make(map[string][]domainCtx.CodeSlice)
 	var orderedFiles []string
 	seenFiles := make(map[string]bool)
 
 	for _, slice := range ranked {
 		grouped[slice.FilePath] = append(grouped[slice.FilePath], slice)
-
 		if !seenFiles[slice.FilePath] {
 			orderedFiles = append(orderedFiles, slice.FilePath)
 			seenFiles[slice.FilePath] = true
 		}
 	}
 
-	// 4. Packing (Token Budgeting with XML Formatting)
 	var builder strings.Builder
 	builder.WriteString("<relevant_code_context>\n")
 
@@ -89,8 +95,23 @@ func (b *SmartBuilder) BuildContext(ctx context.Context, query string) (string, 
 	includedCount := 0
 
 	for _, filePath := range orderedFiles {
-		slices := grouped[filePath]
+		// Phase 7.2: Incremental File Diff Injection
+		if b.shadow != nil {
+			diffSummary, err := b.shadow.Diff(filePath)
+			if err == nil && diffSummary.Type != fs.ChangeNoOp {
+				diffNotice := fmt.Sprintf("  <file path=\"%s\" state=\"modified_in_shadow\">\n    [NOTE: This file has pending edits. Lines modified: +%d/-%d. Use git_diff or read_file to view exact shadow state.]\n  </file>\n", 
+					filePath, diffSummary.NewLines, diffSummary.OldLines)
+				
+				noticeCost := b.estimator.EstimateText(diffNotice)
+				if usedTokens+noticeCost <= b.maxTokens {
+					builder.WriteString(diffNotice)
+					usedTokens += noticeCost
+				}
+				continue // Skip injecting raw baseline slices since the file has diverged
+			}
+		}
 
+		slices := grouped[filePath]
 		sort.Slice(slices, func(i, j int) bool {
 			return slices[i].StartLine < slices[j].StartLine
 		})
@@ -98,6 +119,11 @@ func (b *SmartBuilder) BuildContext(ctx context.Context, query string) (string, 
 		fileHeaderAdded := false
 
 		for _, slice := range slices {
+			// Phase 7.1: Semantic Context Deduplication
+			if !b.dedup.IsUnique(slice.Content) {
+				continue 
+			}
+
 			contentTokens := b.estimator.EstimateText(slice.Content)
 			overhead := 40
 			cost := contentTokens + overhead
