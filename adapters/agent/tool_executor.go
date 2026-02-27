@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	domainAgent "github.com/david22573/codepicker/domain/agent"
 	infraCtx "github.com/david22573/codepicker/infra/context"
 	"github.com/david22573/codepicker/infra/llm"
+	"github.com/david22573/codepicker/infra/metrics"
 	"github.com/david22573/codepicker/infra/ratelimit"
 )
 
@@ -98,7 +100,11 @@ func (te *ToolExecutor) executeSingle(ctx context.Context, call llm.ToolCall) st
 
 	te.emitter.ToolStart(call.Function.Name, call.Function.Arguments)
 
+	start := time.Now()
 	output, err := tool.Execute(ctx, call.Function.Arguments)
+	metrics.GetRegistry().ObserveDuration("codepicker_tool_execution_latency_seconds", time.Since(start))
+	metrics.GetRegistry().IncCounter("codepicker_tool_calls_executed", map[string]string{"tool": call.Function.Name})
+
 	if err != nil {
 		// Log failures contextually back to the LLM (does not halt execution)
 		output = fmt.Sprintf("Error: %v", err)

@@ -17,6 +17,7 @@ import (
 	"github.com/david22573/codepicker/infra/indexer"
 	"github.com/david22573/codepicker/infra/llm"
 	"github.com/david22573/codepicker/infra/logging"
+	"github.com/david22573/codepicker/infra/metrics"
 	"github.com/david22573/codepicker/infra/storage"
 	"go.uber.org/zap"
 )
@@ -53,6 +54,9 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 	if err != nil {
 		return nil, err
 	}
+
+	// Initialize global metrics backend (Phase 1)
+	metrics.SetRegistry(metrics.NewPrometheusBackend())
 
 	cfgPath := filepath.Join(rootDir, "codepicker.yaml")
 	loader := infraConfig.NewLoader(cfgPath)
@@ -114,7 +118,7 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 		for {
 			select {
 			case <-ctx.Done():
-				return 
+				return
 			case <-ticker.C:
 				cleanupPolicy := audit.CleanupPolicy{
 					MaxAge:   30 * 24 * time.Hour,

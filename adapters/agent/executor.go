@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -53,6 +54,40 @@ func (e *PlanExecutor) GetSystemPrompt() string {
 		return agentInterface.GetSystemPrompt()
 	}
 	return ""
+}
+
+// preflightCheck runs concurrently to validate that all required files exist before executing a step.
+func (e *PlanExecutor) preflightCheck(files []string) error {
+	if len(files) == 0 {
+		return nil
+	}
+
+	errCh := make(chan error, len(files))
+	var wg sync.WaitGroup
+
+	for _, file := range files {
+		wg.Add(1)
+		go func(f string) {
+			defer wg.Done()
+			
+			// Always assume project root is the base
+			target := filepath.Join(e.workspaceMgr.ProjectRoot, f)
+			if _, err := os.Stat(target); os.IsNotExist(err) {
+				errCh <- fmt.Errorf("target file does not exist: %s", f)
+			}
+		}(file)
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	// Return the first error encountered, if any
+	for err := range errCh {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (e *PlanExecutor) Execute(ctx context.Context, plan *task.Plan) error {
@@ -105,6 +140,14 @@ func (e *PlanExecutor) Execute(ctx context.Context, plan *task.Plan) error {
 		}
 
 		fmt.Printf("\n🔹 STEP %d: %s\n", step.ID, step.Description)
+
+		// Phase 3: Parallel Preflight Check
+		if err := e.preflightCheck(step.Files); err != nil {
+			fmt.Printf("❌ Preflight validation failed: %v\n", err)
+			plan.MarkStepFailed(step.ID, err)
+			_ = e.repo.SavePlan(context.Background(), plan)
+			return err
+		}
 
 		if !e.autoConfirm {
 			fmt.Println(color.HiBlackString("   Instruction: %s", step.Instruction))

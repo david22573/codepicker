@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	domainAgent "github.com/david22573/codepicker/domain/agent"
 	"github.com/david22573/codepicker/domain/errors"
@@ -11,6 +12,7 @@ import (
 	infraCtx "github.com/david22573/codepicker/infra/context"
 	"github.com/david22573/codepicker/infra/llm"
 	"github.com/david22573/codepicker/infra/logging"
+	"github.com/david22573/codepicker/infra/metrics"
 	"github.com/david22573/codepicker/infra/prompts"
 	"github.com/david22573/codepicker/infra/ratelimit"
 	"github.com/david22573/codepicker/runtime"
@@ -103,6 +105,8 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 		{Role: "user", Content: taskInput},
 	}
 
+	metrics.GetRegistry().ObserveValue("codepicker_budget_limit", a.budgetGuard.Remaining())
+
 	for i := 0; i < maxTurns; i++ {
 		if infraCtx.IsCancelled(ctx) {
 			a.emitter.Cancelled()
@@ -110,6 +114,8 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 		}
 
 		inputTokens := a.memory.Estimate(a.history)
+		metrics.GetRegistry().ObserveValue("codepicker_estimated_input_tokens", float64(inputTokens))
+
 		estimatedCost := a.costTracker.PredictCost(inputTokens, runtime.Global.ExpectedOutputTokens)
 
 		if err := a.budgetGuard.Reserve(estimatedCost); err != nil {
@@ -117,8 +123,12 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 			return "", errors.NewExecutionError(errors.CodeBudgetExceeded, "ReActAgent.Run", "halted by budget guard", err)
 		}
 		a.emitter.BudgetReserved(estimatedCost)
+		metrics.GetRegistry().ObserveValue("codepicker_budget_reserved", estimatedCost)
 
+		llmStart := time.Now()
 		respMsg, err := a.invokeModel(ctx, estimatedCost)
+		metrics.GetRegistry().ObserveDuration("codepicker_llm_latency_seconds", time.Since(llmStart))
+
 		if err != nil {
 			a.emitter.Error(err)
 			return "", errors.NewExecutionError(errors.CodeLLM, "ReActAgent.Run", "model invocation failed", err)
@@ -151,6 +161,9 @@ func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) 
 
 		prunedCount := 0
 		a.history, prunedCount = a.memory.Prune(a.history)
+		if prunedCount > 0 {
+			metrics.GetRegistry().IncCounter("codepicker_memory_prunes_total", nil)
+		}
 		a.emitter.MemoryPruned(prunedCount)
 	}
 
@@ -162,8 +175,16 @@ func (a *ReActAgent) invokeModel(ctx context.Context, estimatedCost float64) (ll
 	defer func() {
 		a.budgetGuard.Commit(estimatedCost)
 		a.emitter.BudgetCommitted(estimatedCost)
+		metrics.GetRegistry().ObserveValue("codepicker_budget_actual", a.costTracker.GetMetrics().TotalCost)
 	}()
-	msg, _, err := a.model.ChatNative(ctx, a.history, a.toolSchemas)
+	
+	msg, usage, err := a.model.ChatNative(ctx, a.history, a.toolSchemas)
+	
+	if err == nil {
+		metrics.GetRegistry().AddCounter("codepicker_tokens_in_total", float64(usage.PromptTokens), nil)
+		metrics.GetRegistry().AddCounter("codepicker_tokens_out_total", float64(usage.CompletionTokens), nil)
+	}
+	
 	return msg, err
 }
 

@@ -1,6 +1,12 @@
 package llm
 
-import "strings"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"strings"
+	"sync"
+)
 
 // TokenEstimator provides a centralized interface for estimating token counts.
 type TokenEstimator interface {
@@ -8,16 +14,77 @@ type TokenEstimator interface {
 	EstimateText(text string) int
 }
 
-// NewEstimatorForModel returns a model-specific tokenizer heuristic.
+// NewEstimatorForModel returns a model-specific tokenizer heuristic wrapped in a memoizer.
 func NewEstimatorForModel(modelName string) TokenEstimator {
+	var base TokenEstimator
 	lower := strings.ToLower(modelName)
+
 	if strings.Contains(lower, "gpt") {
-		return NewOpenAIEstimator()
+		base = NewOpenAIEstimator()
+	} else if strings.Contains(lower, "claude") {
+		base = NewClaudeEstimator()
+	} else {
+		base = NewDefaultEstimator()
 	}
-	if strings.Contains(lower, "claude") {
-		return NewClaudeEstimator()
+
+	return NewMemoizedEstimator(base)
+}
+
+// --- Memoized Estimator (Phase 2 Optimization) ---
+
+type MemoizedEstimator struct {
+	base  TokenEstimator
+	cache sync.Map
+}
+
+func NewMemoizedEstimator(base TokenEstimator) *MemoizedEstimator {
+	return &MemoizedEstimator{
+		base: base,
 	}
-	return NewDefaultEstimator()
+}
+
+func (m *MemoizedEstimator) EstimateText(text string) int {
+	if len(text) == 0 {
+		return 0
+	}
+
+	hash := hashString(text)
+	if val, ok := m.cache.Load(hash); ok {
+		return val.(int)
+	}
+
+	count := m.base.EstimateText(text)
+	m.cache.Store(hash, count)
+	return count
+}
+
+func (m *MemoizedEstimator) EstimateMessages(msgs []Message) int {
+	if len(msgs) == 0 {
+		return 0
+	}
+
+	hash := hashMessages(msgs)
+	if val, ok := m.cache.Load(hash); ok {
+		return val.(int)
+	}
+
+	count := m.base.EstimateMessages(msgs)
+	m.cache.Store(hash, count)
+	return count
+}
+
+func hashString(s string) string {
+	h := sha256.New()
+	h.Write([]byte(s))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func hashMessages(msgs []Message) string {
+	h := sha256.New()
+	// Using JSON marshal for a deterministic representation of the message slice structure
+	data, _ := json.Marshal(msgs)
+	h.Write(data)
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // --- Default Estimator (Baseline Heuristics) ---

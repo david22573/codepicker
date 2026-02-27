@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	domainCtx "github.com/david22573/codepicker/domain/context"
 	"github.com/david22573/codepicker/domain/errors"
 	"github.com/david22573/codepicker/infra/indexer"
 	"github.com/david22573/codepicker/infra/llm"
+	"github.com/david22573/codepicker/infra/metrics"
 )
 
 type SmartBuilder struct {
@@ -35,6 +37,11 @@ func (b *SmartBuilder) BuildForTask(query string) (string, error) {
 }
 
 func (b *SmartBuilder) BuildContext(ctx context.Context, query string) (string, error) {
+	start := time.Now()
+	defer func() {
+		metrics.GetRegistry().ObserveDuration("codepicker_context_build_latency_seconds", time.Since(start))
+	}()
+
 	// 1. Vector Retrieval (Increased to 100 candidates to cast a wider net)
 	vectors, _, err := b.embedder.CreateEmbeddings(ctx, []string{query})
 	if err != nil {

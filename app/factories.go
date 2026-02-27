@@ -72,8 +72,13 @@ func NewAgentStack(opts AgentStackOpts) (*agent.ReActAgent, *agent.Planner, *age
 		guardRail = policy.NewEnforcer(*policyConfig, opts.DryRun)
 	}
 
+	// Phase 3: Wire in the LLM Caching Layer for CI/DryRun modes
+	cacheDir := filepath.Join(opts.RootDir, ".codepicker", "cache")
+	enableCaching := opts.CIMode || opts.DryRun
+	cachedLLM := llm.NewCachedAdapter(opts.LLMClient, cacheDir, enableCaching)
+
 	worker := agent.NewReActAgent(
-		opts.LLMClient,
+		cachedLLM,
 		allTools,
 		opts.EventBus,
 		opts.Logger,
@@ -85,11 +90,11 @@ func NewAgentStack(opts AgentStackOpts) (*agent.ReActAgent, *agent.Planner, *age
 	)
 	worker.SetVerbose(opts.Verbose)
 
-	planner := agent.NewPlanner(opts.LLMClient)
+	planner := agent.NewPlanner(cachedLLM)
 	executor := agent.NewPlanExecutor(worker, opts.Repo, opts.WorkspaceMgr, opts.ShadowMgr, opts.Logger)
 
 	auditor := agent.NewAuditor(
-		opts.LLMClient,
+		cachedLLM,
 		opts.Repo,
 		allTools,
 		guardRail,
@@ -100,10 +105,10 @@ func NewAgentStack(opts AgentStackOpts) (*agent.ReActAgent, *agent.Planner, *age
 		opts.Config.LLM.BudgetCap,
 	)
 
-	explainer := agent.NewExplainer(opts.LLMClient, opts.Repo, opts.CostTracker, opts.Config.LLM.BudgetCap)
+	explainer := agent.NewExplainer(cachedLLM, opts.Repo, opts.CostTracker, opts.Config.LLM.BudgetCap)
 
 	twoPass := agent.NewTwoPassEngine(
-		opts.LLMClient,
+		cachedLLM,
 		opts.Repo,
 		allTools,
 		guardRail,
@@ -114,7 +119,7 @@ func NewAgentStack(opts AgentStackOpts) (*agent.ReActAgent, *agent.Planner, *age
 		"",
 	)
 
-	reranker := ctxAdapters.NewReranker(opts.LLMClient, opts.CostTracker, opts.Config.LLM.BudgetCap)
+	reranker := ctxAdapters.NewReranker(cachedLLM, opts.CostTracker, opts.Config.LLM.BudgetCap)
 
 	return worker, planner, executor, auditor, explainer, twoPass, reranker, nil
 }
