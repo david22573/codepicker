@@ -16,7 +16,7 @@ import (
 )
 
 type TwoPassEngine struct {
-	model         *llm.OpenRouterAdapter
+	model         llm.Provider
 	repo          domainAgent.Repository
 	tools         []domainAgent.Tool
 	policy        domainAgent.Policy
@@ -28,7 +28,7 @@ type TwoPassEngine struct {
 }
 
 func NewTwoPassEngine(
-	model *llm.OpenRouterAdapter,
+	model llm.Provider,
 	repo domainAgent.Repository,
 	tools []domainAgent.Tool,
 	policy domainAgent.Policy,

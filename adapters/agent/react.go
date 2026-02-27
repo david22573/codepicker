@@ -18,7 +18,7 @@ import (
 
 // ReActAgent implements the autonomous agent loop using Native Tool Calling.
 type ReActAgent struct {
-	model       *llm.OpenRouterAdapter
+	model       llm.Provider
 	toolSchemas []llm.ToolDefinition
 	logger      *logging.Logger
 	controller  *AdaptiveController
@@ -34,7 +34,7 @@ type ReActAgent struct {
 
 // NewReActAgent initializes the agent with its decomposed subsystems.
 func NewReActAgent(
-	model *llm.OpenRouterAdapter,
+	model llm.Provider,
 	tools []domainAgent.Tool,
 	bus *event.DataBus,
 	logger *logging.Logger,

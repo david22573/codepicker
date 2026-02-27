@@ -22,7 +22,7 @@ import (
 
 type AgentStackOpts struct {
 	Config       *config.AppConfig
-	LLMClient    *llm.OpenRouterAdapter
+	LLMClient    llm.Provider
 	CostTracker  *llm.CostTracker
 	Repo         *storage.SQLiteRepository
 	WorkspaceMgr *fs.WorkspaceManager

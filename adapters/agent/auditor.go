@@ -19,7 +19,7 @@ import (
 )
 
 type Auditor struct {
-	model       *llm.OpenRouterAdapter
+	model       llm.Provider
 	repo        domainAgent.Repository
 	tools       []domainAgent.Tool
 	policy      domainAgent.Policy
@@ -32,7 +32,7 @@ type Auditor struct {
 
 // NewAuditor initializes the auditor with a budget cap.
 func NewAuditor(
-	model *llm.OpenRouterAdapter,
+	model llm.Provider,
 	repo domainAgent.Repository,
 	tools []domainAgent.Tool,
 	policy domainAgent.Policy,

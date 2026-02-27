@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+
+	domainContext "github.com/david22573/codepicker/domain/context"
 )
 
 // Transcript represents a serialized agent interaction session.
@@ -47,24 +49,34 @@ func NewReplayAdapter(filepath string) (*ReplayAdapter, error) {
 }
 
 // ChatNative intercepts the standard LLM call and yields the recorded response.
-func (r *ReplayAdapter) ChatNative(ctx context.Context, messages []Message, tools []ToolDefinition) (Message, []Message, error) {
+func (r *ReplayAdapter) ChatNative(ctx context.Context, messages []Message, tools []ToolDefinition) (Message, domainContext.TokenUsage, error) {
 	if r.turnIndex >= len(r.transcript.Records) {
-		return Message{}, nil, fmt.Errorf("replay exhausted: no more records available in transcript")
+		return Message{}, domainContext.TokenUsage{}, fmt.Errorf("replay exhausted: no more records available in transcript")
 	}
 
 	record := r.transcript.Records[r.turnIndex]
-	
-	// Optional validation: could check if input `messages` closely match `record.InputMessages` 
+
+	// Optional validation: could check if input `messages` closely match `record.InputMessages`
 	// to ensure the system hasn't drifted from the recorded deterministic path.
 
 	r.turnIndex++
-	return record.OutputMessage, nil, nil
+	return record.OutputMessage, domainContext.TokenUsage{}, nil
+}
+
+// Chat implements standard text chat for the Provider interface.
+func (r *ReplayAdapter) Chat(ctx context.Context, systemPrompt, userPrompt string) (string, error) {
+	messages := []Message{
+		{Role: "system", Content: systemPrompt},
+		{Role: "user", Content: userPrompt},
+	}
+	msg, _, err := r.ChatNative(ctx, messages, nil)
+	return msg.Content, err
 }
 
 // DumpTranscript provides an easy way to export an active agent's history to disk for future replays.
 func DumpTranscript(id, model, filepath string, history []Message) error {
 	var records []TurnRecord
-	
+
 	// Simplified extraction: assuming every assistant message was preceded by user/system/tool context
 	turnCount := 0
 	for i, msg := range history {
