@@ -1,3 +1,4 @@
+// adapters/agent/executor.go
 package agent
 
 import (
@@ -91,6 +92,7 @@ func (e *PlanExecutor) preflightCheck(files []string) error {
 }
 
 func (e *PlanExecutor) Execute(ctx context.Context, plan *task.Plan) error {
+	fmt.Println(color.CyanString("\n🔄 Initializing workspace transaction..."))
 	txn, err := e.workspaceMgr.BeginTransaction()
 	if err != nil {
 		return fmt.Errorf("failed to start transaction: %w", err)
@@ -100,13 +102,15 @@ func (e *PlanExecutor) Execute(ctx context.Context, plan *task.Plan) error {
 
 	if err := e.shadowMgr.Clear(); err != nil {
 		e.logger.Error("failed to clear shadow manager on start", zap.Error(err))
+	} else {
+		fmt.Println(color.HiBlackString("   ✓ Shadow directory cleared and ready."))
 	}
 
 	var rollbackOnce sync.Once
 	doRollback := func() {
 		rollbackOnce.Do(func() {
 			if !txn.Committed {
-				fmt.Println("⚠️  Rolling back changes (restoring files + clearing shadow)...")
+				fmt.Println(color.RedString("\n⚠️  Transaction Interrupted: Rolling back changes (restoring files + clearing shadow)..."))
 				if err := txn.Rollback(); err != nil {
 					e.logger.Error("failed to rollback transaction", zap.Error(err))
 				}
@@ -142,6 +146,9 @@ func (e *PlanExecutor) Execute(ctx context.Context, plan *task.Plan) error {
 		fmt.Printf("\n🔹 STEP %d: %s\n", step.ID, step.Description)
 
 		// Phase 3: Parallel Preflight Check
+		if len(step.Files) > 0 {
+			fmt.Printf(color.HiBlackString("   🔍 Running preflight existence check on %d files...\n"), len(step.Files))
+		}
 		if err := e.preflightCheck(step.Files); err != nil {
 			fmt.Printf("❌ Preflight validation failed: %v\n", err)
 			plan.MarkStepFailed(step.ID, err)
@@ -158,6 +165,7 @@ func (e *PlanExecutor) Execute(ctx context.Context, plan *task.Plan) error {
 				return fmt.Errorf("aborted")
 			}
 			if input == "s" {
+				fmt.Println(color.HiBlackString("   ⏭️ Skipping step..."))
 				continue
 			}
 		}
@@ -176,8 +184,11 @@ func (e *PlanExecutor) Execute(ctx context.Context, plan *task.Plan) error {
 			return fmt.Errorf("failed to render executor instructions: %w", err)
 		}
 
+		fmt.Println(color.CyanString("   🤖 Handing control to Agent for step execution..."))
+		
 		result, err := e.worker.Run(ctx, workerInput)
 		if err != nil {
+			fmt.Printf(color.RedString("   ❌ Agent failed to complete step: %v\n"), err)
 			plan.MarkStepFailed(step.ID, err)
 			if err := e.repo.SavePlan(context.Background(), plan); err != nil {
 				e.logger.Error("failed to persist plan state on error", zap.Error(err))
@@ -190,11 +201,12 @@ func (e *PlanExecutor) Execute(ctx context.Context, plan *task.Plan) error {
 			e.logger.Error("failed to persist plan state", zap.Error(err))
 		}
 
+		fmt.Println(color.HiBlackString("   ✓ Agent execution cycle completed. Synchronizing shadow layer..."))
 		changes, _ := e.shadowMgr.ListShadowFiles()
 
 		if len(changes) == 0 {
-			fmt.Printf("⚠️  WARNING: Step completed but no files were modified.\nAgent may not have used edit_file or write_file.\n")
-			fmt.Printf("   Agent response: %s\n", result)
+			fmt.Printf(color.YellowString("   ⚠️  WARNING: Step completed but no files were modified.\n   Agent may not have used edit_file or write_file.\n"))
+			fmt.Printf(color.HiBlackString("   Agent response: %s\n"), result)
 		}
 
 		for _, file := range changes {
@@ -203,13 +215,14 @@ func (e *PlanExecutor) Execute(ctx context.Context, plan *task.Plan) error {
 			}
 
 			if err := e.shadowMgr.Commit(file); err != nil {
-				fmt.Printf("❌ Failed to apply %s: %v\n", file, err)
+				fmt.Printf(color.RedString("   ❌ Failed to apply %s: %v\n"), file, err)
 				return err
 			}
-			fmt.Printf("✅ Applied: %s\n", file)
+			fmt.Printf(color.GreenString("   ✅ Applied shadow changes to: %s\n"), file)
 		}
 	}
 
+	fmt.Println(color.CyanString("\n🔒 Committing transaction..."))
 	if err := txn.Commit(); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
