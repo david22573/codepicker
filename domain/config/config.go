@@ -48,7 +48,7 @@ func DefaultConfig() *AppConfig {
 	return &AppConfig{
 		Environment: "development",
 		LLM: LLMConfig{
-			Model:           "moonshotai/kimi-k2.5",
+			Model:           "deepseek/deepseek-v3.2",
 			TimeoutSeconds:  3000, 
 			MaxTokens:       8000,
 			Temperature:     0.0,
