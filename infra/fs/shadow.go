@@ -1,3 +1,4 @@
+// infra/fs/shadow.go:
 package fs
 
 import (
@@ -60,6 +61,15 @@ func (s *ShadowManager) Read(relPath string) ([]byte, error) {
 	}
 
 	shadowPath := filepath.Join(s.ProjectRoot, ShadowDir, cleanPath)
+
+	info, err := os.Stat(shadowPath)
+	if err != nil {
+		return nil, err
+	}
+	if info.IsDir() {
+		return nil, fmt.Errorf("EISDIR: target is a directory, not a file: %s", cleanPath)
+	}
+
 	return os.ReadFile(shadowPath)
 }
 
@@ -80,9 +90,17 @@ func (s *ShadowManager) Commit(relPath string) error {
 	shadowPath := filepath.Join(s.ProjectRoot, ShadowDir, cleanPath)
 	realPath := filepath.Join(s.ProjectRoot, cleanPath)
 
-	content, err := os.ReadFile(shadowPath)
+	info, err := os.Stat(shadowPath)
 	if err != nil {
 		return errors.NewValidation("fs.Commit", "shadow file not found: "+cleanPath)
+	}
+	if info.IsDir() {
+		return errors.NewValidation("fs.Commit", "target is a directory: "+cleanPath)
+	}
+
+	content, err := os.ReadFile(shadowPath)
+	if err != nil {
+		return errors.NewSystem("fs.Commit", "failed to read shadow file", err)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(realPath), 0755); err != nil {
@@ -187,11 +205,19 @@ func (s *ShadowManager) Diff(relPath string) (*FileChangeSummary, error) {
 	shadowPath := filepath.Join(s.ProjectRoot, ShadowDir, cleanPath)
 	realPath := filepath.Join(s.ProjectRoot, cleanPath)
 
-	shadowContent, err := os.ReadFile(shadowPath)
+	info, err := os.Stat(shadowPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("shadow file does not exist: %s", cleanPath)
 		}
+		return nil, err
+	}
+	if info.IsDir() {
+		return nil, fmt.Errorf("EISDIR: cannot diff directory: %s", cleanPath)
+	}
+
+	shadowContent, err := os.ReadFile(shadowPath)
+	if err != nil {
 		return nil, err
 	}
 
