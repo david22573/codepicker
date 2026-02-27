@@ -14,9 +14,12 @@ type Execution struct {
 	History   []Interaction
 	StartTime time.Time
 	EndTime   time.Time
-	// Feature 4: Metrics Persistence
-	Cost   float64
-	Tokens int
+	
+	// Phase 5: Per-Session Cost Tracking
+	Cost      float64
+	Tokens    int
+	ToolCost  float64
+	LLMCost   float64
 }
 
 // Interaction records a single "turn" in the agent loop
@@ -53,8 +56,10 @@ func (e *Execution) RecordTurn(thought, tool, args, output string) {
 }
 
 // RecordMetrics updates the cumulative cost/tokens for this session
-func (e *Execution) RecordMetrics(cost float64, tokens int) {
-	e.Cost = cost
+func (e *Execution) RecordMetrics(totalCost, llmCost, toolCost float64, tokens int) {
+	e.Cost = totalCost
+	e.LLMCost = llmCost
+	e.ToolCost = toolCost
 	e.Tokens = tokens
 }
 

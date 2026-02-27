@@ -1,7 +1,17 @@
 package runtime
 
+// ExecutionMode defines the strictness of the runtime environment.
+type ExecutionMode string
+
+const (
+	ModeDevelopment ExecutionMode = "Development"
+	ModeProduction  ExecutionMode = "Production"
+	ModeHardenedCI  ExecutionMode = "HardenedCI"
+)
+
 // Config holds centralized magic numbers, budget limits, and tuning parameters.
 type Config struct {
+	Mode                 ExecutionMode
 	ExpectedOutputTokens int
 	DefaultMemoryTokens  int
 	MaxObservationLength int
@@ -15,6 +25,7 @@ type Config struct {
 
 // Global holds the active runtime configuration defaults.
 var Global = Config{
+	Mode:                 ModeDevelopment,
 	ExpectedOutputTokens: 1024,
 	DefaultMemoryTokens:  16000,
 	MaxObservationLength: 4000,

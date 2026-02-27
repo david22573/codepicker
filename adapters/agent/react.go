@@ -96,6 +96,12 @@ func (a *ReActAgent) SetVerbose(verbose bool) {
 func (a *ReActAgent) GetSystemPrompt() string { return a.sysMsg }
 
 func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) {
+	// Phase 5: Emit the final calculated session metrics upon exit
+	defer func() {
+		stats := a.costTracker.GetMetrics()
+		a.emitter.SessionCostUpdate("react-session", stats.TotalTokens, stats.TotalCost, stats.TotalCost, 0.0)
+	}()
+
 	maxTurns := a.controller.CalculateAllowedTurns(0.5)
 
 	a.history = []llm.Message{

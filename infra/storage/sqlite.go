@@ -15,7 +15,6 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// SQLiteRepository is the SQLite-based implementation of the persistence layer for plans, executions, and code slices.
 type SQLiteRepository struct {
 	db *sql.DB
 }
@@ -62,7 +61,9 @@ func NewSQLiteRepository(dbPath string) (*SQLiteRepository, error) {
 		history TEXT,
 		start_time DATETIME,
 		cost REAL DEFAULT 0.0,
-		tokens INTEGER DEFAULT 0
+		tokens INTEGER DEFAULT 0,
+		tool_cost REAL DEFAULT 0.0,
+		llm_cost REAL DEFAULT 0.0
 	);`
 
 	if _, err := db.Exec(schema); err != nil {
@@ -72,6 +73,8 @@ func NewSQLiteRepository(dbPath string) (*SQLiteRepository, error) {
 	migrations := []string{
 		"ALTER TABLE executions ADD COLUMN cost REAL DEFAULT 0.0",
 		"ALTER TABLE executions ADD COLUMN tokens INTEGER DEFAULT 0",
+		"ALTER TABLE executions ADD COLUMN tool_cost REAL DEFAULT 0.0",
+		"ALTER TABLE executions ADD COLUMN llm_cost REAL DEFAULT 0.0",
 		"ALTER TABLE code_slices ADD COLUMN symbols TEXT",
 		"ALTER TABLE code_slices ADD COLUMN hash TEXT",
 		"ALTER TABLE code_slices ADD COLUMN embedding TEXT",
@@ -250,21 +253,21 @@ func (r *SQLiteRepository) ListPlans(ctx context.Context, limit int) ([]agent.Pl
 }
 
 func (r *SQLiteRepository) DeletePlan(ctx context.Context, id string) error {
-	_, err := r.db.ExecContext(ctx, "DELETE FROM plans WHERE id = ?", id)
+	_, err := r.db.ExecContext(ctx, "DELETE FROM plans WHERE id = ?")
 	return err
 }
 
 func (r *SQLiteRepository) SaveExecution(ctx context.Context, exec *agent.Execution) error {
 	history, _ := json.Marshal(exec.History)
-	query := `INSERT OR REPLACE INTO executions (id, plan_id, status, history, start_time, cost, tokens) VALUES (?, ?, ?, ?, ?, ?, ?)`
-	_, err := r.db.ExecContext(ctx, query, exec.ID, exec.PlanID, string(exec.Status), string(history), exec.StartTime, exec.Cost, exec.Tokens)
+	query := `INSERT OR REPLACE INTO executions (id, plan_id, status, history, start_time, cost, tokens, tool_cost, llm_cost) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	_, err := r.db.ExecContext(ctx, query, exec.ID, exec.PlanID, string(exec.Status), string(history), exec.StartTime, exec.Cost, exec.Tokens, exec.ToolCost, exec.LLMCost)
 	return err
 }
 
 func (r *SQLiteRepository) GetExecution(ctx context.Context, id string) (*agent.Execution, error) {
 	var exec agent.Execution
 	var historyStr, statusStr string
-	query := `SELECT id, plan_id, status, history, start_time, cost, tokens FROM executions WHERE id = ?`
+	query := `SELECT id, plan_id, status, history, start_time, cost, tokens, tool_cost, llm_cost FROM executions WHERE id = ?`
 
 	err := r.db.QueryRowContext(ctx, query, id).Scan(
 		&exec.ID,
@@ -274,6 +277,8 @@ func (r *SQLiteRepository) GetExecution(ctx context.Context, id string) (*agent.
 		&exec.StartTime,
 		&exec.Cost,
 		&exec.Tokens,
+		&exec.ToolCost,
+		&exec.LLMCost,
 	)
 	if err != nil {
 		return nil, err

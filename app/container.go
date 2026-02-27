@@ -2,11 +2,14 @@ package app
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/david22573/codepicker/adapters/agent"
 	ctxAdapters "github.com/david22573/codepicker/adapters/context"
+	"github.com/david22573/codepicker/adapters/tools"
 	"github.com/david22573/codepicker/adapters/verifier"
 	"github.com/david22573/codepicker/domain/config"
 	domainCtx "github.com/david22573/codepicker/domain/context"
@@ -18,7 +21,10 @@ import (
 	"github.com/david22573/codepicker/infra/llm"
 	"github.com/david22573/codepicker/infra/logging"
 	"github.com/david22573/codepicker/infra/metrics"
+	"github.com/david22573/codepicker/infra/shell"
 	"github.com/david22573/codepicker/infra/storage"
+	"github.com/david22573/codepicker/infra/trace"
+	"github.com/david22573/codepicker/runtime"
 	"go.uber.org/zap"
 )
 
@@ -40,6 +46,7 @@ type Container struct {
 	Logger           *logging.Logger
 	CostTracker      *llm.CostTracker
 	Config           *config.AppConfig
+	TraceRecorder    *trace.Recorder
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -55,7 +62,6 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 		return nil, err
 	}
 
-	// Initialize global metrics backend (Phase 1)
 	metrics.SetRegistry(metrics.NewPrometheusBackend())
 
 	cfgPath := filepath.Join(rootDir, "codepicker.yaml")
@@ -64,6 +70,14 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 	if err != nil {
 		logger.Warn("Failed to load configuration file, using defaults", zap.Error(err))
 		cfg = config.DefaultConfig()
+	}
+
+	if cfg.Environment == "production" {
+		runtime.Global.Mode = runtime.ModeProduction
+	} else if cfg.Environment == "hardened-ci" || ciMode {
+		runtime.Global.Mode = runtime.ModeHardenedCI
+	} else {
+		runtime.Global.Mode = runtime.ModeDevelopment
 	}
 
 	if modelOverride != "" {
@@ -85,9 +99,37 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 
 	eventBus := event.NewDataBus()
 
+	// Intercept Provider & Tools for Phase 6 (Trace & Replay)
+	recordTraceDir := os.Getenv("CODEPICKER_RECORD_TRACE")
+	replayTracePath := os.Getenv("CODEPICKER_REPLAY_TRACE")
+
+	var activeLLM llm.Provider = llmClient
+	
+	// FIX: Provide the proper shell executor and feed it to the tools
+	shellExec := shell.NewExecutor(30*time.Second, 5000, dryRun, rootDir)
+	activeTools := tools.DefaultSet(shadowMgr, shellExec, rootDir, embedClient, repo)
+
+	var activeRecorder *trace.Recorder
+
+	if replayTracePath != "" {
+		logger.Info("Starting in DETERMINISTIC REPLAY MODE", zap.String("trace", replayTracePath))
+		replayState, err := trace.LoadReplayState(replayTracePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load replay trace: %w", err)
+		}
+		activeLLM = llm.NewReplayAdapter(replayState)
+		activeTools = tools.GenerateReplayTools(activeTools, replayState)
+	} else if recordTraceDir != "" {
+		sessionID := fmt.Sprintf("run_%d", time.Now().Unix())
+		logger.Info("Starting in TRACE RECORDING MODE", zap.String("dir", recordTraceDir), zap.String("session", sessionID))
+		activeRecorder = trace.NewRecorder(sessionID, recordTraceDir)
+		activeLLM = llm.NewTraceAdapter(activeLLM, activeRecorder)
+		activeTools = tools.WrapToolsWithTrace(activeTools, activeRecorder)
+	}
+
 	_, planner, executor, auditor, explainer, twoPass, reranker, err := NewAgentStack(AgentStackOpts{
 		Config:       cfg,
-		LLMClient:    llmClient,
+		LLMClient:    activeLLM,
 		CostTracker:  costTracker,
 		Repo:         repo,
 		WorkspaceMgr: workspaceMgr,
@@ -99,7 +141,8 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 		DryRun:       dryRun,
 		CIMode:       ciMode,
 		Verbose:      verbose,
-	})
+	}, activeTools)
+	
 	if err != nil {
 		return nil, err
 	}
@@ -111,6 +154,9 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 	verifierPipeline := verifier.NewPipeline(rootDir)
 
 	ctx, cancel := context.WithCancel(context.Background())
+
+	costObserver := agent.NewCostObserver(repo, logger)
+	costObserver.Start(ctx, eventBus.Subscribe())
 
 	go func() {
 		ticker := time.NewTicker(12 * time.Hour)
@@ -148,6 +194,7 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 		Logger:           logger,
 		CostTracker:      costTracker,
 		Config:           cfg,
+		TraceRecorder:    activeRecorder,
 		ctx:              ctx,
 		cancel:           cancel,
 	}, nil
@@ -156,6 +203,9 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 func (c *Container) Close() {
 	if c.cancel != nil {
 		c.cancel()
+	}
+	if c.TraceRecorder != nil {
+		c.TraceRecorder.Finish()
 	}
 	if c.Logger != nil {
 		_ = c.Logger.Sync()

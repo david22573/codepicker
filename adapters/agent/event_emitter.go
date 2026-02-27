@@ -49,7 +49,7 @@ func (e *EventEmitter) ToolEnd(name, output string) {
 	e.publish(event.EventToolEnd, map[string]any{"tool": name, "status": "finished", "output": output})
 }
 
-// --- Phase 4: Observability Expansions ---
+// --- Phase 4 & 5: Observability Expansions ---
 
 func (e *EventEmitter) BudgetReserved(amount float64) {
 	e.publish(event.EventBudgetReserve, map[string]any{"amount": amount})
@@ -79,4 +79,14 @@ func (e *EventEmitter) PolicyBlocked(tool, reason string) {
 
 func (e *EventEmitter) ToolRetry(tool, reason string) {
 	e.publish(event.EventToolRetry, map[string]any{"tool": tool, "reason": reason})
+}
+
+func (e *EventEmitter) SessionCostUpdate(sessionID string, totalTokens int, totalCost, llmCost, toolCost float64) {
+	e.publish(event.EventSessionCost, map[string]any{
+		"session_id":   sessionID,
+		"total_tokens": totalTokens,
+		"total_cost":   totalCost,
+		"llm_cost":     llmCost,
+		"tool_cost":    toolCost,
+	})
 }

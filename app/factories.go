@@ -8,7 +8,6 @@ import (
 	"github.com/david22573/codepicker/adapters/agent"
 	ctxAdapters "github.com/david22573/codepicker/adapters/context"
 	"github.com/david22573/codepicker/adapters/policy"
-	"github.com/david22573/codepicker/adapters/tools"
 	domainAgent "github.com/david22573/codepicker/domain/agent"
 	"github.com/david22573/codepicker/domain/config"
 	"github.com/david22573/codepicker/domain/event"
@@ -16,7 +15,6 @@ import (
 	"github.com/david22573/codepicker/infra/llm"
 	"github.com/david22573/codepicker/infra/logging"
 	"github.com/david22573/codepicker/infra/ratelimit"
-	"github.com/david22573/codepicker/infra/shell"
 	"github.com/david22573/codepicker/infra/storage"
 )
 
@@ -58,10 +56,8 @@ func NewStorageStack(rootDir string, dryRun bool) (*storage.SQLiteRepository, *f
 	return repo, workspaceMgr, shadowMgr, nil
 }
 
-func NewAgentStack(opts AgentStackOpts) (*agent.ReActAgent, *agent.Planner, *agent.PlanExecutor, *agent.Auditor, *agent.Explainer, *agent.TwoPassEngine, *ctxAdapters.Reranker, error) {
+func NewAgentStack(opts AgentStackOpts, toolsOverride []domainAgent.Tool) (*agent.ReActAgent, *agent.Planner, *agent.PlanExecutor, *agent.Auditor, *agent.Explainer, *agent.TwoPassEngine, *ctxAdapters.Reranker, error) {
 
-	shellExec := shell.NewExecutor(30*time.Second, 5000, opts.DryRun, opts.RootDir)
-	allTools := tools.DefaultSet(opts.ShadowMgr, shellExec, opts.RootDir, opts.EmbedClient, opts.Repo)
 	rateLimiter := ratelimit.NewToolRateLimiter(20)
 
 	var guardRail domainAgent.Policy
@@ -78,15 +74,12 @@ func NewAgentStack(opts AgentStackOpts) (*agent.ReActAgent, *agent.Planner, *age
 	cachedLLM := llm.NewCachedAdapter(opts.LLMClient, cacheDir, enableCaching)
 
 	// Phase 4: Wire Concurrency & Throughput mechanisms
-	// Enforce backpressure (max 5 concurrent LLM calls across the app instance)
 	backpressuredLLM := llm.NewBackpressureAdapter(cachedLLM, 5, 30*time.Second)
-
-	// Bounded worker pool for tools (max 10 concurrent tool executions system-wide)
 	toolPool := agent.NewBoundedWorkerPool(10)
 
 	worker := agent.NewReActAgent(
 		backpressuredLLM,
-		allTools,
+		toolsOverride,
 		opts.EventBus,
 		opts.Logger,
 		guardRail,
@@ -104,7 +97,7 @@ func NewAgentStack(opts AgentStackOpts) (*agent.ReActAgent, *agent.Planner, *age
 	auditor := agent.NewAuditor(
 		backpressuredLLM,
 		opts.Repo,
-		allTools,
+		toolsOverride,
 		guardRail,
 		opts.Logger,
 		opts.CostTracker,
@@ -119,7 +112,7 @@ func NewAgentStack(opts AgentStackOpts) (*agent.ReActAgent, *agent.Planner, *age
 	twoPass := agent.NewTwoPassEngine(
 		backpressuredLLM,
 		opts.Repo,
-		allTools,
+		toolsOverride,
 		guardRail,
 		opts.Logger,
 		opts.CostTracker,

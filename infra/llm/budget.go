@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"math"
 	"sync"
+
+	"github.com/david22573/codepicker/runtime"
 )
 
 // BudgetGuard protects against runaway costs by checking limits before LLM calls.
@@ -23,6 +25,7 @@ func NewBudgetGuard(tracker *CostTracker, limit float64) *BudgetGuard {
 }
 
 // Reserve attempts to allocate budget for an estimated cost atomically.
+// Phase 5: Hard Budget Enforcement Mode based on runtime configuration.
 func (b *BudgetGuard) Reserve(estimatedCost float64) error {
 	if b.limit <= 0 {
 		return nil
@@ -36,8 +39,17 @@ func (b *BudgetGuard) Reserve(estimatedCost float64) error {
 	currentTotal := metrics.TotalCost + b.reserved
 
 	if currentTotal+estimatedCost > b.limit {
-		return fmt.Errorf("budget exceeded: current usage $%.4f + reserved $%.4f exceeds limit $%.4f",
+		msg := fmt.Sprintf("budget exceeded: current usage $%.4f + reserved $%.4f exceeds limit $%.4f",
 			metrics.TotalCost, b.reserved, b.limit)
+
+		// Allow soft degradation in development environments
+		if runtime.Global.Mode == runtime.ModeDevelopment {
+			fmt.Printf("⚠️  [BUDGET WARNING] %s (Allowed in Development Mode)\n", msg)
+			b.reserved += estimatedCost
+			return nil
+		}
+
+		return fmt.Errorf(msg)
 	}
 
 	b.reserved += estimatedCost

@@ -14,7 +14,7 @@ const (
 	EventAgentFinish      EventType = "agent.finish"
 	EventError            EventType = "error"
 	
-	// Phase 4: Observability Expansion
+	// Phase 4 & 5: Observability Expansion
 	EventBudgetReserve    EventType = "budget.reserve"
 	EventBudgetCommit     EventType = "budget.commit"
 	EventBudgetExhausted  EventType = "budget.exhausted"
@@ -22,6 +22,7 @@ const (
 	EventMemoryPruned     EventType = "memory.pruned"
 	EventPolicyBlock      EventType = "policy.block"
 	EventToolRetry        EventType = "tool.retry"
+	EventSessionCost      EventType = "session.cost_update"
 )
 
 // Event represents a single unit of activity in the system.
