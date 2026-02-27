@@ -18,7 +18,6 @@ import (
 	"github.com/david22573/codepicker/runtime"
 )
 
-// ReActAgent implements the autonomous agent loop using Native Tool Calling.
 type ReActAgent struct {
 	model       llm.Provider
 	toolSchemas []llm.ToolDefinition
@@ -34,7 +33,6 @@ type ReActAgent struct {
 	verbose     bool
 }
 
-// NewReActAgent initializes the agent with its decomposed subsystems.
 func NewReActAgent(
 	model llm.Provider,
 	tools []domainAgent.Tool,
@@ -43,6 +41,7 @@ func NewReActAgent(
 	policy domainAgent.Policy,
 	costTracker *llm.CostTracker,
 	rateLimiter *ratelimit.ToolRateLimiter,
+	toolPool ToolWorkerPool,
 	budget float64,
 	maxTurns int,
 ) *ReActAgent {
@@ -80,7 +79,7 @@ func NewReActAgent(
 		budgetGuard: llm.NewBudgetGuard(costTracker, budget),
 		memory:      NewTurnMemory(runtime.Global.DefaultMemoryTokens),
 		emitter:     emitter,
-		executor:    NewToolExecutor(toolMap, policy, rateLimiter, processor, emitter, false),
+		executor:    NewToolExecutor(toolMap, policy, rateLimiter, processor, emitter, toolPool, false),
 		sysMsg:      sysMsg,
 	}
 }
@@ -96,7 +95,6 @@ func (a *ReActAgent) SetVerbose(verbose bool) {
 
 func (a *ReActAgent) GetSystemPrompt() string { return a.sysMsg }
 
-// Run executes the core ReAct loop, coordinating the subsystems and mapping failures.
 func (a *ReActAgent) Run(ctx context.Context, taskInput string) (string, error) {
 	maxTurns := a.controller.CalculateAllowedTurns(0.5)
 

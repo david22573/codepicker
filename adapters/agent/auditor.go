@@ -26,11 +26,11 @@ type Auditor struct {
 	logger      *logging.Logger
 	costTracker *llm.CostTracker
 	rateLimiter *ratelimit.ToolRateLimiter
+	toolPool    ToolWorkerPool
 	bus         *event.DataBus
 	budget      float64
 }
 
-// NewAuditor initializes the auditor with a budget cap.
 func NewAuditor(
 	model llm.Provider,
 	repo domainAgent.Repository,
@@ -39,6 +39,7 @@ func NewAuditor(
 	logger *logging.Logger,
 	costTracker *llm.CostTracker,
 	rateLimiter *ratelimit.ToolRateLimiter,
+	toolPool ToolWorkerPool,
 	bus *event.DataBus,
 	budget float64,
 ) *Auditor {
@@ -50,12 +51,12 @@ func NewAuditor(
 		logger:      logger,
 		costTracker: costTracker,
 		rateLimiter: rateLimiter,
+		toolPool:    toolPool,
 		bus:         bus,
 		budget:      budget,
 	}
 }
 
-// SuggestImprovements scans the codebase to identify actionable code quality or security tasks.
 func (a *Auditor) SuggestImprovements(ctx context.Context, primer string) ([]string, error) {
 	systemPrompt, err := prompts.Render("auditor_scout", map[string]any{
 		"Primer": primer,
@@ -77,6 +78,7 @@ func (a *Auditor) SuggestImprovements(ctx context.Context, primer string) ([]str
 		a.policy,
 		a.costTracker,
 		a.rateLimiter,
+		a.toolPool,
 		scoutBudget,
 		20,
 	)
@@ -104,7 +106,6 @@ func (a *Auditor) SuggestImprovements(ctx context.Context, primer string) ([]str
 	return tasks, nil
 }
 
-// RunAudit performs a comprehensive security and quality analysis.
 func (a *Auditor) RunAudit(ctx context.Context, input string) (*audit.Report, error) {
 	systemPrompt, err := prompts.Render("auditor_comprehensive", nil)
 	if err != nil {
@@ -124,6 +125,7 @@ func (a *Auditor) RunAudit(ctx context.Context, input string) (*audit.Report, er
 		a.policy,
 		a.costTracker,
 		a.rateLimiter,
+		a.toolPool,
 		auditBudget,
 		200,
 	)

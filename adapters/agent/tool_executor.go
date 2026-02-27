@@ -20,6 +20,7 @@ type ToolExecutor struct {
 	rateLimiter *ratelimit.ToolRateLimiter
 	processor   *ObservationProcessor
 	emitter     *EventEmitter
+	pool        ToolWorkerPool
 	verbose     bool
 }
 
@@ -29,6 +30,7 @@ func NewToolExecutor(
 	rateLimiter *ratelimit.ToolRateLimiter,
 	processor *ObservationProcessor,
 	emitter *EventEmitter,
+	pool ToolWorkerPool,
 	verbose bool,
 ) *ToolExecutor {
 	return &ToolExecutor{
@@ -37,12 +39,13 @@ func NewToolExecutor(
 		rateLimiter: rateLimiter,
 		processor:   processor,
 		emitter:     emitter,
+		pool:        pool,
 		verbose:     verbose,
 	}
 }
 
-// ExecuteConcurrent runs the requested tool calls in parallel and returns their results
-// in a deterministic order matching the input slice.
+// ExecuteConcurrent runs the requested tool calls in parallel through the bounded worker pool
+// and returns their results in a deterministic order matching the input slice.
 func (te *ToolExecutor) ExecuteConcurrent(ctx context.Context, calls []llm.ToolCall) []llm.Message {
 	if len(calls) == 0 {
 		return nil
@@ -53,9 +56,12 @@ func (te *ToolExecutor) ExecuteConcurrent(ctx context.Context, calls []llm.ToolC
 
 	for i, call := range calls {
 		wg.Add(1)
-		go func(idx int, tc llm.ToolCall) {
-			defer wg.Done()
+		
+		idx := i
+		tc := call
 
+		te.pool.Submit(func() {
+			defer wg.Done()
 			output := te.executeSingle(ctx, tc)
 			
 			results[idx] = llm.Message{
@@ -64,7 +70,7 @@ func (te *ToolExecutor) ExecuteConcurrent(ctx context.Context, calls []llm.ToolC
 				Name:       tc.Function.Name,
 				Content:    output,
 			}
-		}(i, call)
+		})
 	}
 
 	wg.Wait()
@@ -106,7 +112,6 @@ func (te *ToolExecutor) executeSingle(ctx context.Context, call llm.ToolCall) st
 	metrics.GetRegistry().IncCounter("codepicker_tool_calls_executed", map[string]string{"tool": call.Function.Name})
 
 	if err != nil {
-		// Log failures contextually back to the LLM (does not halt execution)
 		output = fmt.Sprintf("Error: %v", err)
 	}
 

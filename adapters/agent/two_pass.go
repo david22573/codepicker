@@ -24,6 +24,7 @@ type TwoPassEngine struct {
 	costTracker   *llm.CostTracker
 	budgetGuard   *llm.BudgetGuard
 	rateLimiter   *ratelimit.ToolRateLimiter
+	toolPool      ToolWorkerPool
 	PackedContext string
 }
 
@@ -35,6 +36,7 @@ func NewTwoPassEngine(
 	logger *logging.Logger,
 	costTracker *llm.CostTracker,
 	rateLimiter *ratelimit.ToolRateLimiter,
+	toolPool ToolWorkerPool,
 	budget float64,
 	packedContext string,
 ) *TwoPassEngine {
@@ -49,6 +51,7 @@ func NewTwoPassEngine(
 		costTracker:   costTracker,
 		budgetGuard:   bg,
 		rateLimiter:   rateLimiter,
+		toolPool:      toolPool,
 		PackedContext: packedContext,
 	}
 }
@@ -72,7 +75,9 @@ func (e *TwoPassEngine) RunAnalysis(ctx context.Context, task, contextFile, prim
 	bus := event.NewDataBus()
 	defer bus.Close()
 
-	analyst := NewReActAgent(e.model, readTools, bus, e.logger, e.policy, e.costTracker, e.rateLimiter, e.budgetGuard.Remaining(), 100)
+	analyst := NewReActAgent(
+		e.model, readTools, bus, e.logger, e.policy, e.costTracker, e.rateLimiter, e.toolPool, e.budgetGuard.Remaining(), 100,
+	)
 	analyst.UpdateSystemPrompt(systemPrompt)
 
 	input := fmt.Sprintf("<task>\n%s\n</task>\n\n<initial_focus_file>\n%s\n</initial_focus_file>", task, contextFile)

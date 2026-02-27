@@ -72,54 +72,64 @@ func NewAgentStack(opts AgentStackOpts) (*agent.ReActAgent, *agent.Planner, *age
 		guardRail = policy.NewEnforcer(*policyConfig, opts.DryRun)
 	}
 
-	// Phase 3: Wire in the LLM Caching Layer for CI/DryRun modes
+	// Phase 3: LLM Caching Layer
 	cacheDir := filepath.Join(opts.RootDir, ".codepicker", "cache")
 	enableCaching := opts.CIMode || opts.DryRun
 	cachedLLM := llm.NewCachedAdapter(opts.LLMClient, cacheDir, enableCaching)
 
+	// Phase 4: Wire Concurrency & Throughput mechanisms
+	// Enforce backpressure (max 5 concurrent LLM calls across the app instance)
+	backpressuredLLM := llm.NewBackpressureAdapter(cachedLLM, 5, 30*time.Second)
+
+	// Bounded worker pool for tools (max 10 concurrent tool executions system-wide)
+	toolPool := agent.NewBoundedWorkerPool(10)
+
 	worker := agent.NewReActAgent(
-		cachedLLM,
+		backpressuredLLM,
 		allTools,
 		opts.EventBus,
 		opts.Logger,
 		guardRail,
 		opts.CostTracker,
 		rateLimiter,
+		toolPool,
 		opts.Config.LLM.BudgetCap,
 		opts.Config.Agent.MaxTurns,
 	)
 	worker.SetVerbose(opts.Verbose)
 
-	planner := agent.NewPlanner(cachedLLM)
+	planner := agent.NewPlanner(backpressuredLLM)
 	executor := agent.NewPlanExecutor(worker, opts.Repo, opts.WorkspaceMgr, opts.ShadowMgr, opts.Logger)
 
 	auditor := agent.NewAuditor(
-		cachedLLM,
+		backpressuredLLM,
 		opts.Repo,
 		allTools,
 		guardRail,
 		opts.Logger,
 		opts.CostTracker,
 		rateLimiter,
+		toolPool,
 		opts.EventBus,
 		opts.Config.LLM.BudgetCap,
 	)
 
-	explainer := agent.NewExplainer(cachedLLM, opts.Repo, opts.CostTracker, opts.Config.LLM.BudgetCap)
+	explainer := agent.NewExplainer(backpressuredLLM, opts.Repo, opts.CostTracker, opts.Config.LLM.BudgetCap)
 
 	twoPass := agent.NewTwoPassEngine(
-		cachedLLM,
+		backpressuredLLM,
 		opts.Repo,
 		allTools,
 		guardRail,
 		opts.Logger,
 		opts.CostTracker,
 		rateLimiter,
+		toolPool,
 		opts.Config.LLM.BudgetCap,
 		"",
 	)
 
-	reranker := ctxAdapters.NewReranker(cachedLLM, opts.CostTracker, opts.Config.LLM.BudgetCap)
+	reranker := ctxAdapters.NewReranker(backpressuredLLM, opts.CostTracker, opts.Config.LLM.BudgetCap)
 
 	return worker, planner, executor, auditor, explainer, twoPass, reranker, nil
 }
