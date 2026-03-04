@@ -24,3 +24,8 @@ func Clean(relPath string) (string, error) {
 
 	return clean, nil
 }
+
+// GetStateDBPath returns the absolute path to the CodePicker local state database.
+func GetStateDBPath(projectRoot string) string {
+	return filepath.Join(projectRoot, ".codepicker", "state.db")
+}

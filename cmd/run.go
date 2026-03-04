@@ -1,12 +1,9 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
 	"os"
-	"os/signal"
 	"path/filepath"
-	"syscall"
 
 	"github.com/david22573/codepicker/app"
 	"github.com/david22573/codepicker/domain/task"
@@ -22,26 +19,18 @@ var runCmd = &cobra.Command{
 	Use:   "run [task description]",
 	Short: "Run a single task using the agent",
 	Args:  cobra.MinimumNArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
-		apiKey := os.Getenv("OPENROUTER_API_KEY")
-		if apiKey == "" {
-			fmt.Println("❌ Error: OPENROUTER_API_KEY is not set.")
-			os.Exit(1)
-		}
-
+	RunE: func(cmd *cobra.Command, args []string) error {
+		apiKey := getAPIKeyOrExit()
 		taskDescription := args[0]
 		cwd, _ := os.Getwd()
 
 		container, err := app.NewContainer(apiKey, cwd, runLlmModel, runDryRun, runCiMode, GetVerbose())
 		if err != nil {
-			fmt.Printf("❌ Container Init Failed: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("container init failed: %w", err)
 		}
 		defer container.Close()
 
-		// 4.4 Signal Handling
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-		defer stop()
+		ctx := cmd.Context()
 
 		fmt.Printf("🚀 Running task: %s\n", taskDescription)
 
@@ -59,8 +48,7 @@ var runCmd = &cobra.Command{
 		fmt.Println("🧠 Generating execution plan...")
 		plan, err := container.Planner.CreatePlan(ctx, taskDescription, "", primer)
 		if err != nil {
-			fmt.Printf("❌ Planning failed: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("planning failed: %w", err)
 		}
 
 		fmt.Printf("📝 Plan generated: %s (%d steps)\n", plan.ID, len(plan.Steps))
@@ -71,8 +59,7 @@ var runCmd = &cobra.Command{
 
 		err = container.PlanExecutor.Execute(ctx, plan)
 		if err != nil {
-			fmt.Printf("❌ Execution failed: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("execution failed: %w", err)
 		}
 
 		fmt.Println("\n✅ Task Execution Completed.")
@@ -83,6 +70,8 @@ var runCmd = &cobra.Command{
 			}
 			fmt.Printf("   %s Step %d: %s\n", icon, step.ID, step.Description)
 		}
+
+		return nil
 	},
 }
 

@@ -16,6 +16,7 @@ import (
 	"github.com/david22573/codepicker/infra/fs"
 	"github.com/david22573/codepicker/infra/llm"
 	"github.com/david22573/codepicker/infra/logging"
+	"github.com/david22573/codepicker/infra/pathutil"
 	"github.com/david22573/codepicker/infra/ratelimit"
 	"github.com/david22573/codepicker/infra/storage"
 	"go.uber.org/zap"
@@ -49,7 +50,7 @@ func NewLLMStack(apiKey string, cfg *config.AppConfig) (*llm.OpenRouterAdapter, 
 }
 
 func NewStorageStack(rootDir string, dryRun bool) (*storage.SQLiteRepository, *fs.WorkspaceManager, *fs.ShadowManager, error) {
-	dbPath := filepath.Join(rootDir, ".codepicker", "state.db")
+	dbPath := pathutil.GetStateDBPath(rootDir)
 	repo, err := storage.NewSQLiteRepository(dbPath)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to init sqlite: %w", err)

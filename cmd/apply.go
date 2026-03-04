@@ -14,30 +14,23 @@ var applyCmd = &cobra.Command{
 	Long: `Moves files from the shadow storage (.codepicker/shadow) to the actual project structure.
 If a filename is provided, only that file is applied.
 If no argument is provided, ALL pending shadow files are applied.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		// Get project root
+	RunE: func(cmd *cobra.Command, args []string) error {
 		wd, _ := os.Getwd()
 
-		// Initialize ShadowManager directly
-		// We default DryRun to false here because 'apply' is an explicit user action
 		shadowMgr := fs.NewShadowManager(wd, false)
 
-		// Determine which files to apply
 		var filesToApply []string
 
 		if len(args) > 0 {
-			// User specified a specific file
 			filesToApply = append(filesToApply, args[0])
 		} else {
-			// Auto-discover all pending files
 			pending, err := shadowMgr.ListShadowFiles()
 			if err != nil {
-				fmt.Printf("❌ Failed to list shadow files: %v\n", err)
-				os.Exit(1)
+				return fmt.Errorf("failed to list shadow files: %w", err)
 			}
 			if len(pending) == 0 {
 				fmt.Println("✨ No pending shadow changes found.")
-				return
+				return nil
 			}
 			filesToApply = pending
 		}
@@ -58,9 +51,10 @@ If no argument is provided, ALL pending shadow files are applied.`,
 		if successCount == len(filesToApply) {
 			fmt.Println("🎉 All changes applied successfully.")
 		} else {
-			fmt.Printf("⚠️  Applied %d/%d files. Check errors above.\n", successCount, len(filesToApply))
-			os.Exit(1)
+			return fmt.Errorf("applied %d/%d files with errors", successCount, len(filesToApply))
 		}
+
+		return nil
 	},
 }
 

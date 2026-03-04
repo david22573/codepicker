@@ -1,5 +1,7 @@
 package agent
 
+import "sync"
+
 // ToolTask defines a unit of work for a tool execution.
 type ToolTask func()
 
@@ -7,25 +9,43 @@ type ToolTask func()
 // This prevents runaway goroutines when processing complex parallel plans.
 type ToolWorkerPool interface {
 	Submit(task ToolTask)
+	Close()
 }
 
-// BoundedWorkerPool implements ToolWorkerPool using a semaphore to limit concurrency.
+// BoundedWorkerPool implements ToolWorkerPool using a fixed set of long-lived workers.
 type BoundedWorkerPool struct {
-	sem chan struct{}
+	tasks chan ToolTask
+	wg    sync.WaitGroup
 }
 
-// NewBoundedWorkerPool creates a new pool allowing up to maxWorkers concurrent tasks.
+// NewBoundedWorkerPool creates a new pool with maxWorkers concurrent background goroutines.
 func NewBoundedWorkerPool(maxWorkers int) *BoundedWorkerPool {
-	return &BoundedWorkerPool{
-		sem: make(chan struct{}, maxWorkers),
+	p := &BoundedWorkerPool{
+		// Buffer allows producers to queue up work without immediately blocking
+		tasks: make(chan ToolTask, maxWorkers*2),
 	}
+
+	p.wg.Add(maxWorkers)
+	for i := 0; i < maxWorkers; i++ {
+		go func() {
+			defer p.wg.Done()
+			// Workers stay alive and pull tasks until the channel is closed
+			for task := range p.tasks {
+				task()
+			}
+		}()
+	}
+
+	return p
 }
 
-// Submit queues a task and blocks if the pool is at maximum capacity.
+// Submit queues a task. It will block if the queue is full, applying natural backpressure.
 func (p *BoundedWorkerPool) Submit(task ToolTask) {
-	p.sem <- struct{}{} // Acquire slot
-	go func() {
-		defer func() { <-p.sem }() // Release slot
-		task()
-	}()
+	p.tasks <- task
+}
+
+// Close signals all workers to shut down after finishing their current tasks.
+func (p *BoundedWorkerPool) Close() {
+	close(p.tasks)
+	p.wg.Wait()
 }

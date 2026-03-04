@@ -7,6 +7,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/david22573/codepicker/infra/pathutil"
 	"github.com/david22573/codepicker/infra/storage"
 	"github.com/spf13/cobra"
 )
@@ -88,7 +89,7 @@ var inspectCmd = &cobra.Command{
 // Helper to quickly grab the repo without the full container overhead
 func getRepo() (*storage.SQLiteRepository, error) {
 	cwd, _ := os.Getwd()
-	dbPath := fmt.Sprintf("%s/.codepicker/state.db", cwd)
+	dbPath := pathutil.GetStateDBPath(cwd)
 	return storage.NewSQLiteRepository(dbPath)
 }
 

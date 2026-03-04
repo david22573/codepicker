@@ -1,11 +1,11 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"text/tabwriter"
 
+	"github.com/david22573/codepicker/infra/pathutil"
 	"github.com/david22573/codepicker/infra/storage"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -14,20 +14,18 @@ import (
 var costCmd = &cobra.Command{
 	Use:   "cost",
 	Short: "Show accumulated LLM usage and costs",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		cwd, _ := os.Getwd()
-		dbPath := fmt.Sprintf("%s/.codepicker/state.db", cwd)
+		dbPath := pathutil.GetStateDBPath(cwd)
 		repo, err := storage.NewSQLiteRepository(dbPath)
 		if err != nil {
-			fmt.Printf("❌ Failed to connect to database: %v\n", err)
-			return
+			return fmt.Errorf("failed to connect to database: %w", err)
 		}
 		defer repo.Close()
 
-		cost, tokens, err := repo.GetTotalCost(context.Background())
+		cost, tokens, err := repo.GetTotalCost(cmd.Context())
 		if err != nil {
-			fmt.Printf("❌ Failed to fetch cost metrics: %v\n", err)
-			return
+			return fmt.Errorf("failed to fetch cost metrics: %w", err)
 		}
 
 		fmt.Println("\n===================================================")
@@ -40,7 +38,6 @@ var costCmd = &cobra.Command{
 
 		avgCost := 0.0
 		if tokens > 0 {
-			// Very rough estimate of cost per 1k tokens
 			avgCost = (cost / float64(tokens)) * 1000
 		}
 		fmt.Fprintf(w, "Avg Cost/1k Tokens:\t$%.4f\n", avgCost)
@@ -49,6 +46,8 @@ var costCmd = &cobra.Command{
 		fmt.Println("===================================================")
 		fmt.Println(color.HiBlackString(" * Costs are estimates based on configured rates."))
 		fmt.Println("")
+
+		return nil
 	},
 }
 

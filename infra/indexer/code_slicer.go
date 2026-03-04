@@ -26,7 +26,8 @@ func NewCodeSlicer() *CodeSlicer {
 }
 
 // SliceFile parses a Go file and breaks it into semantic CodeSlices.
-// OPTIMIZATION: Recursively splits large functions into smaller logical blocks.
+// OPTIMIZATION: Recursively splits large functions into smaller logical blocks,
+// with a fallback to the parent block if no substantial sub-blocks exist.
 func (s *CodeSlicer) SliceFile(filePath string) ([]context.CodeSlice, error) {
 	content, err := os.ReadFile(filePath)
 	if err != nil {
@@ -74,7 +75,13 @@ func (s *CodeSlicer) SliceFile(filePath string) ([]context.CodeSlice, error) {
 			if end-start > 50 {
 				// Recursively slice the body
 				subSlices := s.sliceBlock(filePath, d.Body, symbols, fileHash)
-				slices = append(slices, subSlices...)
+
+				// Fallback: If sub-slicing yielded nothing substantial, grab the whole parent function.
+				if len(subSlices) == 0 {
+					slices = append(slices, s.createSlice(filePath, d, context.SliceTypeFunction, symbols, fileHash))
+				} else {
+					slices = append(slices, subSlices...)
+				}
 			} else {
 				// Keep it whole
 				slices = append(slices, s.createSlice(filePath, d, context.SliceTypeFunction, symbols, fileHash))
@@ -119,8 +126,7 @@ func (s *CodeSlicer) sliceBlock(filePath string, block *ast.BlockStmt, parentSym
 		}
 	}
 
-	// If no sub-blocks were large enough, we might have missed the forest for the trees.
-	// In a production version, you'd add fallback logic here to grab the whole parent if sub-slicing yielded nothing.
+	// Returning an empty slice here correctly triggers the parent fallback logic.
 	return slices
 }
 

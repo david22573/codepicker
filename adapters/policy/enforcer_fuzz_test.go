@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -37,21 +38,10 @@ func FuzzEnforcer(f *testing.F) {
 
 		// Invariant C: Specific dangerous patterns must ALWAYS be blocked
 		// This is a "property-based" check within the fuzz test
-		if contains(args, "rm -rf") && tool == "run_cmd" {
+		if strings.Contains(args, "rm -rf") && tool == "run_cmd" {
 			if allowed {
 				t.Fatalf("CRITICAL SECURITY FAILURE: Enforcer allowed 'rm -rf' in args: %s", args)
 			}
 		}
 	})
-}
-
-func contains(s, substr string) bool {
-	// Simple helper to avoid importing strings if not needed,
-	// but standard library strings.Contains is fine.
-	for i := 0; i < len(s)-len(substr)+1; i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }

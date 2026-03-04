@@ -154,8 +154,12 @@ func ApplySearchReplaceBlocks(rootDir string, text string) error {
 			return err
 		}
 		if err := os.Rename(tmpPath, fullPath); err != nil {
-			os.Remove(tmpPath) // Cleanup tmp if rename fails
-			return fmt.Errorf("failed to atomically commit %s: %w", file, err)
+			// EXDEV Fallback: os.Rename fails across different partitions/drives.
+			if copyErr := copyFile(tmpPath, fullPath); copyErr != nil {
+				os.Remove(tmpPath) // Cleanup tmp if both rename and copy fail
+				return fmt.Errorf("failed to atomically commit %s: rename err: %w, copy err: %v", file, err, copyErr)
+			}
+			os.Remove(tmpPath) // Cleanup tmp after successful cross-device copy
 		}
 	}
 	return nil

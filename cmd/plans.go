@@ -15,28 +15,29 @@ import (
 var plansCmd = &cobra.Command{
 	Use:   "plans [plan_id]",
 	Short: "List plans or preview a specific plan",
-	Run: func(cmd *cobra.Command, args []string) {
-		apiKey := os.Getenv("OPENROUTER_API_KEY")
+	RunE: func(cmd *cobra.Command, args []string) error {
+		apiKey := getAPIKeyOrExit()
 		cwd, _ := os.Getwd()
 
-		// Pass verboseFlag to NewContainer
-		container, err := app.NewContainer(apiKey, cwd, "", false, false, verboseFlag)
+		container, err := app.NewContainer(apiKey, cwd, "", false, false, GetVerbose())
 		if err != nil {
-			fmt.Printf("❌ Failed to initialize: %v\n", err)
-			return
+			return fmt.Errorf("failed to initialize: %w", err)
+		}
+		defer container.Close()
+
+		ctx := cmd.Context()
+
+		if len(args) > 0 {
+			previewPlan(ctx, container, args[0])
+		} else {
+			printDashboard(ctx, container)
 		}
 
-		// Feature 1: Plan Preview Mode
-		if len(args) > 0 {
-			previewPlan(container, args[0])
-		} else {
-			printDashboard(container)
-		}
+		return nil
 	},
 }
 
-func previewPlan(c *app.Container, planID string) {
-	ctx := context.Background()
+func previewPlan(ctx context.Context, c *app.Container, planID string) {
 	plan, err := c.Repository.GetPlan(ctx, planID)
 	if err != nil {
 		ui.PrintError(fmt.Sprintf("Plan not found: %s", planID))
@@ -66,11 +67,10 @@ func previewPlan(c *app.Container, planID string) {
 	fmt.Printf("  codepicker run --plan %s\n", plan.ID)
 }
 
-func printDashboard(c *app.Container) {
-	// Clear screen for a clean dashboard view
+func printDashboard(ctx context.Context, c *app.Container) {
 	fmt.Print("\033[H\033[2J")
 
-	summaries, err := c.Repository.ListPlans(context.Background(), 10)
+	summaries, err := c.Repository.ListPlans(ctx, 10)
 	if err != nil {
 		fmt.Printf("Error loading plans: %v\n", err)
 		return

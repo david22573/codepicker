@@ -13,17 +13,33 @@ import (
 type CostObserver struct {
 	repo   domainAgent.Repository
 	logger *logging.Logger
+	writeQ chan event.Event
 }
 
 func NewCostObserver(repo domainAgent.Repository, logger *logging.Logger) *CostObserver {
 	return &CostObserver{
 		repo:   repo,
 		logger: logger,
+		// Buffer size of 100 handles bursts of cost updates without blocking the bus
+		writeQ: make(chan event.Event, 100),
 	}
 }
 
 // Start begins listening for cost events on the provided channel until the context is cancelled.
 func (o *CostObserver) Start(ctx context.Context, ch <-chan event.Event) {
+	// 1. Dedicated Async Database Writer
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case e := <-o.writeQ:
+				o.handleCostUpdate(ctx, e)
+			}
+		}
+	}()
+
+	// 2. Main Event Bus Subscriber Loop
 	go func() {
 		for {
 			select {
@@ -34,7 +50,13 @@ func (o *CostObserver) Start(ctx context.Context, ch <-chan event.Event) {
 					return
 				}
 				if e.Type == event.EventSessionCost {
-					o.handleCostUpdate(ctx, e)
+					// Non-blocking handoff. If DB is entirely locked up and queue fills,
+					// we drop the metric update to prioritize agent execution health.
+					select {
+					case o.writeQ <- e:
+					default:
+						o.logger.Warn("Cost observer write queue full, dropping cost event", zap.String("session_id", e.Payload["session_id"].(string)))
+					}
 				}
 			}
 		}
@@ -48,7 +70,7 @@ func (o *CostObserver) handleCostUpdate(ctx context.Context, e event.Event) {
 	}
 
 	totalTokens, _ := e.Payload["total_tokens"].(int)
-	
+
 	// Type assertion fallback for float64s depending on JSON unmarshalling behaviors
 	totalCost := extractFloat(e.Payload["total_cost"])
 	llmCost := extractFloat(e.Payload["llm_cost"])

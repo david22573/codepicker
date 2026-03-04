@@ -4,6 +4,7 @@ README.md
 go.sum
 codepicker_context.*
 *.md
-./../*.md
 *.yml
 Dockerfile
+*.sh
+tests

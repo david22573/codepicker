@@ -31,7 +31,7 @@ var contextIndexCmd = &cobra.Command{
 			targetDir = args[0]
 		}
 
-		apiKey := os.Getenv("OPENROUTER_API_KEY")
+		apiKey := getAPIKeyOrExit()
 		cwd, _ := os.Getwd()
 
 		// Initialize container to get the configured IndexManager
@@ -70,7 +70,7 @@ var contextExportCmd = &cobra.Command{
 		}
 
 		cwd, _ := os.Getwd()
-		apiKey := os.Getenv("OPENROUTER_API_KEY")
+		apiKey := getAPIKeyOrExit()
 		container, err := app.NewContainer(apiKey, cwd, "", false, false, verboseFlag)
 		if err != nil {
 			return err

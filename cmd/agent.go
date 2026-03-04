@@ -5,9 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/signal"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/david22573/codepicker/app"
@@ -23,19 +21,13 @@ var agentVerbose bool
 var agentCmd = &cobra.Command{
 	Use:   "agent",
 	Short: "Start an interactive session with the CodePicker agent",
-	Run: func(cmd *cobra.Command, args []string) {
-		apiKey := os.Getenv("OPENROUTER_API_KEY")
-		if apiKey == "" {
-			fmt.Println("❌ Error: OPENROUTER_API_KEY is not set.")
-			os.Exit(1)
-		}
-
+	RunE: func(cmd *cobra.Command, args []string) error {
+		apiKey := getAPIKeyOrExit()
 		cwd, _ := os.Getwd()
 
 		container, err := app.NewContainer(apiKey, cwd, "", agentDryRun, false, GetVerbose())
 		if err != nil {
-			fmt.Printf("❌ Container Init Failed: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("container init failed: %w", err)
 		}
 		defer container.Close()
 
@@ -67,28 +59,28 @@ var agentCmd = &cobra.Command{
 
 		container.PlanExecutor.UpdateSystemPrompt(cachedPrompt)
 
-		reader := bufio.NewReader(os.Stdin)
+		ctx := cmd.Context()
 
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-		defer stop()
+		inputChan := make(chan string)
+		go func() {
+			reader := bufio.NewReader(os.Stdin)
+			for {
+				in, err := reader.ReadString('\n')
+				if err != nil {
+					return
+				}
+				inputChan <- in
+			}
+		}()
 
 		for {
 			fmt.Print(color.GreenString("\n> "))
-
-			// Handle input reading in a way that respects context cancellation.
-			// Note: This goroutine may leak at shutdown if context is cancelled before input is read.
-			// This is accepted cosmetic behavior for a CLI app that is immediately exiting.
-			inputChan := make(chan string)
-			go func() {
-				in, _ := reader.ReadString('\n')
-				inputChan <- in
-			}()
 
 			var input string
 			select {
 			case <-ctx.Done():
 				fmt.Println("\nGracefully shutting down...")
-				return
+				return nil
 			case input = <-inputChan:
 			}
 
@@ -135,6 +127,8 @@ var agentCmd = &cobra.Command{
 				}
 			}
 		}
+
+		return nil
 	},
 }
 
@@ -143,4 +137,3 @@ func init() {
 	agentCmd.Flags().BoolVarP(&agentVerbose, "verbose", "v", false, "Enable verbose output")
 	rootCmd.AddCommand(agentCmd)
 }
-

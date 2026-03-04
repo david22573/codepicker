@@ -144,9 +144,14 @@ func (t *Transaction) Rollback() error {
 
 		// Atomic Move: Rename tmp to real
 		if err := os.Rename(tmpPath, realPath); err != nil {
-			// Try to clean up the tmp file if rename failed
-			_ = os.Remove(tmpPath)
-			errorList = append(errorList, fmt.Sprintf("failed to restore %s: %v", relPath, err))
+			// EXDEV Fallback: os.Rename fails across different partitions/drives.
+			// copyFile is shared from sandbox.go in the same package
+			if copyErr := copyFile(tmpPath, realPath); copyErr != nil {
+				_ = os.Remove(tmpPath)
+				errorList = append(errorList, fmt.Sprintf("failed to restore %s: rename err: %v, copy err: %v", relPath, err, copyErr))
+			} else {
+				_ = os.Remove(tmpPath) // Clean up tmp after successful cross-device copy
+			}
 		}
 	}
 
