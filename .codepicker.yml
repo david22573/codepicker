@@ -2,22 +2,22 @@
 src: .
 output: codepicker_context.md
 ai:
-  model: deepseek/deepseek-v3.2
-  temperature: 0.0
+    model: arcee-ai/trinity-large-preview:free
+    temperature: 0.0
 
 include:
-  - .go
-  - .mod
+    - .go
+    - .mod
 
 exclude:
-  - .git
-  - .codepicker
-  - node_modules
-  - vendor
+    - .git
+    - .codepicker
+    - node_modules
+    - vendor
 
 mcp_servers:
-  - name: github
-    command: npx
-    args: ["-y", "@modelcontextprotocol/server-github"]
-    env:
-      - "GITHUB_PERSONAL_ACCESS_TOKEN=YOUR_TOKEN_HERE"
+    - name: github
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-github"]
+      env:
+          - "GITHUB_PERSONAL_ACCESS_TOKEN=YOUR_TOKEN_HERE"
