@@ -1,4 +1,3 @@
-// adapters/agent/executor.go
 package agent
 
 import (
@@ -57,37 +56,29 @@ func (e *PlanExecutor) GetSystemPrompt() string {
 	return ""
 }
 
-// preflightCheck runs concurrently to validate that all required files exist before executing a step.
+// preflightCheck runs concurrently to validate file targets.
+// It logs a warning if a file doesn't exist, rather than failing,
+// to allow the agent to create new files seamlessly.
 func (e *PlanExecutor) preflightCheck(files []string) error {
 	if len(files) == 0 {
 		return nil
 	}
 
-	errCh := make(chan error, len(files))
 	var wg sync.WaitGroup
 
 	for _, file := range files {
 		wg.Add(1)
 		go func(f string) {
 			defer wg.Done()
-			
-			// Always assume project root is the base
+
 			target := filepath.Join(e.workspaceMgr.ProjectRoot, f)
 			if _, err := os.Stat(target); os.IsNotExist(err) {
-				errCh <- fmt.Errorf("target file does not exist: %s", f)
+				fmt.Printf(color.YellowString("   ⚠️  Note: Target file does not exist yet (expected if creating new): %s\n"), f)
 			}
 		}(file)
 	}
 
 	wg.Wait()
-	close(errCh)
-
-	// Return the first error encountered, if any
-	for err := range errCh {
-		if err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
@@ -147,14 +138,11 @@ func (e *PlanExecutor) Execute(ctx context.Context, plan *task.Plan) error {
 
 		// Phase 3: Parallel Preflight Check
 		if len(step.Files) > 0 {
-			fmt.Printf(color.HiBlackString("   🔍 Running preflight existence check on %d files...\n"), len(step.Files))
+			fmt.Printf(color.HiBlackString("   🔍 Running preflight check on %d files...\n"), len(step.Files))
 		}
-		if err := e.preflightCheck(step.Files); err != nil {
-			fmt.Printf("❌ Preflight validation failed: %v\n", err)
-			plan.MarkStepFailed(step.ID, err)
-			_ = e.repo.SavePlan(context.Background(), plan)
-			return err
-		}
+
+		// This now safely warns instead of returning a hard error
+		_ = e.preflightCheck(step.Files)
 
 		if !e.autoConfirm {
 			fmt.Println(color.HiBlackString("   Instruction: %s", step.Instruction))
@@ -171,6 +159,7 @@ func (e *PlanExecutor) Execute(ctx context.Context, plan *task.Plan) error {
 		}
 
 		for _, file := range step.Files {
+			// txn.BackupFile correctly handles missing files by marking them for deletion on rollback
 			if err := txn.BackupFile(file); err != nil {
 				e.logger.Error("failed to backup file", zap.String("file", file), zap.Error(err))
 			}
@@ -185,7 +174,7 @@ func (e *PlanExecutor) Execute(ctx context.Context, plan *task.Plan) error {
 		}
 
 		fmt.Println(color.CyanString("   🤖 Handing control to Agent for step execution..."))
-		
+
 		result, err := e.worker.Run(ctx, workerInput)
 		if err != nil {
 			fmt.Printf(color.RedString("   ❌ Agent failed to complete step: %v\n"), err)
@@ -205,7 +194,7 @@ func (e *PlanExecutor) Execute(ctx context.Context, plan *task.Plan) error {
 		changes, _ := e.shadowMgr.ListShadowFiles()
 
 		if len(changes) == 0 {
-			fmt.Printf(color.YellowString("   ⚠️  WARNING: Step completed but no files were modified.\n   Agent may not have used edit_file or write_file.\n"))
+			fmt.Printf("%s", color.YellowString("   ⚠️  WARNING: Step completed but no files were modified.\n   Agent may not have used edit_file or write_file.\n"))
 			fmt.Printf(color.HiBlackString("   Agent response: %s\n"), result)
 		}
 
