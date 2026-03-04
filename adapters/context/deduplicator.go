@@ -3,10 +3,10 @@ package context
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"strings"
 	"sync"
 )
 
-// SemanticDeduplicator tracks context chunks to prevent redundant LLM token usage across turns.
 type SemanticDeduplicator struct {
 	seenHashes map[string]bool
 	mu         sync.RWMutex
@@ -18,8 +18,6 @@ func NewSemanticDeduplicator() *SemanticDeduplicator {
 	}
 }
 
-// IsUnique checks if the exact content string has already been embedded in the context.
-// If it is unique, it registers it and returns true.
 func (d *SemanticDeduplicator) IsUnique(content string) bool {
 	hash := d.hashContent(content)
 
@@ -41,12 +39,13 @@ func (d *SemanticDeduplicator) IsUnique(content string) bool {
 }
 
 func (d *SemanticDeduplicator) hashContent(content string) string {
+	// Strip whitespace and normalize formatting before hashing to increase deduplication rates
+	normalized := strings.Join(strings.Fields(content), " ")
 	h := sha256.New()
-	h.Write([]byte(content))
+	h.Write([]byte(normalized))
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// Clear resets the deduplicator for a new agent session.
 func (d *SemanticDeduplicator) Clear() {
 	d.mu.Lock()
 	defer d.mu.Unlock()

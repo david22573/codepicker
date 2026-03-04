@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"sync"
+	"time"
 
 	domainAgent "github.com/david22573/codepicker/domain/agent"
 	"github.com/david22573/codepicker/domain/event"
@@ -9,49 +11,92 @@ import (
 	"go.uber.org/zap"
 )
 
-// CostObserver listens to the event bus and persists session metrics to the database.
 type CostObserver struct {
 	repo   domainAgent.Repository
 	logger *logging.Logger
 	writeQ chan event.Event
+	wg     sync.WaitGroup
+	stop   chan struct{}
 }
 
 func NewCostObserver(repo domainAgent.Repository, logger *logging.Logger) *CostObserver {
 	return &CostObserver{
 		repo:   repo,
 		logger: logger,
-		// Buffer size of 100 handles bursts of cost updates without blocking the bus
-		writeQ: make(chan event.Event, 100),
+		writeQ: make(chan event.Event, 1000), // Increased buffer to handle spikes
+		stop:   make(chan struct{}),
 	}
 }
 
-// Start begins listening for cost events on the provided channel until the context is cancelled.
 func (o *CostObserver) Start(ctx context.Context, ch <-chan event.Event) {
-	// 1. Dedicated Async Database Writer
+	o.wg.Add(1)
 	go func() {
+		defer o.wg.Done()
+
+		batch := make(map[string]*domainAgent.Execution)
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+
+		flush := func() {
+			for sessionID, exec := range batch {
+				if err := o.repo.SaveExecution(context.Background(), exec); err != nil {
+					o.logger.Error("failed to persist session cost metrics", zap.Error(err), zap.String("session_id", sessionID))
+				} else {
+					o.logger.Debug("persisted session cost metrics", zap.String("session_id", sessionID), zap.Float64("cost", exec.Cost))
+				}
+			}
+			batch = make(map[string]*domainAgent.Execution)
+		}
+
 		for {
 			select {
 			case <-ctx.Done():
+				flush()
 				return
+			case <-o.stop:
+				flush()
+				return
+			case <-ticker.C:
+				flush()
 			case e := <-o.writeQ:
-				o.handleCostUpdate(ctx, e)
+				sessionID, ok := e.Payload["session_id"].(string)
+				if !ok || sessionID == "" {
+					continue
+				}
+
+				totalTokens, _ := e.Payload["total_tokens"].(int)
+				totalCost := extractFloat(e.Payload["total_cost"])
+				llmCost := extractFloat(e.Payload["llm_cost"])
+				toolCost := extractFloat(e.Payload["tool_cost"])
+
+				exec, exists := batch[sessionID]
+				if !exists {
+					var err error
+					exec, err = o.repo.GetExecution(context.Background(), sessionID)
+					if err != nil {
+						exec = domainAgent.NewExecution(sessionID, "unknown-plan")
+					}
+					batch[sessionID] = exec
+				}
+				exec.RecordMetrics(totalCost, llmCost, toolCost, totalTokens)
 			}
 		}
 	}()
 
-	// 2. Main Event Bus Subscriber Loop
+	o.wg.Add(1)
 	go func() {
+		defer o.wg.Done()
 		for {
 			select {
 			case <-ctx.Done():
+				return
+			case <-o.stop:
 				return
 			case e, ok := <-ch:
 				if !ok {
 					return
 				}
 				if e.Type == event.EventSessionCost {
-					// Non-blocking handoff. If DB is entirely locked up and queue fills,
-					// we drop the metric update to prioritize agent execution health.
 					select {
 					case o.writeQ <- e:
 					default:
@@ -63,34 +108,9 @@ func (o *CostObserver) Start(ctx context.Context, ch <-chan event.Event) {
 	}()
 }
 
-func (o *CostObserver) handleCostUpdate(ctx context.Context, e event.Event) {
-	sessionID, ok := e.Payload["session_id"].(string)
-	if !ok || sessionID == "" {
-		return // Cannot track without an ID
-	}
-
-	totalTokens, _ := e.Payload["total_tokens"].(int)
-
-	// Type assertion fallback for float64s depending on JSON unmarshalling behaviors
-	totalCost := extractFloat(e.Payload["total_cost"])
-	llmCost := extractFloat(e.Payload["llm_cost"])
-	toolCost := extractFloat(e.Payload["tool_cost"])
-
-	// Retrieve the existing execution record
-	exec, err := o.repo.GetExecution(ctx, sessionID)
-	if err != nil {
-		// If it doesn't exist, this might be a stateless run or we missed the init.
-		// We create a phantom execution record to ensure costs are tracked globally.
-		exec = domainAgent.NewExecution(sessionID, "unknown-plan")
-	}
-
-	exec.RecordMetrics(totalCost, llmCost, toolCost, totalTokens)
-
-	if err := o.repo.SaveExecution(ctx, exec); err != nil {
-		o.logger.Error("failed to persist session cost metrics", zap.Error(err), zap.String("session_id", sessionID))
-	} else {
-		o.logger.Debug("persisted session cost metrics", zap.String("session_id", sessionID), zap.Float64("cost", totalCost))
-	}
+func (o *CostObserver) Stop() {
+	close(o.stop)
+	o.wg.Wait()
 }
 
 func extractFloat(v any) float64 {

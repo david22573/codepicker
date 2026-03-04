@@ -3,7 +3,6 @@ package tools
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 
 	"github.com/david22573/codepicker/infra/fs"
@@ -50,7 +49,8 @@ func (t *EditFileTool) Execute(ctx context.Context, args string) (string, error)
 	content, err = t.shadow.Read(input.Path)
 	if err != nil {
 		realPath := filepath.Join(t.projectRoot, input.Path)
-		content, err = os.ReadFile(realPath)
+		// Fix: Replaced raw os.ReadFile with memory-safe SafeReadFile
+		content, err = fs.SafeReadFile(ctx, realPath)
 		if err != nil {
 			return "", fmt.Errorf("failed to read file '%s' for editing: %w", input.Path, err)
 		}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/david22573/codepicker/adapters/agent"
@@ -47,7 +48,9 @@ type Container struct {
 	CostTracker      *llm.CostTracker
 	Config           *config.AppConfig
 	TraceRecorder    *trace.Recorder
+	CostObserver     *agent.CostObserver
 
+	wg     sync.WaitGroup
 	ctx    context.Context
 	cancel context.CancelFunc
 }
@@ -125,7 +128,6 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 		activeTools = tools.WrapToolsWithTrace(activeTools, activeRecorder)
 	}
 
-	// Capture the 8 exact returned variables
 	_, planner, executor, auditor, explainer, twoPass, ctxBuilder, err := NewAgentStack(AgentStackOpts{
 		Config:       cfg,
 		LLMClient:    activeLLM,
@@ -156,25 +158,7 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 	costObserver := agent.NewCostObserver(repo, logger)
 	costObserver.Start(ctx, eventBus.Subscribe())
 
-	go func() {
-		ticker := time.NewTicker(12 * time.Hour)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				cleanupPolicy := audit.CleanupPolicy{
-					MaxAge:   30 * 24 * time.Hour,
-					MaxCount: 100,
-				}
-				auditDir := filepath.Join(rootDir, ".codepicker", "audit")
-				_ = audit.CleanupAudits(auditDir, cleanupPolicy)
-			}
-		}
-	}()
-
-	return &Container{
+	c := &Container{
 		Planner:          planner,
 		PlanExecutor:     executor,
 		Auditor:          auditor,
@@ -193,15 +177,45 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 		CostTracker:      costTracker,
 		Config:           cfg,
 		TraceRecorder:    activeRecorder,
+		CostObserver:     costObserver,
 		ctx:              ctx,
 		cancel:           cancel,
-	}, nil
+	}
+
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		ticker := time.NewTicker(12 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				cleanupPolicy := audit.CleanupPolicy{
+					MaxAge:   30 * 24 * time.Hour,
+					MaxCount: 100,
+				}
+				auditDir := filepath.Join(rootDir, ".codepicker", "audit")
+				_ = audit.CleanupAudits(auditDir, cleanupPolicy)
+			}
+		}
+	}()
+
+	return c, nil
 }
 
 func (c *Container) Close() {
 	if c.cancel != nil {
 		c.cancel()
 	}
+	if c.CostObserver != nil {
+		c.CostObserver.Stop()
+	}
+
+	// Wait for background routines to finish before closing the DB and Bus
+	c.wg.Wait()
+
 	if c.TraceRecorder != nil {
 		c.TraceRecorder.Finish()
 	}

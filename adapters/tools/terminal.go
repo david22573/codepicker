@@ -43,10 +43,8 @@ func (t *ShellTool) Execute(ctx context.Context, args string) (string, error) {
 		return "", errors.NewValidation("tool.run_cmd", "command cannot be empty")
 	}
 
-	parts := strings.Fields(input.Command)
-	if len(parts) == 0 {
-		return "", errors.NewValidation("tool.run_cmd", "malformed command")
-	}
+	// Fix: Bypass strings.Fields error by utilizing a dedicated shell engine string array
+	parts := []string{"sh", "-c", input.Command}
 
 	pendingFiles, err := t.shadow.ListShadowFiles()
 	if err == nil && len(pendingFiles) > 0 {
