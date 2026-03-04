@@ -6,11 +6,11 @@ import "fmt"
 type ErrorCode string
 
 const (
-	CodeValidation        ErrorCode = "VALIDATION" // User input error
-	CodeSystem            ErrorCode = "SYSTEM"     // Internal crash/failure
-	CodePolicy            ErrorCode = "POLICY"     // Security block
-	CodeLLM               ErrorCode = "LLM"        // AI Provider failure
-	CodeNotFound          ErrorCode = "NOT_FOUND"  // Resource missing
+	CodeValidation ErrorCode = "VALIDATION" // User input error
+	CodeSystem     ErrorCode = "SYSTEM"     // Internal crash/failure
+	CodePolicy     ErrorCode = "POLICY"     // Security block
+	CodeLLM        ErrorCode = "LLM"        // AI Provider failure
+	CodeNotFound   ErrorCode = "NOT_FOUND"  // Resource missing
 
 	// Phase 4: Execution Classifications
 	CodeBudgetExceeded    ErrorCode = "BUDGET_EXCEEDED"

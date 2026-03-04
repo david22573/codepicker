@@ -44,15 +44,23 @@ func (m *MockAgent) Run(ctx context.Context, input string) (string, error) {
 // MockRepo implements domainAgent.Repository
 type MockRepo struct{}
 
-func (m *MockRepo) SavePlan(ctx context.Context, plan *task.Plan) error { return nil }
+func (m *MockRepo) SavePlan(ctx context.Context, plan *task.Plan) error        { return nil }
 func (m *MockRepo) GetPlan(ctx context.Context, id string) (*task.Plan, error) { return nil, nil }
-func (m *MockRepo) ListPlans(ctx context.Context, limit int) ([]domainAgent.PlanSummary, error) { return nil, nil }
-func (m *MockRepo) DeletePlan(ctx context.Context, id string) error { return nil }
+func (m *MockRepo) ListPlans(ctx context.Context, limit int) ([]domainAgent.PlanSummary, error) {
+	return nil, nil
+}
+func (m *MockRepo) DeletePlan(ctx context.Context, id string) error                      { return nil }
 func (m *MockRepo) SaveExecution(ctx context.Context, exec *domainAgent.Execution) error { return nil }
-func (m *MockRepo) GetExecution(ctx context.Context, id string) (*domainAgent.Execution, error) { return nil, nil }
-func (m *MockRepo) ListExecutions(ctx context.Context, limit int) ([]domainAgent.ExecutionSummary, error) { return nil, nil }
+func (m *MockRepo) GetExecution(ctx context.Context, id string) (*domainAgent.Execution, error) {
+	return nil, nil
+}
+func (m *MockRepo) ListExecutions(ctx context.Context, limit int) ([]domainAgent.ExecutionSummary, error) {
+	return nil, nil
+}
 func (m *MockRepo) GetTotalCost(ctx context.Context) (float64, int, error) { return 0.0, 0, nil }
-func (m *MockRepo) VectorSearch(ctx context.Context, vector []float32, limit int) ([]domainAgent.SearchResult, error) { return nil, nil }
+func (m *MockRepo) VectorSearch(ctx context.Context, vector []float32, limit int) ([]domainAgent.SearchResult, error) {
+	return nil, nil
+}
 
 func TestPlanExecutor_Integration(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "executor_integration_*")

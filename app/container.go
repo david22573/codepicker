@@ -103,7 +103,7 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 	replayTracePath := os.Getenv("CODEPICKER_REPLAY_TRACE")
 
 	var activeLLM llm.Provider = llmClient
-	
+
 	shellExec := shell.NewExecutor(30*time.Second, 5000, dryRun, rootDir)
 	activeTools := tools.DefaultSet(shadowMgr, shellExec, rootDir, embedClient, repo)
 
@@ -141,7 +141,7 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 		CIMode:       ciMode,
 		Verbose:      verbose,
 	}, activeTools)
-	
+
 	if err != nil {
 		return nil, err
 	}

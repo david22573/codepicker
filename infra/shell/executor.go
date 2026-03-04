@@ -58,10 +58,10 @@ func (e *Executor) Run(ctx context.Context, command string, args ...string) (str
 		if strings.Contains(arg, "-C ") || arg == "-C" {
 			return "", errors.NewPolicy("shell.Run", "forbidden flag detected: -C (directory change)")
 		}
-		if strings.Contains(arg, "--work-tree") { 
+		if strings.Contains(arg, "--work-tree") {
 			return "", errors.NewPolicy("shell.Run", "forbidden flag detected: --work-tree")
 		}
-		if strings.Contains(arg, "--git-dir") { 
+		if strings.Contains(arg, "--git-dir") {
 			return "", errors.NewPolicy("shell.Run", "forbidden flag detected: --git-dir")
 		}
 	}

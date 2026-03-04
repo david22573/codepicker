@@ -75,7 +75,7 @@ func (c *CachedAdapter) ChatNative(ctx context.Context, messages []Message, tool
 
 	// 2. Cache Miss: Call Underlying Provider
 	msg, usage, err := c.underlying.ChatNative(ctx, messages, tools)
-	
+
 	// 3. Store Result
 	if err == nil {
 		payload := cachedPayload{Message: msg, Usage: usage}

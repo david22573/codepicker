@@ -56,14 +56,14 @@ func (te *ToolExecutor) ExecuteConcurrent(ctx context.Context, calls []llm.ToolC
 
 	for i, call := range calls {
 		wg.Add(1)
-		
+
 		idx := i
 		tc := call
 
 		te.pool.Submit(func() {
 			defer wg.Done()
 			output := te.executeSingle(ctx, tc)
-			
+
 			results[idx] = llm.Message{
 				Role:       "tool",
 				ToolCallID: tc.ID,

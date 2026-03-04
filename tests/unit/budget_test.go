@@ -46,7 +46,7 @@ func TestBudgetGuard_ZeroLimitIsInfinite(t *testing.T) {
 }
 
 func TestBudgetGuard_TracksActualUsage(t *testing.T) {
-	tracker := llm.NewCostTracker(1.0, 1.0) // $1 per 1M tokens
+	tracker := llm.NewCostTracker(1.0, 1.0)   // $1 per 1M tokens
 	guard := llm.NewBudgetGuard(tracker, 2.0) // $2.00 limit
 
 	// Record $1.00 worth of usage

@@ -14,12 +14,12 @@ type Execution struct {
 	History   []Interaction
 	StartTime time.Time
 	EndTime   time.Time
-	
+
 	// Phase 5: Per-Session Cost Tracking
-	Cost      float64
-	Tokens    int
-	ToolCost  float64
-	LLMCost   float64
+	Cost     float64
+	Tokens   int
+	ToolCost float64
+	LLMCost  float64
 }
 
 // Interaction records a single "turn" in the agent loop

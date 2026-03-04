@@ -28,13 +28,13 @@ func (t *TraceAdapter) ChatNative(ctx context.Context, messages []Message, tools
 
 func (t *TraceAdapter) Chat(ctx context.Context, systemPrompt, userPrompt string) (string, error) {
 	resp, err := t.underlying.Chat(ctx, systemPrompt, userPrompt)
-	
+
 	// Synthesize a structured payload for the legacy text interface
 	msgs := []Message{
 		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: userPrompt},
 	}
 	t.recorder.RecordLLM(msgs, Message{Role: "assistant", Content: resp}, domainContext.TokenUsage{}, err)
-	
+
 	return resp, err
 }

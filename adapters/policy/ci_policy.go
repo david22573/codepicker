@@ -38,7 +38,7 @@ func (p *CIPolicy) CanExecute(toolName, args string) (bool, string) {
 		if err := validation.DecodeStrict(args, &input); err != nil {
 			return false, "malformed command payload"
 		}
-		
+
 		cmdBase := strings.Split(strings.TrimSpace(input.Command), " ")[0]
 		for _, allowed := range p.AllowedCommands {
 			if cmdBase == allowed {
@@ -54,7 +54,7 @@ func (p *CIPolicy) CanExecute(toolName, args string) (bool, string) {
 		if err := validation.DecodeStrict(args, &input); err != nil {
 			return false, "malformed file payload"
 		}
-		
+
 		target := filepath.Clean(input.Path)
 		for _, allowed := range p.AllowedPaths {
 			// Exact match or prefix match (if allowed is a directory)

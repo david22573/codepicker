@@ -12,7 +12,7 @@ import (
 type BudgetGuard struct {
 	tracker  *CostTracker
 	limit    float64
-	reserved float64 
+	reserved float64
 	mu       sync.Mutex
 }
 

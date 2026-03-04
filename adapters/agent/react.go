@@ -181,14 +181,14 @@ func (a *ReActAgent) invokeModel(ctx context.Context, estimatedCost float64) (ll
 		a.emitter.BudgetCommitted(estimatedCost)
 		metrics.GetRegistry().ObserveValue("codepicker_budget_actual", a.costTracker.GetMetrics().TotalCost)
 	}()
-	
+
 	msg, usage, err := a.model.ChatNative(ctx, a.history, a.toolSchemas)
-	
+
 	if err == nil {
 		metrics.GetRegistry().AddCounter("codepicker_tokens_in_total", float64(usage.PromptTokens), nil)
 		metrics.GetRegistry().AddCounter("codepicker_tokens_out_total", float64(usage.CompletionTokens), nil)
 	}
-	
+
 	return msg, err
 }
 

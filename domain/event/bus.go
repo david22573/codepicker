@@ -8,12 +8,12 @@ import (
 type EventType string
 
 const (
-	EventAgentThought     EventType = "agent.thought"
-	EventToolStart        EventType = "tool.start"
-	EventToolEnd          EventType = "tool.end"
-	EventAgentFinish      EventType = "agent.finish"
-	EventError            EventType = "error"
-	
+	EventAgentThought EventType = "agent.thought"
+	EventToolStart    EventType = "tool.start"
+	EventToolEnd      EventType = "tool.end"
+	EventAgentFinish  EventType = "agent.finish"
+	EventError        EventType = "error"
+
 	// Phase 4 & 5: Observability Expansion
 	EventBudgetReserve    EventType = "budget.reserve"
 	EventBudgetCommit     EventType = "budget.commit"

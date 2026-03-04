@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+
 	"github.com/david22573/codepicker/infra/llm"
 )
 
@@ -56,15 +57,15 @@ func (m *TurnMemory) Prune(history []llm.Message) ([]llm.Message, int) {
 	if prunedCount > 0 {
 		// Phase 2: Adaptive Compression - insert a structural memory block
 		summaryNode := llm.Message{
-			Role: "system",
+			Role:    "system",
 			Content: fmt.Sprintf("[MEMORY COMPRESSION ACTIVATED: %d older turns have been pruned from context to save tokens. Proceed with the latest observations.]", prunedCount),
 		}
-		
+
 		var compressedHistory []llm.Message
 		compressedHistory = append(compressedHistory, pinned...)
 		compressedHistory = append(compressedHistory, summaryNode)
 		compressedHistory = append(compressedHistory, sliding...)
-		
+
 		return compressedHistory, prunedCount
 	}
 
@@ -82,9 +83,9 @@ func (m *TurnMemory) EstimateWithPrefix(systemPrompt string, tools []llm.ToolDef
 		SystemPrompt: systemPrompt,
 		Tools:        tools,
 	}
-	
+
 	prefixTokens := m.prefix.GetEstimatedTokens(sig)
 	dynamicTokens := m.estimator.EstimateMessages(dynamicMsgs)
-	
+
 	return prefixTokens + dynamicTokens
 }

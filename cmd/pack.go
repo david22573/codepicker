@@ -310,7 +310,7 @@ func runFullPack(root string, files []FileEntry, outFile string) (int, int64, er
 	}
 
 	w.Flush()
-	
+
 	estimator := llm.NewDefaultEstimator()
 	// Using a simulated string length to estimate tokens, since we're appending to a writer
 	return estimator.EstimateText(strings.Repeat("a", totalChars)), writtenBytes, nil

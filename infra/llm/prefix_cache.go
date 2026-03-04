@@ -56,11 +56,11 @@ func (p *PrefixCache) GetEstimatedTokens(sig PrefixSignature) int {
 func (p *PrefixCache) hashSignature(sig PrefixSignature) string {
 	h := sha256.New()
 	h.Write([]byte(sig.SystemPrompt))
-	
+
 	if len(sig.Tools) > 0 {
 		toolData, _ := json.Marshal(sig.Tools)
 		h.Write(toolData)
 	}
-	
+
 	return hex.EncodeToString(h.Sum(nil))
 }

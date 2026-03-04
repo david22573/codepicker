@@ -32,7 +32,7 @@ func (d *SemanticDeduplicator) IsUnique(content string) bool {
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	
+
 	if d.seenHashes[hash] {
 		return false
 	}

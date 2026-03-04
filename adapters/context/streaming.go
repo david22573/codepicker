@@ -69,7 +69,7 @@ func (b *StreamingBuilder) BuildContextWithBudget(ctx context.Context, query str
 	if includedCount < len(candidates) {
 		sb.WriteString(fmt.Sprintf("  \n", len(candidates)-includedCount))
 	}
-	
+
 	sb.WriteString("</relevant_code_context>\n")
 
 	return sb.String(), nil

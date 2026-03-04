@@ -99,9 +99,9 @@ func (b *SmartBuilder) BuildContext(ctx context.Context, query string) (string, 
 		if b.shadow != nil {
 			diffSummary, err := b.shadow.Diff(filePath)
 			if err == nil && diffSummary.Type != fs.ChangeNoOp {
-				diffNotice := fmt.Sprintf("  <file path=\"%s\" state=\"modified_in_shadow\">\n    [NOTE: This file has pending edits. Lines modified: +%d/-%d. Use git_diff or read_file to view exact shadow state.]\n  </file>\n", 
+				diffNotice := fmt.Sprintf("  <file path=\"%s\" state=\"modified_in_shadow\">\n    [NOTE: This file has pending edits. Lines modified: +%d/-%d. Use git_diff or read_file to view exact shadow state.]\n  </file>\n",
 					filePath, diffSummary.NewLines, diffSummary.OldLines)
-				
+
 				noticeCost := b.estimator.EstimateText(diffNotice)
 				if usedTokens+noticeCost <= b.maxTokens {
 					builder.WriteString(diffNotice)
@@ -121,7 +121,7 @@ func (b *SmartBuilder) BuildContext(ctx context.Context, query string) (string, 
 		for _, slice := range slices {
 			// Phase 7.1: Semantic Context Deduplication
 			if !b.dedup.IsUnique(slice.Content) {
-				continue 
+				continue
 			}
 
 			contentTokens := b.estimator.EstimateText(slice.Content)

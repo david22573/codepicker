@@ -49,7 +49,7 @@ func DefaultConfig() *AppConfig {
 		Environment: "development",
 		LLM: LLMConfig{
 			Model:           "deepseek/deepseek-v3.2",
-			TimeoutSeconds:  3000, 
+			TimeoutSeconds:  3000,
 			MaxTokens:       8000,
 			Temperature:     0.0,
 			InputCostPer1M:  0.14,
@@ -62,9 +62,9 @@ func DefaultConfig() *AppConfig {
 			CostPer1M: 0.02,
 		},
 		Agent: AgentConfig{
-			MaxTurns:       2000, 
+			MaxTurns:       2000,
 			UseReflexion:   true,
-			MaxContextSize: 200000, 
+			MaxContextSize: 200000,
 		},
 		Server: ServerConfig{
 			Port:        8080,

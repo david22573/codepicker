@@ -128,7 +128,7 @@ func (e *DefaultEstimator) EstimateMessages(msgs []Message) int {
 			tokens += 10
 		}
 	}
-	
+
 	tokens += 3
 	return tokens
 }
@@ -155,7 +155,7 @@ func (e *OpenAIEstimator) EstimateMessages(msgs []Message) int {
 	for _, msg := range msgs {
 		tokens += 3 // <|im_start|>role\n
 		tokens += len(msg.Content) / e.base.charsPerTokenCode
-		
+
 		if msg.Name != "" {
 			tokens += 1
 			tokens += len(msg.Name) / e.base.charsPerTokenCode
@@ -195,7 +195,7 @@ func (e *ClaudeEstimator) EstimateMessages(msgs []Message) int {
 	// Anthropic formatting overheads
 	tokens := 0
 	for _, msg := range msgs {
-		tokens += 4 
+		tokens += 4
 		tokens += len(msg.Content) / e.base.charsPerTokenCode
 
 		if len(msg.ToolCalls) > 0 {

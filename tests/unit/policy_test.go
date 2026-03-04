@@ -89,7 +89,7 @@ func TestStrictPolicy_CIMode(t *testing.T) {
 	// Set readOnly to true, ciMode to true to ensure CI properly overrides the read-only block
 	ciPolicy := policy.NewStrictPolicy(true, true)
 
-	// CI Mode should allow writes. 
+	// CI Mode should allow writes.
 	// Removed "..." from payload to prevent triggering the `..` traversal block.
 	allowed, _ := ciPolicy.CanExecute("write_file", `{"path": "main.go", "content": "test_content"}`)
 	if !allowed {

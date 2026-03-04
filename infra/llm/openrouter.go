@@ -80,7 +80,7 @@ func (o *OpenRouterAdapter) ChatNative(ctx context.Context, messages []Message, 
 				// Exponential backoff: 500ms, 1s, 2s, 4s, 8s...
 				backoff := time.Duration(math.Pow(2, float64(attempt-1))) * 500 * time.Millisecond
 				fmt.Printf("   ⚠️ [LLM Client] Provider unstable. Retrying %d/%d in %v (Error: %v)\n", attempt, maxRetries, backoff, lastErr)
-				
+
 				select {
 				case <-time.After(backoff):
 				case <-ctx.Done():
