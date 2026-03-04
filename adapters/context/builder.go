@@ -154,7 +154,7 @@ func (b *SmartBuilder) BuildContext(ctx context.Context, query string) (string, 
 	}
 
 	if includedCount < len(ranked) {
-		builder.WriteString(fmt.Sprintf("  \n", len(ranked)-includedCount))
+		fmt.Fprintf(&builder, "  <!-- %d slices omitted due to token limit -->\n", len(ranked)-includedCount)
 	}
 
 	builder.WriteString("</relevant_code_context>\n")
