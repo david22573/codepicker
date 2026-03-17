@@ -440,7 +440,7 @@ func shouldPack(path string, info fs.FileInfo) bool {
 		".tsx": true, ".jsx": true, ".py": true, ".c": true, ".h": true,
 		".dockerfile": true, ".svelte": true, ".vue": true, ".rb": true,
 		".php": true, ".java": true, ".kt": true, ".swift": true, ".rs": true,
-		"lua": true, ".dart": true, ".scala": true, ".pl": true, ".pm": true,
+		".lua": true, ".dart": true, ".scala": true, ".pl": true, ".pm": true,
 	}
 
 	specialFiles := map[string]bool{
