@@ -129,6 +129,8 @@ func handleAgentTask(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		globalContainer.PlanExecutor.SetAutoConfirm(true)
+
 		err = globalContainer.PlanExecutor.Execute(ctx, plan)
 		if err != nil {
 			sendSSE(w, flusher, map[string]any{"type": "error", "msg": "Execution failed: " + err.Error()})
