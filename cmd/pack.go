@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -18,12 +19,14 @@ import (
 
 // Phase 0: Pack Command Configuration
 var (
-	packOutput    string
-	packMode      string // "auto", "full", "smart"
-	packMaxBytes  int64  // Hard cap for Full Mode (default 20MB)
-	packMaxTokens int    // Budget for Smart Mode
-	packFormat    string // "xml" or "markdown"
-	packTree      bool   // include file tree
+	packOutput      string
+	packMode        string // "auto", "full", "smart"
+	packMaxBytes    int64  // Hard cap for Full Mode (default 20MB)
+	packMaxTokens   int    // Budget for Smart Mode
+	packFormat      string // "xml" or "markdown"
+	packTree        bool   // include file tree
+	packSplit       bool   // Split output into multiple files
+	packSplitTokens int    // Max tokens per split file
 )
 
 const (
@@ -45,7 +48,7 @@ Implements a Dual Pack Strategy:
   - Full Mode: Includes ALL files (non-truncated) up to a hard size cap.
   - Smart Mode: Budget-aware packing for larger repositories.
   - Auto Mode: Selects based on repository size (< 3MB = Full).
-  - Respects .codepickerignore patterns.`,
+Respects .codepickerignore patterns.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cwd, err := os.Getwd()
 		if err != nil {
@@ -112,9 +115,20 @@ Implements a Dual Pack Strategy:
 			fmt.Printf("⚠️ Failed to append manifest: %v\n", err)
 		}
 
-		fmt.Printf("\n✅ Pack Complete: %s\n", packOutput)
+		fmt.Printf("\n✅ Pack Complete!\n")
 		fmt.Printf("   Mode: %s\n", selectedMode)
 		fmt.Printf("   Est. Tokens: ~%d\n", tokenEst)
+
+		// 6. Post-Process Splitting
+		if packSplit {
+			fmt.Printf("\n🔪 Splitting output into ~%d token chunks...\n", packSplitTokens)
+			if err := splitPackedFile(packOutput, packSplitTokens); err != nil {
+				return fmt.Errorf("failed to split packed file: %w", err)
+			}
+		} else {
+			fmt.Printf("   Output: %s\n", packOutput)
+		}
+
 		return nil
 	},
 }
@@ -126,6 +140,8 @@ func init() {
 	packCmd.Flags().IntVar(&packMaxTokens, "max-tokens", 32000, "Token budget for Smart Mode")
 	packCmd.Flags().StringVar(&packFormat, "format", "xml", "Output format: 'xml' (recommended) or 'markdown'")
 	packCmd.Flags().BoolVar(&packTree, "tree", true, "Include a directory tree at the top")
+	packCmd.Flags().BoolVar(&packSplit, "split", false, "Automatically split the output into multiple parts if it exceeds a token limit")
+	packCmd.Flags().IntVar(&packSplitTokens, "split-tokens", 30000, "Maximum tokens per file if --split is enabled")
 
 	rootCmd.AddCommand(packCmd)
 }
@@ -370,6 +386,88 @@ func runSmartPack(root string, files []FileEntry, outFile string, budget int) (i
 
 	w.Flush()
 	return usedTokens, writtenBytes, nil
+}
+
+func splitPackedFile(inputPath string, maxTokens int) error {
+	file, err := os.Open(inputPath)
+	if err != nil {
+		return err
+	}
+
+	estimator := llm.NewDefaultEstimator()
+	reader := bufio.NewReader(file)
+
+	var currentChunk strings.Builder
+	var currentTokens int
+	partNumber := 1
+
+	baseName := filepath.Base(inputPath)
+	ext := filepath.Ext(baseName)
+	nameWithoutExt := strings.TrimSuffix(baseName, ext)
+	dir := filepath.Dir(inputPath)
+
+	writeChunk := func(content string, tokens int) error {
+		if content == "" {
+			return nil
+		}
+		outName := fmt.Sprintf("%s_part%d%s", nameWithoutExt, partNumber, ext)
+		outPath := filepath.Join(dir, outName)
+
+		if err := os.WriteFile(outPath, []byte(content), 0644); err != nil {
+			return err
+		}
+
+		fmt.Printf("  📄 Created %s (~%d tokens)\n", outName, tokens)
+		partNumber++
+		return nil
+	}
+
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil && err != io.EOF {
+			file.Close()
+			return err
+		}
+
+		isEOF := (err == io.EOF)
+
+		if line != "" {
+			lineTokens := estimator.EstimateText(line)
+
+			if currentTokens+lineTokens > maxTokens && currentChunk.Len() > 0 {
+				if err := writeChunk(currentChunk.String(), currentTokens); err != nil {
+					file.Close()
+					return err
+				}
+				currentChunk.Reset()
+				currentTokens = 0
+			}
+
+			currentChunk.WriteString(line)
+			currentTokens += lineTokens
+		}
+
+		if isEOF {
+			break
+		}
+	}
+
+	if currentChunk.Len() > 0 {
+		if err := writeChunk(currentChunk.String(), currentTokens); err != nil {
+			file.Close()
+			return err
+		}
+	}
+
+	// Cleanup the monolithic file
+	file.Close()
+	if err := os.Remove(inputPath); err != nil {
+		fmt.Printf("  ⚠️ Could not remove original monolithic file %s: %v\n", inputPath, err)
+	} else {
+		fmt.Printf("  🧹 Removed original un-split file to save space.\n")
+	}
+
+	return nil
 }
 
 // --- Helpers ---
