@@ -11,22 +11,36 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/david22573/codepicker/app"
+	"github.com/david22573/codepicker/domain/event"
 	"github.com/spf13/cobra"
 )
 
 var servePort int
+var globalContainer *app.Container
 
 var serveCmd = &cobra.Command{
 	Use:   "serve",
 	Short: "Start the CodePicker background daemon",
-	Long:  `Starts a long-running HTTP server to handle requests from the Neovim plugin.`,
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
+		apiKey := getAPIKeyOrExit()
+		cwd, _ := os.Getwd()
+
+		// Initialize your full application container (DB, Tools, Agent)
+		container, err := app.NewContainer(apiKey, cwd, "", false, false, GetVerbose())
+		if err != nil {
+			return fmt.Errorf("daemon init failed: %w", err)
+		}
+
+		globalContainer = container
+		defer container.Close()
+
 		startServer(servePort)
+		return nil
 	},
 }
 
 func init() {
-	// Assumes your root command is called rootCmd. Adjust if yours is named differently.
 	rootCmd.AddCommand(serveCmd)
 	serveCmd.Flags().IntVarP(&servePort, "port", "p", 22573, "Port to run the server on")
 }
@@ -43,47 +57,34 @@ func startServer(port int) {
 	// 2. Core Agent Stream
 	mux.HandleFunc("/agent/task", handleAgentTask)
 
-	// 3. Context & Approval Stubs
-	mux.HandleFunc("/agent/approve", handleAgentApprove)
-	mux.HandleFunc("/agent/context", handleAgentContext)
+	// 3. Stubs to prevent Neovim crashes
+	mux.HandleFunc("/agent/approve", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("/agent/context", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"files": []}`))
+	})
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	srv := &http.Server{Addr: addr, Handler: mux}
 
-	srv := &http.Server{
-		Addr:    addr,
-		Handler: mux,
-	}
-
-	// Run the server in a goroutine so it doesn't block
 	go func() {
 		log.Printf("🚀 Agent Daemon listening on %s\n", addr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Server fucked up and crashed: %v", err)
+			log.Fatalf("Server crashed: %v", err)
 		}
 	}()
 
-	// Graceful Shutdown Channel
 	quit := make(chan os.Signal, 1)
-	// Catch Ctrl+C (SIGINT) and kill commands (SIGTERM)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Println("\n🛑 Shutting down daemon gracefully...")
 
-	<-quit // Block here until a signal is received
-	log.Println("\n🛑 Shutting down server gracefully...")
-
-	// Give active connections 5 seconds to finish their shit before forcing exit
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-
-	if err := srv.Shutdown(ctx); err != nil {
-		log.Fatalf("Server forced to shutdown: %v", err)
-	}
-
-	log.Println("Server exited cleanly.")
+	_ = srv.Shutdown(ctx)
 }
 
-// handleAgentTask streams JSON events back to Neovim using SSE
 func handleAgentTask(w http.ResponseWriter, r *http.Request) {
-	// Require GET method
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -91,11 +92,10 @@ func handleAgentTask(w http.ResponseWriter, r *http.Request) {
 
 	query := r.URL.Query().Get("q")
 	if query == "" {
-		http.Error(w, "Missing query parameter 'q'", http.StatusBadRequest)
+		http.Error(w, "Missing query", http.StatusBadRequest)
 		return
 	}
 
-	// Essential headers for Server-Sent Events
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -106,43 +106,78 @@ func handleAgentTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// --- WIRING STUB: Replace this with your actual agent executor ---
-
-	sendSSE(w, flusher, map[string]interface{}{
+	sendSSE(w, flusher, map[string]any{
 		"type":    "thought",
-		"content": fmt.Sprintf("Received task: `%s`\nSpinning up LLM context...\n", query),
+		"content": fmt.Sprintf("🚀 Task received: `%s`\nSpinning up LLM context...\n\n", query),
 	})
 
-	// Simulate work so you can see the UI stream
-	time.Sleep(1 * time.Second)
+	// Subscribe to your global Event Bus to catch Agent thoughts and tool executions
+	eventCh := globalContainer.EventBus.Subscribe()
 
-	// Tell Neovim the task is done
-	sendSSE(w, flusher, map[string]interface{}{
-		"type": "done",
-	})
-}
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
 
-// Helper to format and flush SSE data
-func sendSSE(w http.ResponseWriter, flusher http.Flusher, payload interface{}) {
-	bytes, err := json.Marshal(payload)
-	if err != nil {
-		return
+	// Run the planner and executor in the background
+	doneCh := make(chan struct{})
+	go func() {
+		defer close(doneCh)
+
+		primer := globalContainer.ProjectPrimer.GenerateShallow()
+		plan, err := globalContainer.Planner.CreatePlan(ctx, query, "", primer)
+		if err != nil {
+			sendSSE(w, flusher, map[string]any{"type": "error", "msg": "Planning failed: " + err.Error()})
+			return
+		}
+
+		err = globalContainer.PlanExecutor.Execute(ctx, plan)
+		if err != nil {
+			sendSSE(w, flusher, map[string]any{"type": "error", "msg": "Execution failed: " + err.Error()})
+		}
+	}()
+
+	// Stream Events back to Neovim
+	for {
+		select {
+		case <-ctx.Done():
+			return // Neovim closed the connection
+
+		case <-doneCh:
+			// Agent finished all steps
+			sendSSE(w, flusher, map[string]any{"type": "done"})
+			return
+
+		case ev, open := <-eventCh:
+			if !open {
+				return
+			}
+
+			// Map your internal Domain Events to Neovim SSE formats
+			switch ev.Type {
+			case event.EventAgentThought:
+				if content, ok := ev.Payload["content"].(string); ok {
+					sendSSE(w, flusher, map[string]any{"type": "thought", "content": content + "\n"})
+				}
+			case event.EventToolStart:
+				if tool, ok := ev.Payload["tool"].(string); ok {
+					sendSSE(w, flusher, map[string]any{"type": "thought", "content": fmt.Sprintf("\n🛠️ **Running Tool:** `%s`\n", tool)})
+				}
+			case event.EventPolicyBlock:
+				if reason, ok := ev.Payload["reason"].(string); ok {
+					sendSSE(w, flusher, map[string]any{"type": "error", "msg": "Policy Blocked: " + reason})
+				}
+			case event.EventError:
+				if msg, ok := ev.Payload["error"].(string); ok {
+					sendSSE(w, flusher, map[string]any{"type": "error", "msg": msg})
+				}
+			}
+		}
 	}
-	fmt.Fprintf(w, "data: %s\n\n", string(bytes))
-	flusher.Flush()
 }
 
-func handleAgentApprove(w http.ResponseWriter, r *http.Request) {
-	// Needs to handle POST requests from the Neovim Sentinel UI
-	w.WriteHeader(http.StatusOK)
-}
-
-func handleAgentContext(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	if r.Method == http.MethodGet {
-		// Return empty context array to stop Neovim from shitting itself
-		w.Write([]byte(`{"files": []}`))
-	} else {
-		w.WriteHeader(http.StatusOK)
+func sendSSE(w http.ResponseWriter, flusher http.Flusher, payload any) {
+	bytes, err := json.Marshal(payload)
+	if err == nil {
+		fmt.Fprintf(w, "data: %s\n\n", string(bytes))
+		flusher.Flush()
 	}
 }
