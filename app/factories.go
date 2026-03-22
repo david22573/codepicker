@@ -14,6 +14,7 @@ import (
 	"github.com/david22573/codepicker/domain/config"
 	"github.com/david22573/codepicker/domain/event"
 	"github.com/david22573/codepicker/infra/fs"
+	"github.com/david22573/codepicker/infra/indexer"
 	"github.com/david22573/codepicker/infra/llm"
 	"github.com/david22573/codepicker/infra/logging"
 	"github.com/david22573/codepicker/infra/pathutil"
@@ -36,6 +37,7 @@ type AgentStackOpts struct {
 	DryRun       bool
 	CIMode       bool
 	Verbose      bool
+	Mapper       *indexer.RepoMapper
 }
 
 func NewLLMStack(apiKey string, cfg *config.AppConfig) (*llm.OpenRouterAdapter, *llm.CostTracker, *llm.EmbeddingClient, error) {
@@ -130,8 +132,8 @@ func NewAgentStack(opts AgentStackOpts, toolsOverride []domainAgent.Tool) (*agen
 		"",
 	)
 
-	reranker := ctxAdapters.NewReranker(backpressuredLLM, opts.CostTracker, opts.Config.LLM.BudgetCap)
-	ctxBuilder := ctxAdapters.NewSmartBuilder(opts.Repo, opts.EmbedClient, reranker, opts.ShadowMgr, opts.Config.Agent.MaxContextSize)
+	reranker := ctxAdapters.NewReranker(backpressuredLLM, opts.CostTracker, opts.Config.LLM.BudgetCap, opts.Mapper)
+	ctxBuilder := ctxAdapters.NewSmartBuilder(opts.Repo, opts.EmbedClient, reranker, opts.ShadowMgr, opts.Config.Agent.MaxContextSize, opts.Mapper)
 
 	return worker, planner, executor, auditor, explainer, twoPass, ctxBuilder, nil
 }

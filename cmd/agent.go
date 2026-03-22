@@ -17,6 +17,7 @@ import (
 
 var agentDryRun bool
 var agentVerbose bool
+var agentNoMap bool
 
 var agentCmd = &cobra.Command{
 	Use:   "agent",
@@ -30,6 +31,9 @@ var agentCmd = &cobra.Command{
 			return fmt.Errorf("container init failed: %w", err)
 		}
 		defer container.Close()
+
+		// Phase 1.3: Toggle sparse map injection
+		container.ProjectPrimer.NoMap = agentNoMap
 
 		metricsPort := 9090
 		if container.Config != nil && container.Config.Server.MetricsPort != 0 {
@@ -135,5 +139,6 @@ var agentCmd = &cobra.Command{
 func init() {
 	agentCmd.Flags().BoolVar(&agentDryRun, "dry-run", false, "Enable read-only mode")
 	agentCmd.Flags().BoolVarP(&agentVerbose, "verbose", "v", false, "Enable verbose output")
+	agentCmd.Flags().BoolVar(&agentNoMap, "no-map", false, "Disable the sparse repository map injection")
 	rootCmd.AddCommand(agentCmd)
 }

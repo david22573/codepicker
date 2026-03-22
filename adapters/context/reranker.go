@@ -7,6 +7,7 @@ import (
 
 	"github.com/david22573/codepicker/domain/agent"
 	domainCtx "github.com/david22573/codepicker/domain/context"
+	"github.com/david22573/codepicker/infra/indexer"
 	"github.com/david22573/codepicker/infra/llm"
 	"github.com/david22573/codepicker/infra/prompts"
 	"github.com/david22573/codepicker/runtime"
@@ -15,12 +16,14 @@ import (
 type Reranker struct {
 	model       llm.StructuredLLM
 	budgetGuard *llm.BudgetGuard
+	mapper      *indexer.RepoMapper
 }
 
-func NewReranker(client agent.LLMClient, costTracker *llm.CostTracker, budget float64) *Reranker {
+func NewReranker(client agent.LLMClient, costTracker *llm.CostTracker, budget float64, mapper *indexer.RepoMapper) *Reranker {
 	return &Reranker{
 		model:       llm.NewStructuredAdapter(client),
 		budgetGuard: llm.NewBudgetGuard(costTracker, budget),
+		mapper:      mapper,
 	}
 }
 
@@ -83,7 +86,24 @@ func (r *Reranker) Rank(ctx context.Context, task string, candidates []domainCtx
 		}
 	}
 
-	// Append any missing candidates at the end (fallback)
+	// Phase 1.3: Auto-promote symbols referenced in the sparse map
+	if r.mapper != nil {
+		repoMapContext := r.mapper.RenderMap(2000)
+		for _, s := range candidates {
+			if !seen[s.ID] {
+				for _, sym := range s.Symbols {
+					// If this unranked candidate contains a core symbol from the repo map, bump it up
+					if sym != "" && strings.Contains(repoMapContext, sym) {
+						ranked = append(ranked, s)
+						seen[s.ID] = true
+						break
+					}
+				}
+			}
+		}
+	}
+
+	// Append any remaining candidates at the end (fallback)
 	for _, s := range candidates {
 		if !seen[s.ID] {
 			ranked = append(ranked, s)

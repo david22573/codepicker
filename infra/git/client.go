@@ -21,13 +21,30 @@ func NewClient(root string, dryRun bool) *Client {
 
 func (c *Client) StageAll() error {
 	if c.DryRun {
-		fmt.Println("🔒 [DRY-RUN] Skipping 'git add .'")
+		fmt.Println("🔏 [DRY-RUN] Skipping 'git add .'")
 		return nil
 	}
 	cmd := exec.Command("git", "add", ".")
 	cmd.Dir = c.ProjectRoot
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git add failed: %s", string(out))
+	}
+	return nil
+}
+
+func (c *Client) StageFiles(paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	if c.DryRun {
+		fmt.Printf("🔏 [DRY-RUN] Skipping 'git add' for %v\n", paths)
+		return nil
+	}
+	args := append([]string{"add"}, paths...)
+	cmd := exec.Command("git", args...)
+	cmd.Dir = c.ProjectRoot
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git add failed for %v: %s", paths, string(out))
 	}
 	return nil
 }
@@ -46,10 +63,10 @@ func (c *Client) PreCommitCheck(ctx context.Context) error {
 	}
 
 	// 2. Run go vet (Strict correctness check)
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	ctxTimeout, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	vetCmd := exec.CommandContext(ctx, "go", "vet", "./...")
+	vetCmd := exec.CommandContext(ctxTimeout, "go", "vet", "./...")
 	vetCmd.Dir = c.ProjectRoot
 
 	if out, err := vetCmd.CombinedOutput(); err != nil {
@@ -64,19 +81,20 @@ func (c *Client) PreCommitCheck(ctx context.Context) error {
 }
 
 func (c *Client) Commit(ctx context.Context, p *audit.Provenance) (string, error) {
-	// Checks run, but now lenient on global errors
+	return c.CommitWithMessage(ctx, p.FormatCommitMessage())
+}
+
+func (c *Client) CommitWithMessage(ctx context.Context, message string) (string, error) {
 	if err := c.PreCommitCheck(ctx); err != nil {
 		return "", fmt.Errorf("safety check failed: %w", err)
 	}
 
-	msg := p.FormatCommitMessage()
-
 	if c.DryRun {
-		fmt.Printf("🔒 [DRY-RUN] Would commit with message:\n%s\n", msg)
+		fmt.Printf("🔏 [DRY-RUN] Would commit with message:\n%s\n", message)
 		return "dry-run-hash", nil
 	}
 
-	cmd := exec.CommandContext(ctx, "git", "commit", "-m", msg)
+	cmd := exec.CommandContext(ctx, "git", "commit", "-m", message)
 	cmd.Dir = c.ProjectRoot
 
 	out, err := cmd.CombinedOutput()
@@ -85,6 +103,36 @@ func (c *Client) Commit(ctx context.Context, p *audit.Provenance) (string, error
 	}
 
 	return strings.TrimSpace(string(out)), nil
+}
+
+func (c *Client) RevertFiles(paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	if c.DryRun {
+		fmt.Printf("🔏 [DRY-RUN] Skipping reverting files: %v\n", paths)
+		return nil
+	}
+	args := append([]string{"checkout", "HEAD", "--"}, paths...)
+	cmd := exec.Command("git", args...)
+	cmd.Dir = c.ProjectRoot
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git revert failed for %v: %s", paths, string(out))
+	}
+	return nil
+}
+
+func (c *Client) CreateBranch(name string) error {
+	if c.DryRun {
+		fmt.Printf("🔏 [DRY-RUN] Skipping branch creation: %s\n", name)
+		return nil
+	}
+	cmd := exec.Command("git", "checkout", "-b", name)
+	cmd.Dir = c.ProjectRoot
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git branch creation failed: %s", string(out))
+	}
+	return nil
 }
 
 func (c *Client) IsDirty() bool {

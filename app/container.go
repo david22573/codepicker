@@ -49,6 +49,7 @@ type Container struct {
 	Config           *config.AppConfig
 	TraceRecorder    *trace.Recorder
 	CostObserver     *agent.CostObserver
+	RepoMapper       *indexer.RepoMapper
 
 	wg     sync.WaitGroup
 	ctx    context.Context
@@ -128,6 +129,8 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 		activeTools = tools.WrapToolsWithTrace(activeTools, activeRecorder)
 	}
 
+	mapper := indexer.NewRepoMapper()
+
 	_, planner, executor, auditor, explainer, twoPass, ctxBuilder, err := NewAgentStack(AgentStackOpts{
 		Config:       cfg,
 		LLMClient:    activeLLM,
@@ -142,6 +145,7 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 		DryRun:       dryRun,
 		CIMode:       ciMode,
 		Verbose:      verbose,
+		Mapper:       mapper,
 	}, activeTools)
 
 	if err != nil {
@@ -150,7 +154,10 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 
 	slicer := indexer.NewCodeSlicer()
 	indexManager := indexer.NewIndexManager(slicer, repo, embedClient)
-	primer := ctxAdapters.NewProjectPrimer(rootDir)
+	_ = indexManager.SyncRepoMap(context.Background(), rootDir, mapper)
+
+	// Phase 1.3: Initialize ProjectPrimer with the new RepoMapper
+	primer := ctxAdapters.NewProjectPrimer(rootDir, mapper, false)
 	verifierPipeline := verifier.NewPipeline(rootDir)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -178,6 +185,7 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 		Config:           cfg,
 		TraceRecorder:    activeRecorder,
 		CostObserver:     costObserver,
+		RepoMapper:       mapper,
 		ctx:              ctx,
 		cancel:           cancel,
 	}

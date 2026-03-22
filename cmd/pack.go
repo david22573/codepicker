@@ -41,21 +41,28 @@ const (
 )
 
 var packCmd = &cobra.Command{
-	Use:   "pack",
+	Use:   "pack [targets...]",
 	Short: "Optimize codebase context for LLM input",
 	Long: `Consolidates your project into a high-density format for AI context.
 Implements a Dual Pack Strategy:
   - Full Mode: Includes ALL files (non-truncated) up to a hard size cap.
   - Smart Mode: Budget-aware packing for larger repositories.
   - Auto Mode: Selects based on repository size (< 3MB = Full).
-Respects .codepickerignore patterns.`,
+Respects .codepickerignore patterns.
+You can specify particular files or directories to pack. If none are provided, it packs the entire current directory.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cwd, err := os.Getwd()
 		if err != nil {
 			return err
 		}
 
-		fmt.Printf("📦 Scanning project at: %s\n", cwd)
+		targets := args
+		if len(targets) == 0 {
+			targets = []string{cwd}
+			fmt.Printf("📦 Scanning entire project at: %s\n", cwd)
+		} else {
+			fmt.Printf("📦 Scanning specific targets: %v\n", targets)
+		}
 
 		// 1. Load Ignore Patterns
 		ignorePatterns, err := loadIgnorePatterns(cwd)
@@ -65,10 +72,15 @@ Respects .codepickerignore patterns.`,
 			fmt.Printf("🚫 Loaded %d ignore rules from %s\n", len(ignorePatterns), IgnoreFileName)
 		}
 
-		// 2. Scan Project & Calculate Size
-		files, totalBytes, err := scanProject(cwd, ignorePatterns)
+		// 2. Scan Targets & Calculate Size
+		files, totalBytes, err := scanTargets(cwd, targets, ignorePatterns)
 		if err != nil {
 			return err
+		}
+
+		if len(files) == 0 {
+			fmt.Println("⚠️  No files found to pack.")
+			return nil
 		}
 
 		fmt.Printf("📊 Detected: %d files, %s total size\n", len(files), formatBytes(totalBytes))
@@ -78,10 +90,10 @@ Respects .codepickerignore patterns.`,
 		if selectedMode == "auto" {
 			if totalBytes < AutoThresholdBytes {
 				selectedMode = "full"
-				fmt.Println("🤖 Auto-Strategy: Repository is small (< 3MB) -> Using FULL Pack Mode")
+				fmt.Println("🤖 Auto-Strategy: Total size is small (< 3MB) -> Using FULL Pack Mode")
 			} else {
 				selectedMode = "smart"
-				fmt.Println("🤖 Auto-Strategy: Repository is large (> 3MB) -> Using SMART Pack Mode")
+				fmt.Println("🤖 Auto-Strategy: Total size is large (> 3MB) -> Using SMART Pack Mode")
 			}
 		}
 
@@ -143,6 +155,7 @@ func init() {
 	packCmd.Flags().BoolVar(&packSplit, "split", false, "Automatically split the output into multiple parts if it exceeds a token limit")
 	packCmd.Flags().IntVar(&packSplitTokens, "split-tokens", 30000, "Maximum tokens per file if --split is enabled")
 
+	// Assuming rootCmd is defined elsewhere in your cmd package
 	rootCmd.AddCommand(packCmd)
 }
 
@@ -188,58 +201,80 @@ func loadIgnorePatterns(root string) ([]string, error) {
 	return patterns, scanner.Err()
 }
 
-func scanProject(root string, ignorePatterns []string) ([]FileEntry, int64, error) {
+func scanTargets(cwd string, targets []string, ignorePatterns []string) ([]FileEntry, int64, error) {
 	var files []FileEntry
 	var totalBytes int64
+	seen := make(map[string]bool)
 
-	err := filepath.Walk(root, func(path string, info fs.FileInfo, err error) error {
+	for _, target := range targets {
+		absTarget, err := filepath.Abs(target)
 		if err != nil {
-			return nil
+			fmt.Printf("⚠️  Could not resolve target %s: %v\n", target, err)
+			continue
 		}
 
-		rel, _ := filepath.Rel(root, path)
+		err = filepath.Walk(absTarget, func(path string, info fs.FileInfo, err error) error {
+			if err != nil {
+				return nil
+			}
 
-		// Skip output file and .git immediately
-		if info.Name() == packOutput || info.Name() == ".git" || info.Name() == "codepicker_out" {
+			// Prevent duplicate processing if paths overlap
+			if seen[path] {
+				return nil
+			}
+			seen[path] = true
+
+			rel, err := filepath.Rel(cwd, path)
+			if err != nil {
+				rel = path // fallback if it can't be made relative
+			}
+
+			// Skip output file and .git immediately
+			if info.Name() == packOutput || info.Name() == ".git" || info.Name() == "codepicker_out" {
+				if info.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+
+			// 1. Check Custom Ignores (.codepickerignore)
+			if isIgnored(rel, ignorePatterns) {
+				if info.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+
+			// 2. Default Ignores (Hardcoded safety)
 			if info.IsDir() {
-				return filepath.SkipDir
+				name := info.Name()
+				if (strings.HasPrefix(name, ".") && name != ".") ||
+					name == "vendor" ||
+					name == "node_modules" ||
+					name == "dist" ||
+					name == "bin" {
+					return filepath.SkipDir
+				}
+				return nil
 			}
-			return nil
-		}
 
-		// 1. Check Custom Ignores (.codepickerignore)
-		if isIgnored(rel, ignorePatterns) {
-			if info.IsDir() {
-				return filepath.SkipDir
+			// 3. Filter Files (Extensions & Whitelist)
+			if !shouldPack(path, info) {
+				return nil
 			}
+
+			files = append(files, FileEntry{Path: path, RelPath: rel, Info: info})
+			totalBytes += info.Size()
+
 			return nil
+		})
+
+		if err != nil {
+			return nil, 0, err
 		}
+	}
 
-		// 2. Default Ignores (Hardcoded safety)
-		if info.IsDir() {
-			name := info.Name()
-			if (strings.HasPrefix(name, ".") && name != ".") ||
-				name == "vendor" ||
-				name == "node_modules" ||
-				name == "dist" ||
-				name == "bin" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		// 3. Filter Files (Extensions & Whitelist)
-		if !shouldPack(path, info) {
-			return nil
-		}
-
-		files = append(files, FileEntry{Path: path, RelPath: rel, Info: info})
-		totalBytes += info.Size()
-
-		return nil
-	})
-
-	return files, totalBytes, err
+	return files, totalBytes, nil
 }
 
 func isIgnored(relPath string, patterns []string) bool {

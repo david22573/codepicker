@@ -64,6 +64,12 @@ func NewSQLiteRepository(dbPath string) (*SQLiteRepository, error) {
 		tokens INTEGER DEFAULT 0,
 		tool_cost REAL DEFAULT 0.0,
 		llm_cost REAL DEFAULT 0.0
+	);
+	
+	CREATE TABLE IF NOT EXISTS repo_map_cache (
+		file_path TEXT PRIMARY KEY,
+		data TEXT,
+		mod_time DATETIME
 	);`
 
 	if _, err := db.Exec(schema); err != nil {
@@ -84,11 +90,47 @@ func NewSQLiteRepository(dbPath string) (*SQLiteRepository, error) {
 	}
 
 	for _, stmt := range migrations {
-		_, _ = db.Exec(stmt)
+		_, _ = db.Exec(stmt) // Ignore errors for existing columns
 	}
 
 	return &SQLiteRepository{db: db}, nil
 }
+
+// --- Phase 1.4: Repo Map Caching Methods ---
+
+func (r *SQLiteRepository) SaveRepoMapCache(ctx context.Context, filePath string, data string, modTime time.Time) error {
+	query := `INSERT OR REPLACE INTO repo_map_cache (file_path, data, mod_time) VALUES (?, ?, ?)`
+	_, err := r.db.ExecContext(ctx, query, filePath, data, modTime)
+	return err
+}
+
+func (r *SQLiteRepository) GetRepoMapCache(ctx context.Context) (map[string]string, map[string]time.Time, error) {
+	rows, err := r.db.QueryContext(ctx, "SELECT file_path, data, mod_time FROM repo_map_cache")
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+
+	dataMap := make(map[string]string)
+	timeMap := make(map[string]time.Time)
+
+	for rows.Next() {
+		var path, data string
+		var modTime time.Time
+		if err := rows.Scan(&path, &data, &modTime); err == nil {
+			dataMap[path] = data
+			timeMap[path] = modTime
+		}
+	}
+	return dataMap, timeMap, nil
+}
+
+func (r *SQLiteRepository) DeleteRepoMapCache(ctx context.Context, filePath string) error {
+	_, err := r.db.ExecContext(ctx, "DELETE FROM repo_map_cache WHERE file_path = ?", filePath)
+	return err
+}
+
+// --- End Phase 1.4 Methods ---
 
 func (r *SQLiteRepository) UpdateSliceEmbedding(ctx context.Context, sliceID string, embedding []float32) error {
 	data, err := json.Marshal(embedding)

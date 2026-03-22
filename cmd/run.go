@@ -14,6 +14,7 @@ var runDryRun bool
 var runCiMode bool
 var runLlmModel string
 var runVerbose bool
+var runNoMap bool
 
 var runCmd = &cobra.Command{
 	Use:   "run [task description]",
@@ -29,6 +30,9 @@ var runCmd = &cobra.Command{
 			return fmt.Errorf("container init failed: %w", err)
 		}
 		defer container.Close()
+
+		// Phase 1.3: Toggle sparse map injection
+		container.ProjectPrimer.NoMap = runNoMap
 
 		ctx := cmd.Context()
 
@@ -51,7 +55,7 @@ var runCmd = &cobra.Command{
 			return fmt.Errorf("planning failed: %w", err)
 		}
 
-		fmt.Printf("📝 Plan generated: %s (%d steps)\n", plan.ID, len(plan.Steps))
+		fmt.Printf("📜 Plan generated: %s (%d steps)\n", plan.ID, len(plan.Steps))
 
 		if runCiMode {
 			container.PlanExecutor.SetAutoConfirm(true)
@@ -80,5 +84,6 @@ func init() {
 	runCmd.Flags().BoolVar(&runCiMode, "ci", false, "Enable CI mode (skip confirmations)")
 	runCmd.Flags().StringVar(&runLlmModel, "model", "", "LLM model to use")
 	runCmd.Flags().BoolVarP(&runVerbose, "verbose", "v", false, "Enable verbose output")
+	runCmd.Flags().BoolVar(&runNoMap, "no-map", false, "Disable the sparse repository map injection")
 	rootCmd.AddCommand(runCmd)
 }

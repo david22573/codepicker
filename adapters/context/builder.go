@@ -23,6 +23,7 @@ type SmartBuilder struct {
 	estimator llm.TokenEstimator
 	dedup     *SemanticDeduplicator
 	shadow    *fs.ShadowManager
+	mapper    *indexer.RepoMapper
 }
 
 func NewSmartBuilder(
@@ -31,6 +32,7 @@ func NewSmartBuilder(
 	reranker *Reranker,
 	shadow *fs.ShadowManager,
 	maxTokens int,
+	mapper *indexer.RepoMapper,
 ) *SmartBuilder {
 	return &SmartBuilder{
 		repo:      repo,
@@ -40,6 +42,7 @@ func NewSmartBuilder(
 		estimator: llm.NewDefaultEstimator(),
 		dedup:     NewSemanticDeduplicator(),
 		shadow:    shadow,
+		mapper:    mapper,
 	}
 }
 
@@ -52,6 +55,19 @@ func (b *SmartBuilder) BuildContext(ctx context.Context, query string) (string, 
 	defer func() {
 		metrics.GetRegistry().ObserveDuration("codepicker_context_build_latency_seconds", time.Since(start))
 	}()
+
+	var builder strings.Builder
+
+	// Phase 1.2: Inject the Sparse Repo Map
+	if b.mapper != nil {
+		mapBudget := 1000
+		if b.maxTokens < 4000 {
+			mapBudget = b.maxTokens / 4 // Scale down if overall budget is super tight
+		}
+		builder.WriteString(b.mapper.RenderMap(mapBudget))
+		builder.WriteString("\n\n")
+		b.maxTokens -= mapBudget // Deduct map cost from remaining slice budget
+	}
 
 	vectors, _, err := b.embedder.CreateEmbeddings(ctx, []string{query})
 	if err != nil {
@@ -68,7 +84,8 @@ func (b *SmartBuilder) BuildContext(ctx context.Context, query string) (string, 
 	}
 
 	if len(candidates) == 0 {
-		return "<relevant_code_context>\n  \n</relevant_code_context>", nil
+		builder.WriteString("<relevant_code_context>\n  \n</relevant_code_context>\n")
+		return builder.String(), nil
 	}
 
 	ranked, err := b.reranker.Rank(ctx, query, candidates)
@@ -88,7 +105,6 @@ func (b *SmartBuilder) BuildContext(ctx context.Context, query string) (string, 
 		}
 	}
 
-	var builder strings.Builder
 	builder.WriteString("<relevant_code_context>\n")
 
 	usedTokens := 0
@@ -154,7 +170,7 @@ func (b *SmartBuilder) BuildContext(ctx context.Context, query string) (string, 
 	}
 
 	if includedCount < len(ranked) {
-		fmt.Fprintf(&builder, "  <!-- %d slices omitted due to token limit -->\n", len(ranked)-includedCount)
+		fmt.Fprintf(&builder, "  \n", len(ranked)-includedCount)
 	}
 
 	builder.WriteString("</relevant_code_context>\n")

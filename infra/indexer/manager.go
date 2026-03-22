@@ -2,12 +2,14 @@ package indexer
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	domainCtx "github.com/david22573/codepicker/domain/context"
 	"github.com/david22573/codepicker/infra/llm"
@@ -24,10 +26,108 @@ type ContextRepository interface {
 	UpdateSliceEmbedding(ctx context.Context, sliceID string, embedding []float32) error
 	GetSliceByID(ctx context.Context, id string) (*domainCtx.CodeSlice, error)
 	SearchByVector(ctx context.Context, queryVector []float32, limit int) ([]domainCtx.CodeSlice, error)
+
+	// Phase 1.4: Repo Map Caching
+	SaveRepoMapCache(ctx context.Context, filePath string, data string, modTime time.Time) error
+	GetRepoMapCache(ctx context.Context) (map[string]string, map[string]time.Time, error)
+	DeleteRepoMapCache(ctx context.Context, filePath string) error
 }
 
 func NewIndexManager(s *CodeSlicer, store ContextRepository, embedder *llm.EmbeddingClient) *IndexManager {
 	return &IndexManager{slicer: s, store: store, embedder: embedder}
+}
+
+// SyncRepoMap incrementally builds or loads the sparse project map.
+func (m *IndexManager) SyncRepoMap(ctx context.Context, rootPath string, mapper *RepoMapper) error {
+	absRoot, err := filepath.Abs(rootPath)
+	if err != nil {
+		return err
+	}
+
+	dataMap, timeMap, err := m.store.GetRepoMapCache(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to load repo map cache: %w", err)
+	}
+
+	seenFiles := make(map[string]bool)
+	allowedExts := map[string]bool{
+		".go": true, ".py": true, ".ts": true, ".tsx": true,
+		".js": true, ".jsx": true, ".svelte": true,
+	}
+
+	err = filepath.Walk(absRoot, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+
+		if info.IsDir() {
+			name := info.Name()
+			if (strings.HasPrefix(name, ".") && name != ".") || name == "vendor" || name == "node_modules" || name == "dist" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		ext := strings.ToLower(filepath.Ext(path))
+		if !allowedExts[ext] {
+			return nil
+		}
+
+		relPath, _ := filepath.Rel(absRoot, path)
+		seenFiles[relPath] = true
+		diskModTime := info.ModTime()
+
+		cachedTime, timeExists := timeMap[relPath]
+		cachedData, dataExists := dataMap[relPath]
+
+		// Cache Hit
+		if timeExists && dataExists && diskModTime.Equal(cachedTime) {
+			var fm FileMap
+			if err := json.Unmarshal([]byte(cachedData), &fm); err == nil {
+				mapper.mu.Lock()
+				mapper.files[path] = &fm
+				mapper.mu.Unlock()
+				return nil
+			}
+		}
+
+		// Cache Miss or File Modified: Re-parse
+		if err := mapper.ParseFile(ctx, path); err != nil {
+			return nil // Skip on parse failure
+		}
+
+		mapper.mu.RLock()
+		fm, ok := mapper.files[path]
+		mapper.mu.RUnlock()
+
+		if ok {
+			fm.Path = relPath // Normalize to relative paths for cache stability
+			if jsonData, err := json.Marshal(fm); err == nil {
+				_ = m.store.SaveRepoMapCache(ctx, relPath, string(jsonData), diskModTime)
+			}
+			fm.Path = path // Restore absolute path for the active runtime map
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return err
+	}
+
+	// Cleanup deleted files from cache
+	for cachedPath := range timeMap {
+		if !seenFiles[cachedPath] {
+			_ = m.store.DeleteRepoMapCache(ctx, cachedPath)
+
+			absDeletedPath := filepath.Join(absRoot, cachedPath)
+			mapper.mu.Lock()
+			delete(mapper.files, absDeletedPath)
+			mapper.mu.Unlock()
+		}
+	}
+
+	return nil
 }
 
 func (m *IndexManager) IndexDirectory(rootPath string) error {
@@ -42,7 +142,7 @@ func (m *IndexManager) IndexDirectory(rootPath string) error {
 	jobs := make(chan string, 100)
 	var wg sync.WaitGroup
 
-	for w := range workerCount {
+	for w := 0; w < workerCount; w++ {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
@@ -92,7 +192,6 @@ func (m *IndexManager) worker(id int, rootPath string, jobs <-chan string) {
 
 		fmt.Printf("[Worker %d] 📄 Processing %s (%d slices)\n", id, relPath, len(slices))
 
-		// Check existing slices from DB to avoid wasteful re-embedding
 		existingSlices, _ := m.store.GetSlicesByFile(ctx, relPath)
 		existingHashMap := make(map[string]string)
 		for _, existing := range existingSlices {
@@ -108,7 +207,6 @@ func (m *IndexManager) worker(id int, rootPath string, jobs <-chan string) {
 		var ids []string
 
 		for _, s := range slices {
-			// If hash hasn't changed, skip embedding call
 			if existingHash, ok := existingHashMap[s.ID]; ok && existingHash == s.Hash {
 				continue
 			}
@@ -117,7 +215,6 @@ func (m *IndexManager) worker(id int, rootPath string, jobs <-chan string) {
 			ids = append(ids, s.ID)
 		}
 
-		// Batch call to OpenAI/OpenRouter ONLY if there are new/changed slices
 		if len(contents) > 0 {
 			vectors, _, err := m.embedder.CreateEmbeddings(ctx, contents)
 			if err != nil {

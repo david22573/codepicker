@@ -5,15 +5,23 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/david22573/codepicker/infra/indexer"
 )
 
 // ProjectPrimer generates a map of the file structure to help the agent navigate.
 type ProjectPrimer struct {
-	Root string
+	Root   string
+	Mapper *indexer.RepoMapper
+	NoMap  bool
 }
 
-func NewProjectPrimer(root string) *ProjectPrimer {
-	return &ProjectPrimer{Root: root}
+func NewProjectPrimer(root string, mapper *indexer.RepoMapper, noMap bool) *ProjectPrimer {
+	return &ProjectPrimer{
+		Root:   root,
+		Mapper: mapper,
+		NoMap:  noMap,
+	}
 }
 
 // Generate provides a default deep map (depth 4), compatible with existing callers.
@@ -87,6 +95,13 @@ func (p *ProjectPrimer) prime(maxDepth int) (string, error) {
 		sb.WriteString("\n### DEPENDENCIES (go.mod)\n")
 		// Truncate go.mod if it's huge, just keeping the requires
 		sb.WriteString(string(content))
+	}
+
+	// Phase 1.3: Inject the Repo Map as a fixed preamble
+	if p.Mapper != nil && !p.NoMap {
+		sb.WriteString("\n")
+		sb.WriteString(p.Mapper.RenderMap(1500))
+		sb.WriteString("\n")
 	}
 
 	return sb.String(), nil
