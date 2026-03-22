@@ -70,9 +70,6 @@ func (c *Client) PreCommitCheck(ctx context.Context) error {
 	vetCmd.Dir = c.ProjectRoot
 
 	if out, err := vetCmd.CombinedOutput(); err != nil {
-		// FIX: Don't block commit on existing project errors.
-		// The Agent operates in a sandbox first; if that passed, the specific change is likely fine.
-		// Blocking here prevents fixing "brownfield" projects.
 		fmt.Printf("⚠️  WARNING: 'go vet' found issues (proceeding as changes were sandboxed):\n%s\n", string(out))
 		return nil
 	}
@@ -140,4 +137,42 @@ func (c *Client) IsDirty() bool {
 	cmd.Dir = c.ProjectRoot
 	out, _ := cmd.Output()
 	return len(out) > 0
+}
+
+// GetLastCodepickerCommits finds the last N commits made by the agent.
+func (c *Client) GetLastCodepickerCommits(n int) ([]string, error) {
+	cmd := exec.Command("git", "log", "--grep=\\[codepicker\\]", fmt.Sprintf("-n%d", n), "--format=%H")
+	cmd.Dir = c.ProjectRoot
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("git log failed: %s", string(out))
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	var hashes []string
+	for _, line := range lines {
+		if line != "" {
+			hashes = append(hashes, line)
+		}
+	}
+	return hashes, nil
+}
+
+// RevertCommits cleanly reverts the given commit hashes.
+func (c *Client) RevertCommits(hashes []string) error {
+	if len(hashes) == 0 {
+		return nil
+	}
+	if c.DryRun {
+		fmt.Printf("🔏 [DRY-RUN] Skipping git revert for %v\n", hashes)
+		return nil
+	}
+
+	args := append([]string{"revert", "--no-edit"}, hashes...)
+	cmd := exec.Command("git", args...)
+	cmd.Dir = c.ProjectRoot
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git revert failed: %s", string(out))
+	}
+	return nil
 }

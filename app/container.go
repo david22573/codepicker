@@ -18,6 +18,7 @@ import (
 	"github.com/david22573/codepicker/infra/audit"
 	infraConfig "github.com/david22573/codepicker/infra/config"
 	"github.com/david22573/codepicker/infra/fs"
+	"github.com/david22573/codepicker/infra/git"
 	"github.com/david22573/codepicker/infra/indexer"
 	"github.com/david22573/codepicker/infra/llm"
 	"github.com/david22573/codepicker/infra/logging"
@@ -109,7 +110,9 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 	var activeLLM llm.Provider = llmClient
 
 	shellExec := shell.NewExecutor(30*time.Second, 5000, dryRun, rootDir)
-	activeTools := tools.DefaultSet(shadowMgr, shellExec, rootDir, embedClient, repo)
+	gitClient := git.NewClient(rootDir, dryRun)
+	autoCommit := os.Getenv("CODEPICKER_NO_AUTOCOMMIT") != "1"
+	activeTools := tools.DefaultSet(shadowMgr, shellExec, rootDir, embedClient, repo, gitClient, activeLLM, autoCommit)
 
 	var activeRecorder *trace.Recorder
 
@@ -156,7 +159,6 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 	indexManager := indexer.NewIndexManager(slicer, repo, embedClient)
 	_ = indexManager.SyncRepoMap(context.Background(), rootDir, mapper)
 
-	// Phase 1.3: Initialize ProjectPrimer with the new RepoMapper
 	primer := ctxAdapters.NewProjectPrimer(rootDir, mapper, false)
 	verifierPipeline := verifier.NewPipeline(rootDir)
 
@@ -221,7 +223,6 @@ func (c *Container) Close() {
 		c.CostObserver.Stop()
 	}
 
-	// Wait for background routines to finish before closing the DB and Bus
 	c.wg.Wait()
 
 	if c.TraceRecorder != nil {

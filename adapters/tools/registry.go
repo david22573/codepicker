@@ -3,6 +3,7 @@ package tools
 import (
 	"github.com/david22573/codepicker/domain/agent"
 	"github.com/david22573/codepicker/infra/fs"
+	"github.com/david22573/codepicker/infra/git"
 	"github.com/david22573/codepicker/infra/llm"
 	"github.com/david22573/codepicker/infra/shell"
 )
@@ -14,11 +15,14 @@ func DefaultSet(
 	root string,
 	embedder *llm.EmbeddingClient,
 	repo agent.Repository,
+	gitClient *git.Client,
+	llmClient agent.LLMClient,
+	autoCommit bool,
 ) []agent.Tool {
 	return []agent.Tool{
 		// 1. File Modification (Safe - goes to shadow)
 		NewWriteFileTool(shadow),
-		NewEditFileTool(root, shadow),
+		NewEditFileTool(root, shadow, gitClient, llmClient, autoCommit),
 
 		// 2. File Reading & Exploration
 		NewReadFileTool(root, shadow),

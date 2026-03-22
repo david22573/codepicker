@@ -3,14 +3,19 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/david22573/codepicker/app"
+	"github.com/david22573/codepicker/infra/git"
 	"github.com/spf13/cobra"
 )
 
 var fixDryRun bool
 var fixLlmModel string
 var fixVerbose bool
+var fixBranch bool
 
 var fixCmd = &cobra.Command{
 	Use:   "fix [file path]",
@@ -20,6 +25,19 @@ var fixCmd = &cobra.Command{
 		apiKey := getAPIKeyOrExit()
 		targetFile := args[0]
 		cwd, _ := os.Getwd()
+
+		gitClient := git.NewClient(cwd, fixDryRun)
+		var branchName string
+		if fixBranch {
+			base := filepath.Base(targetFile)
+			base = strings.ReplaceAll(base, ".", "-")
+			branchName = fmt.Sprintf("cp/%d-fix-%s", time.Now().Unix(), base)
+			if err := gitClient.CreateBranch(branchName); err != nil {
+				fmt.Printf("⚠️  Failed to create session branch: %v\n", err)
+			} else {
+				fmt.Printf("🌿 Switched to new session branch: %s\n", branchName)
+			}
+		}
 
 		container, err := app.NewContainer(apiKey, cwd, fixLlmModel, fixDryRun, false, GetVerbose())
 		if err != nil {
@@ -66,6 +84,11 @@ var fixCmd = &cobra.Command{
 		}
 
 		fmt.Println("✨ Fix applied successfully!")
+
+		if branchName != "" {
+			fmt.Printf("\n📦 Session Summary:\n   Branch: %s\n   Run 'codepicker undo' to roll back edits.\n", branchName)
+		}
+
 		return nil
 	},
 }
@@ -74,5 +97,6 @@ func init() {
 	fixCmd.Flags().BoolVar(&fixDryRun, "dry-run", false, "Enable read-only mode")
 	fixCmd.Flags().StringVar(&fixLlmModel, "model", "", "LLM model to use")
 	fixCmd.Flags().BoolVarP(&fixVerbose, "verbose", "v", false, "Enable verbose output")
+	fixCmd.Flags().BoolVarP(&fixBranch, "branch", "b", false, "Create a new git branch for this fix session")
 	rootCmd.AddCommand(fixCmd)
 }
