@@ -19,7 +19,7 @@ func DefaultSet(
 	llmClient agent.LLMClient,
 	autoCommit bool,
 ) []agent.Tool {
-	return []agent.Tool{
+	toolsList := []agent.Tool{
 		// 1. File Modification (Safe - goes to shadow)
 		NewWriteFileTool(shadow),
 		NewEditFileTool(root, shadow, gitClient, llmClient, autoCommit),
@@ -37,4 +37,11 @@ func DefaultSet(
 		NewGitDiffTool(root),
 		NewShellTool(sh, shadow),
 	}
+
+	// 5. Memory / Learning (Phase 4)
+	if store, ok := repo.(LearningStore); ok {
+		toolsList = append(toolsList, NewRecordLearningTool(store, embedder))
+	}
+
+	return toolsList
 }

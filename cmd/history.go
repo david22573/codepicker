@@ -70,7 +70,6 @@ var inspectCmd = &cobra.Command{
 			if turn.ToolName != "" {
 				fmt.Printf("🛠️  Tool: %s\n", turn.ToolName)
 				fmt.Printf("📥 Input: %s\n", turn.ToolArgs)
-				// Truncate long outputs for readability
 				out := turn.ToolOut
 				if len(out) > 300 {
 					out = out[:300] + "... (truncated)"
@@ -86,7 +85,47 @@ var inspectCmd = &cobra.Command{
 	},
 }
 
-// Helper to quickly grab the repo without the full container overhead
+var sessionsCmd = &cobra.Command{
+	Use:   "sessions",
+	Short: "List saved agent sessions available for resume",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		repo, err := getRepo()
+		if err != nil {
+			return err
+		}
+
+		sessions, err := repo.ListSessions(context.Background(), 20)
+		if err != nil {
+			return fmt.Errorf("failed to fetch sessions: %w", err)
+		}
+
+		if len(sessions) == 0 {
+			fmt.Println("No saved sessions found.")
+			return nil
+		}
+
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
+		fmt.Fprintln(w, "SESSION ID\tOUTCOME\tTIME\tTASK")
+		fmt.Fprintln(w, "----------\t-------\t----\t----")
+
+		for _, s := range sessions {
+			taskDisplay := s.Task
+			if len(taskDisplay) > 40 {
+				taskDisplay = taskDisplay[:37] + "..."
+			}
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",
+				s.ID,
+				s.Outcome,
+				s.CreatedAt.Format("01-02 15:04"),
+				taskDisplay,
+			)
+		}
+		w.Flush()
+		fmt.Println("\nTo resume a session, run: codepicker run --resume <SESSION_ID>")
+		return nil
+	},
+}
+
 func getRepo() (*storage.SQLiteRepository, error) {
 	cwd, _ := os.Getwd()
 	dbPath := pathutil.GetStateDBPath(cwd)
@@ -96,4 +135,5 @@ func getRepo() (*storage.SQLiteRepository, error) {
 func init() {
 	rootCmd.AddCommand(historyCmd)
 	rootCmd.AddCommand(inspectCmd)
+	rootCmd.AddCommand(sessionsCmd)
 }

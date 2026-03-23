@@ -70,6 +70,23 @@ func NewSQLiteRepository(dbPath string) (*SQLiteRepository, error) {
 		file_path TEXT PRIMARY KEY,
 		data TEXT,
 		mod_time DATETIME
+	);
+	
+	CREATE TABLE IF NOT EXISTS sessions (
+		id TEXT PRIMARY KEY,
+		task TEXT,
+		created_at DATETIME,
+		messages TEXT,
+		edits_made TEXT,
+		outcome TEXT
+	);
+
+	CREATE TABLE IF NOT EXISTS learnings (
+		id TEXT PRIMARY KEY,
+		task TEXT,
+		note TEXT,
+		embedding TEXT,
+		created_at DATETIME
 	);`
 
 	if _, err := db.Exec(schema); err != nil {
@@ -90,10 +107,106 @@ func NewSQLiteRepository(dbPath string) (*SQLiteRepository, error) {
 	}
 
 	for _, stmt := range migrations {
-		_, _ = db.Exec(stmt) // Ignore errors for existing columns
+		_, _ = db.Exec(stmt)
 	}
 
 	return &SQLiteRepository{db: db}, nil
+}
+
+// --- Phase 4: Session Memory & Learning Methods ---
+
+func (r *SQLiteRepository) SaveSession(ctx context.Context, s *agent.Session) error {
+	messages, _ := json.Marshal(s.Messages)
+	edits, _ := json.Marshal(s.EditsMade)
+	query := `INSERT OR REPLACE INTO sessions (id, task, created_at, messages, edits_made, outcome) VALUES (?, ?, ?, ?, ?, ?)`
+	_, err := r.db.ExecContext(ctx, query, s.ID, s.Task, s.CreatedAt, string(messages), string(edits), s.Outcome)
+	return err
+}
+
+func (r *SQLiteRepository) GetSession(ctx context.Context, id string) (*agent.Session, error) {
+	var s agent.Session
+	var messagesStr, editsStr string
+	query := `SELECT id, task, created_at, messages, edits_made, outcome FROM sessions WHERE id = ?`
+
+	err := r.db.QueryRowContext(ctx, query, id).Scan(&s.ID, &s.Task, &s.CreatedAt, &messagesStr, &editsStr, &s.Outcome)
+	if err != nil {
+		return nil, err
+	}
+
+	json.Unmarshal([]byte(messagesStr), &s.Messages)
+	json.Unmarshal([]byte(editsStr), &s.EditsMade)
+	return &s, nil
+}
+
+func (r *SQLiteRepository) ListSessions(ctx context.Context, limit int) ([]agent.Session, error) {
+	rows, err := r.db.QueryContext(ctx, "SELECT id, task, created_at, outcome FROM sessions ORDER BY created_at DESC LIMIT ?", limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var sessions []agent.Session
+	for rows.Next() {
+		var s agent.Session
+		if err := rows.Scan(&s.ID, &s.Task, &s.CreatedAt, &s.Outcome); err == nil {
+			sessions = append(sessions, s)
+		}
+	}
+	return sessions, nil
+}
+
+func (r *SQLiteRepository) SaveLearning(ctx context.Context, l *agent.Learning) error {
+	vec, _ := json.Marshal(l.Embedding)
+	query := `INSERT INTO learnings (id, task, note, embedding, created_at) VALUES (?, ?, ?, ?, ?)`
+	_, err := r.db.ExecContext(ctx, query, l.ID, l.Task, l.Note, string(vec), l.CreatedAt)
+	return err
+}
+
+func (r *SQLiteRepository) SearchLearnings(ctx context.Context, queryVector []float32, limit int) ([]agent.Learning, error) {
+	rows, err := r.db.QueryContext(ctx, "SELECT id, task, note, embedding, created_at FROM learnings WHERE embedding IS NOT NULL")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type candidate struct {
+		l     agent.Learning
+		score float64
+	}
+	var candidates []candidate
+
+	for rows.Next() {
+		var l agent.Learning
+		var vecStr string
+		if err := rows.Scan(&l.ID, &l.Task, &l.Note, &vecStr, &l.CreatedAt); err != nil {
+			continue
+		}
+
+		var vec []float32
+		if err := json.Unmarshal([]byte(vecStr), &vec); err != nil {
+			continue
+		}
+		l.Embedding = vec
+
+		score := cosineSimilarity(queryVector, vec)
+		if score > 0.4 {
+			candidates = append(candidates, candidate{l: l, score: score})
+		}
+	}
+
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].score > candidates[j].score
+	})
+
+	if len(candidates) > limit {
+		candidates = candidates[:limit]
+	}
+
+	var results []agent.Learning
+	for _, c := range candidates {
+		results = append(results, c.l)
+	}
+	return results, nil
 }
 
 // --- Phase 1.4: Repo Map Caching Methods ---
@@ -130,7 +243,7 @@ func (r *SQLiteRepository) DeleteRepoMapCache(ctx context.Context, filePath stri
 	return err
 }
 
-// --- End Phase 1.4 Methods ---
+// --- General Methods ---
 
 func (r *SQLiteRepository) UpdateSliceEmbedding(ctx context.Context, sliceID string, embedding []float32) error {
 	data, err := json.Marshal(embedding)

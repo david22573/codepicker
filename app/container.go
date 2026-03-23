@@ -44,6 +44,7 @@ type Container struct {
 	WorkspaceManager *fs.WorkspaceManager
 	ShadowManager    *fs.ShadowManager
 	IndexManager     *indexer.IndexManager
+	EmbedClient      *llm.EmbeddingClient
 	EventBus         *event.DataBus
 	Logger           *logging.Logger
 	CostTracker      *llm.CostTracker
@@ -181,6 +182,7 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 		Repository:       repo,
 		SliceStore:       repo,
 		IndexManager:     indexManager,
+		EmbedClient:      embedClient,
 		EventBus:         eventBus,
 		Logger:           logger,
 		CostTracker:      costTracker,
