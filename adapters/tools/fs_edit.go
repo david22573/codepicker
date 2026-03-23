@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/david22573/codepicker/adapters/policy"
 	"github.com/david22573/codepicker/domain/agent"
 	"github.com/david22573/codepicker/infra/fs"
 	"github.com/david22573/codepicker/infra/git"
@@ -57,6 +58,13 @@ func (t *EditFileTool) Execute(ctx context.Context, args string) (string, error)
 		return "", fmt.Errorf("validation error: missing required fields 'path' or 'blocks'")
 	}
 
+	// Phase 3.2: Interactive Approval Gate
+	action, editedBlocks := policy.AskApproval(input.Path, input.Blocks)
+	if action == "n" {
+		return fmt.Sprintf("Change to %s skipped by user.", input.Path), nil
+	}
+	input.Blocks = editedBlocks
+
 	var content []byte
 	var err error
 	content, err = t.shadow.Read(input.Path)
@@ -92,7 +100,6 @@ func (t *EditFileTool) Execute(ctx context.Context, args string) (string, error)
 
 		prompt := fmt.Sprintf("Write a concise, one-sentence git commit message explaining this change:\n\n%s", input.Blocks)
 
-		// Adjust method name if your agent.LLMClient interface uses something other than Chat
 		msg, err := t.llm.Chat(ctx, "You are a senior engineer writing git commit messages. Respond with ONLY the commit message, no markdown formatting, no quotes.", prompt)
 		if err != nil {
 			msg = "Update " + input.Path

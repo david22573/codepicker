@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
@@ -17,6 +18,10 @@ var (
 	WarningStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFCC00"))
 	ErrorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF0000")).Bold(true)
 	BoxStyle     = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1).BorderForeground(lipgloss.Color("#888888"))
+
+	DiffAddStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#00FF00"))
+	DiffSubStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF0000"))
+	DiffHeaderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#888888")).Bold(true)
 )
 
 // --- Bubble Tea Spinner Model ---
@@ -94,6 +99,45 @@ func RunSpinner(text string, action func() error) error {
 		return finalModel.err
 	}
 	return nil
+}
+
+// --- Diff Renderer ---
+
+// RenderDiff formats the raw search/replace blocks into a readable unified diff.
+func RenderDiff(filename, blocks string) string {
+	var sb strings.Builder
+	sb.WriteString("\n" + DiffHeaderStyle.Render(fmt.Sprintf("--- %s (Pending Change)", filename)) + "\n")
+
+	lines := strings.Split(blocks, "\n")
+	inOrig := false
+	inRep := false
+
+	for _, line := range lines {
+		if strings.HasPrefix(line, "<<<<") {
+			inOrig = true
+			inRep = false
+			continue
+		}
+		if strings.HasPrefix(line, "====") {
+			inOrig = false
+			inRep = true
+			continue
+		}
+		if strings.HasPrefix(line, ">>>>") {
+			inOrig = false
+			inRep = false
+			continue
+		}
+
+		if inOrig {
+			sb.WriteString(DiffSubStyle.Render("- "+line) + "\n")
+		} else if inRep {
+			sb.WriteString(DiffAddStyle.Render("+ "+line) + "\n")
+		} else {
+			sb.WriteString(line + "\n")
+		}
+	}
+	return sb.String()
 }
 
 // --- Log Helpers ---

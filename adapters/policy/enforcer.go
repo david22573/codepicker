@@ -1,13 +1,20 @@
 package policy
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
+	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 
 	"github.com/david22573/codepicker/infra/pathutil"
+	"github.com/david22573/codepicker/infra/ui"
+	"github.com/david22573/codepicker/runtime"
 )
+
+var sessionAutoApprove bool
 
 type Enforcer struct {
 	config           PolicySchema
@@ -144,4 +151,71 @@ func (e *Enforcer) validateFileSystemAccess(toolName, args string) (bool, string
 	}
 
 	return true, ""
+}
+
+// --- Phase 3.2: Approval Gate ---
+
+func AskApproval(filename, blocks string) (string, string) {
+	if sessionAutoApprove {
+		return "y", blocks
+	}
+
+	if runtime.Global.Mode == runtime.ModeHardenedCI {
+		ui.PrintWarning("ModeHardenedCI active: Auto-rejecting interactive edit prompt.")
+		return "n", blocks
+	}
+
+	fmt.Println(ui.RenderDiff(filename, blocks))
+
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		fmt.Print(ui.InfoStyle.Render("Apply this change? [y/n/e(dit)/s(kip all)]: "))
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(strings.ToLower(input))
+
+		switch input {
+		case "y":
+			return "y", blocks
+		case "n":
+			return "n", blocks
+		case "s":
+			sessionAutoApprove = true
+			return "y", blocks
+		case "e":
+			edited, err := openEditor(blocks)
+			if err != nil {
+				ui.PrintError("Editor failed: " + err.Error())
+				continue
+			}
+			return "y", edited
+		default:
+			ui.PrintWarning("Invalid option. Choose y, n, e, or s.")
+		}
+	}
+}
+
+func openEditor(content string) (string, error) {
+	editor := os.Getenv("EDITOR")
+	if editor == "" {
+		editor = "nano" // chill default fallback
+	}
+	tmp, err := os.CreateTemp("", "codepicker-edit-*.txt")
+	if err != nil {
+		return "", err
+	}
+	defer os.Remove(tmp.Name())
+
+	tmp.WriteString(content)
+	tmp.Close()
+
+	cmd := exec.Command(editor, tmp.Name())
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return "", err
+	}
+
+	edited, err := os.ReadFile(tmp.Name())
+	return string(edited), err
 }
