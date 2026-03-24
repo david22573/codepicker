@@ -214,9 +214,10 @@ func ApplyBlocksToString(original string, blocks string) (string, error) {
 			continue
 		}
 
-		if state == 1 {
+		switch state {
+		case 1:
 			search = append(search, line)
-		} else if state == 2 {
+		case 2:
 			replace = append(replace, line)
 		}
 	}
