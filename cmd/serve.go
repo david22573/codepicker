@@ -11,29 +11,29 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/david22573/codepicker/adapters/policy"
 	"github.com/david22573/codepicker/app"
 	"github.com/david22573/codepicker/domain/event"
 	"github.com/spf13/cobra"
 )
 
-var servePort int
-var globalContainer *app.Container
+var (
+	servePort     int
+	daemonAPIKey  string
+	daemonCwd     string
+	daemonVerbose bool
+)
 
 var serveCmd = &cobra.Command{
 	Use:   "serve",
 	Short: "Start the CodePicker background daemon",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		apiKey := getAPIKeyOrExit()
-		cwd, _ := os.Getwd()
+		daemonAPIKey = getAPIKeyOrExit()
+		daemonCwd, _ = os.Getwd()
+		daemonVerbose = GetVerbose()
 
-		// Initialize your full application container (DB, Tools, Agent)
-		container, err := app.NewContainer(apiKey, cwd, "", false, false, GetVerbose())
-		if err != nil {
-			return fmt.Errorf("daemon init failed: %w", err)
-		}
-
-		globalContainer = container
-		defer container.Close()
+		// Enable async channel-based approvals for the daemon
+		policy.DaemonMode = true
 
 		startServer(servePort)
 		return nil
@@ -57,8 +57,10 @@ func startServer(port int) {
 	// 2. Core Agent Stream
 	mux.HandleFunc("/agent/task", handleAgentTask)
 
-	// 3. Stubs to prevent Neovim crashes
-	mux.HandleFunc("/agent/approve", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	// 3. Async Approval Endpoint
+	mux.HandleFunc("/agent/approve", handleApproval)
+
+	// 4. Context UI stub
 	mux.HandleFunc("/agent/context", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"files": []}`))
@@ -84,6 +86,41 @@ func startServer(port int) {
 	_ = srv.Shutdown(ctx)
 }
 
+func handleApproval(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		TaskID string `json:"task_id"`
+		Action string `json:"action"`
+		Blocks string `json:"blocks"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	session := policy.GetSession(req.TaskID)
+	if session == nil {
+		http.Error(w, "Invalid or expired task_id", http.StatusBadRequest)
+		return
+	}
+
+	// Unblock the waiting tool execution using select to avoid deadlocks
+	select {
+	case session.RespCh <- policy.ApprovalResponse{
+		Action: req.Action,
+		Blocks: req.Blocks,
+	}:
+		w.WriteHeader(http.StatusOK)
+	default:
+		http.Error(w, "No pending approval request for this task", http.StatusConflict)
+	}
+}
+
 func handleAgentTask(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -95,6 +132,24 @@ func handleAgentTask(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Missing query", http.StatusBadRequest)
 		return
 	}
+
+	// Generate a unique task ID and attach to context
+	taskID := fmt.Sprintf("task-%d", time.Now().UnixNano())
+	ctx, cancel := context.WithCancel(r.Context())
+	ctx = context.WithValue(ctx, policy.TaskIDKey, taskID)
+	defer cancel()
+
+	// Register session channels for this request
+	session := policy.GetOrCreateSession(taskID)
+	defer policy.CleanupSession(taskID)
+
+	// Create a per-request container to ensure thread safety
+	container, err := app.NewContainer(daemonAPIKey, daemonCwd, "", false, false, daemonVerbose)
+	if err != nil {
+		http.Error(w, "Failed to initialize per-request container: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer container.Close()
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -111,49 +166,50 @@ func handleAgentTask(w http.ResponseWriter, r *http.Request) {
 		"content": fmt.Sprintf("🚀 Task received: `%s`\nSpinning up LLM context...\n\n", query),
 	})
 
-	// Subscribe to your global Event Bus to catch Agent thoughts and tool executions
-	eventCh := globalContainer.EventBus.Subscribe()
+	eventCh := container.EventBus.Subscribe()
 
-	ctx, cancel := context.WithCancel(r.Context())
-	defer cancel()
-
-	// Run the planner and executor in the background
 	doneCh := make(chan struct{})
 	go func() {
 		defer close(doneCh)
 
-		primer := globalContainer.ProjectPrimer.GenerateShallow()
-		plan, err := globalContainer.Planner.CreatePlan(ctx, query, "", primer)
+		primer := container.ProjectPrimer.GenerateShallow()
+		plan, err := container.Planner.CreatePlan(ctx, query, "", primer)
 		if err != nil {
 			sendSSE(w, flusher, map[string]any{"type": "error", "msg": "Planning failed: " + err.Error()})
 			return
 		}
 
-		globalContainer.PlanExecutor.SetAutoConfirm(true)
+		container.PlanExecutor.SetAutoConfirm(true)
 
-		err = globalContainer.PlanExecutor.Execute(ctx, plan)
+		err = container.PlanExecutor.Execute(ctx, plan)
 		if err != nil {
 			sendSSE(w, flusher, map[string]any{"type": "error", "msg": "Execution failed: " + err.Error()})
 		}
 	}()
 
-	// Stream Events back to Neovim
 	for {
 		select {
 		case <-ctx.Done():
-			return // Neovim closed the connection
+			return
 
 		case <-doneCh:
-			// Agent finished all steps
 			sendSSE(w, flusher, map[string]any{"type": "done"})
 			return
+
+		// Phase 5: Intercept Approval Requests and push to Neovim with the task_id
+		case req := <-session.ReqCh:
+			sendSSE(w, flusher, map[string]any{
+				"type":     "approval_required",
+				"task_id":  taskID,
+				"filename": req.Filename,
+				"blocks":   req.Blocks,
+			})
 
 		case ev, open := <-eventCh:
 			if !open {
 				return
 			}
 
-			// Map your internal Domain Events to Neovim SSE formats
 			switch ev.Type {
 			case event.EventAgentThought:
 				if content, ok := ev.Payload["content"].(string); ok {

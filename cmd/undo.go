@@ -27,7 +27,7 @@ var undoCmd = &cobra.Command{
 		}
 
 		fmt.Printf("🔍 Looking for the last %d [codepicker] commit(s)...\n", count)
-		hashes, err := gitClient.GetLastCodepickerCommits(count)
+		hashes, err := gitClient.GetLastCodepickerCommits(cmd.Context(), count)
 		if err != nil {
 			return fmt.Errorf("failed to fetch commits: %w", err)
 		}
@@ -42,7 +42,7 @@ var undoCmd = &cobra.Command{
 			fmt.Printf("   - Reverting %s\n", hash[:8])
 		}
 
-		if err := gitClient.RevertCommits(hashes); err != nil {
+		if err := gitClient.RevertCommits(cmd.Context(), hashes); err != nil {
 			return fmt.Errorf("failed to revert commits: %w", err)
 		}
 

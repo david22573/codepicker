@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/david22573/codepicker/adapters/policy"
 	"github.com/david22573/codepicker/domain/agent"
@@ -59,7 +60,7 @@ func (t *EditFileTool) Execute(ctx context.Context, args string) (string, error)
 	}
 
 	// Phase 3.2: Interactive Approval Gate
-	action, editedBlocks := policy.AskApproval(input.Path, input.Blocks)
+	action, editedBlocks := policy.AskApproval(ctx, input.Path, input.Blocks)
 	if action == "n" {
 		return fmt.Sprintf("Change to %s skipped by user.", input.Path), nil
 	}
@@ -94,7 +95,10 @@ func (t *EditFileTool) Execute(ctx context.Context, args string) (string, error)
 			return resultMsg + fmt.Sprintf("\n[Auto-commit skipped: failed to write real file: %v]", err), nil
 		}
 
-		if err := t.gitClient.StageFiles([]string{input.Path}); err != nil {
+		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+
+		if err := t.gitClient.StageFiles(ctx, []string{input.Path}); err != nil {
 			return resultMsg + fmt.Sprintf("\n[Auto-commit skipped: failed to stage file: %v]", err), nil
 		}
 

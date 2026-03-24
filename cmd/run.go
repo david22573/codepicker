@@ -46,7 +46,7 @@ var runCmd = &cobra.Command{
 		if runBranch {
 			slug := slugifyTask(taskDescription)
 			branchName = fmt.Sprintf("cp/%d-%s", time.Now().Unix(), slug)
-			if err := gitClient.CreateBranch(branchName); err != nil {
+			if err := gitClient.CreateBranch(cmd.Context(), branchName); err != nil {
 				fmt.Printf("⚠️  Failed to create session branch: %v\n", err)
 			} else {
 				fmt.Printf("🌿 Switched to new session branch: %s\n", branchName)
@@ -63,6 +63,8 @@ var runCmd = &cobra.Command{
 		ctx := cmd.Context()
 
 		var resumeBlock string
+		sessionID := runResume
+
 		if runResume != "" {
 			prevSession, err := container.Repository.GetSession(ctx, runResume)
 			if err != nil {
@@ -86,12 +88,13 @@ var runCmd = &cobra.Command{
 			}
 
 			sb.WriteString("\nPrevious Session Context:\n")
-			for i, m := range prevSession.Messages {
-				if i >= len(prevSession.Messages)-5 { // Grab the tail end of context
-					sb.WriteString(fmt.Sprintf("[%s]: %s\n", m.Role, m.Content))
-				}
+			// Inject all previous messages to restore full context state
+			for _, m := range prevSession.Messages {
+				sb.WriteString(fmt.Sprintf("[%s]: %s\n", m.Role, m.Content))
 			}
 			resumeBlock = sb.String()
+		} else {
+			sessionID = fmt.Sprintf("sess_%d", time.Now().Unix())
 		}
 
 		if taskDescription == "" {
@@ -100,8 +103,7 @@ var runCmd = &cobra.Command{
 
 		fmt.Printf("🚀 Running task: %s\n", taskDescription)
 
-		// Create current session record
-		sessionID := fmt.Sprintf("sess_%d", time.Now().Unix())
+		// Create or update current session record
 		currentSession := &agent.Session{
 			ID:        sessionID,
 			Task:      taskDescription,

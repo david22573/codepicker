@@ -2,6 +2,8 @@ package indexer
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +11,12 @@ import (
 	"strings"
 	"sync"
 )
+
+// DB interface allows us to talk to the repo cache without a circular dependency
+type DB interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
 
 // Symbol represents a recognized code construct.
 type Symbol struct {
@@ -36,6 +44,44 @@ func NewRepoMapper() *RepoMapper {
 	return &RepoMapper{
 		files: make(map[string]*FileMap),
 	}
+}
+
+// LoadCache pulls the indexed graph from SQLite so we skip full re-indexing
+func (rm *RepoMapper) LoadCache(ctx context.Context, db DB) error {
+	rows, err := db.QueryContext(ctx, "SELECT path, data FROM repo_map_cache")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+	for rows.Next() {
+		var path, data string
+		if err := rows.Scan(&path, &data); err == nil {
+			var fm FileMap
+			if err := json.Unmarshal([]byte(data), &fm); err == nil {
+				rm.files[path] = &fm
+			}
+		}
+	}
+	return rows.Err()
+}
+
+// SaveCache writes the current graph to SQLite in the background
+func (rm *RepoMapper) SaveCache(ctx context.Context, db DB) error {
+	rm.mu.RLock()
+	defer rm.mu.RUnlock()
+
+	for path, fm := range rm.files {
+		data, err := json.Marshal(fm)
+		if err != nil {
+			continue
+		}
+		// INSERT OR REPLACE handles upsert safely assuming path is the primary key
+		_, _ = db.ExecContext(ctx, "INSERT OR REPLACE INTO repo_map_cache (path, data) VALUES (?, ?)", path, string(data))
+	}
+	return nil
 }
 
 // ParseFile reads a file and routes it to the native language parser.
@@ -85,7 +131,7 @@ func (rm *RepoMapper) RenderMap(budgetTokens int) string {
 	var sb strings.Builder
 	sb.WriteString("### REPOSITORY MAP\n")
 
-	estimatedTokens := 10
+	estimatedTokens := 10 // baseline
 
 	for _, p := range paths {
 		fm := rm.files[p]
@@ -100,17 +146,24 @@ func (rm *RepoMapper) RenderMap(budgetTokens int) string {
 			fileHeader = fmt.Sprintf("\n%s:\n", p)
 		}
 
+		headerTokens := len(fileHeader) / 4
+		if estimatedTokens+headerTokens > budgetTokens {
+			sb.WriteString("  ... (truncated to fit context budget)\n")
+			return sb.String()
+		}
 		sb.WriteString(fileHeader)
-		estimatedTokens += 10
+		estimatedTokens += headerTokens
 
 		for _, sym := range fm.Symbols {
 			line := fmt.Sprintf("  - %s\n", sym.Signature)
-			if estimatedTokens+7 > budgetTokens {
+			lineTokens := len(line) / 4
+
+			if estimatedTokens+lineTokens > budgetTokens {
 				sb.WriteString("  ... (truncated to fit context budget)\n")
 				return sb.String()
 			}
 			sb.WriteString(line)
-			estimatedTokens += 7
+			estimatedTokens += lineTokens
 		}
 	}
 

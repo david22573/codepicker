@@ -19,12 +19,12 @@ func NewClient(root string, dryRun bool) *Client {
 	return &Client{ProjectRoot: root, DryRun: dryRun}
 }
 
-func (c *Client) StageAll() error {
+func (c *Client) StageAll(ctx context.Context) error {
 	if c.DryRun {
-		fmt.Println("🔏 [DRY-RUN] Skipping 'git add .'")
+		fmt.Println("🔍 [DRY-RUN] Skipping 'git add .'")
 		return nil
 	}
-	cmd := exec.Command("git", "add", ".")
+	cmd := exec.CommandContext(ctx, "git", "add", ".")
 	cmd.Dir = c.ProjectRoot
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git add failed: %s", string(out))
@@ -32,16 +32,16 @@ func (c *Client) StageAll() error {
 	return nil
 }
 
-func (c *Client) StageFiles(paths []string) error {
+func (c *Client) StageFiles(ctx context.Context, paths []string) error {
 	if len(paths) == 0 {
 		return nil
 	}
 	if c.DryRun {
-		fmt.Printf("🔏 [DRY-RUN] Skipping 'git add' for %v\n", paths)
+		fmt.Printf("🔍 [DRY-RUN] Skipping 'git add' for %v\n", paths)
 		return nil
 	}
 	args := append([]string{"add"}, paths...)
-	cmd := exec.Command("git", args...)
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = c.ProjectRoot
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git add failed for %v: %s", paths, string(out))
@@ -87,7 +87,7 @@ func (c *Client) CommitWithMessage(ctx context.Context, message string) (string,
 	}
 
 	if c.DryRun {
-		fmt.Printf("🔏 [DRY-RUN] Would commit with message:\n%s\n", message)
+		fmt.Printf("🔍 [DRY-RUN] Would commit with message:\n%s\n", message)
 		return "dry-run-hash", nil
 	}
 
@@ -102,16 +102,16 @@ func (c *Client) CommitWithMessage(ctx context.Context, message string) (string,
 	return strings.TrimSpace(string(out)), nil
 }
 
-func (c *Client) RevertFiles(paths []string) error {
+func (c *Client) RevertFiles(ctx context.Context, paths []string) error {
 	if len(paths) == 0 {
 		return nil
 	}
 	if c.DryRun {
-		fmt.Printf("🔏 [DRY-RUN] Skipping reverting files: %v\n", paths)
+		fmt.Printf("🔍 [DRY-RUN] Skipping reverting files: %v\n", paths)
 		return nil
 	}
 	args := append([]string{"checkout", "HEAD", "--"}, paths...)
-	cmd := exec.Command("git", args...)
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = c.ProjectRoot
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git revert failed for %v: %s", paths, string(out))
@@ -119,12 +119,12 @@ func (c *Client) RevertFiles(paths []string) error {
 	return nil
 }
 
-func (c *Client) CreateBranch(name string) error {
+func (c *Client) CreateBranch(ctx context.Context, name string) error {
 	if c.DryRun {
-		fmt.Printf("🔏 [DRY-RUN] Skipping branch creation: %s\n", name)
+		fmt.Printf("🔍 [DRY-RUN] Skipping branch creation: %s\n", name)
 		return nil
 	}
-	cmd := exec.Command("git", "checkout", "-b", name)
+	cmd := exec.CommandContext(ctx, "git", "checkout", "-b", name)
 	cmd.Dir = c.ProjectRoot
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git branch creation failed: %s", string(out))
@@ -132,16 +132,16 @@ func (c *Client) CreateBranch(name string) error {
 	return nil
 }
 
-func (c *Client) IsDirty() bool {
-	cmd := exec.Command("git", "status", "--porcelain")
+func (c *Client) IsDirty(ctx context.Context) bool {
+	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain")
 	cmd.Dir = c.ProjectRoot
 	out, _ := cmd.Output()
 	return len(out) > 0
 }
 
 // GetLastCodepickerCommits finds the last N commits made by the agent.
-func (c *Client) GetLastCodepickerCommits(n int) ([]string, error) {
-	cmd := exec.Command("git", "log", "--grep=\\[codepicker\\]", fmt.Sprintf("-n%d", n), "--format=%H")
+func (c *Client) GetLastCodepickerCommits(ctx context.Context, n int) ([]string, error) {
+	cmd := exec.CommandContext(ctx, "git", "log", "--grep=\\[codepicker\\]", fmt.Sprintf("-n%d", n), "--format=%H")
 	cmd.Dir = c.ProjectRoot
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -158,21 +158,28 @@ func (c *Client) GetLastCodepickerCommits(n int) ([]string, error) {
 	return hashes, nil
 }
 
-// RevertCommits cleanly reverts the given commit hashes.
-func (c *Client) RevertCommits(hashes []string) error {
+// RevertCommits cleanly reverts the given commit hashes one by one.
+func (c *Client) RevertCommits(ctx context.Context, hashes []string) error {
 	if len(hashes) == 0 {
 		return nil
 	}
 	if c.DryRun {
-		fmt.Printf("🔏 [DRY-RUN] Skipping git revert for %v\n", hashes)
+		fmt.Printf("🔍 [DRY-RUN] Skipping git revert for %v\n", hashes)
 		return nil
 	}
 
-	args := append([]string{"revert", "--no-edit"}, hashes...)
-	cmd := exec.Command("git", args...)
-	cmd.Dir = c.ProjectRoot
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git revert failed: %s", string(out))
+	for _, hash := range hashes {
+		cmd := exec.CommandContext(ctx, "git", "revert", "--no-edit", hash)
+		cmd.Dir = c.ProjectRoot
+
+		if out, err := cmd.CombinedOutput(); err != nil {
+			// Abort the revert so we don't leave the working tree in a conflicted state
+			abortCmd := exec.CommandContext(ctx, "git", "revert", "--abort")
+			abortCmd.Dir = c.ProjectRoot
+			_ = abortCmd.Run()
+
+			return fmt.Errorf("git revert failed on commit %s (aborted to keep tree clean): %s", hash, string(out))
+		}
 	}
 	return nil
 }

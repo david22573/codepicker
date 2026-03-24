@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -135,6 +136,20 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 
 	mapper := indexer.NewRepoMapper()
 
+	// Phase 4: Wire the repo_map_cache logic so cold starts don't re-index everything
+	var db indexer.DB
+	if rawDB, ok := interface{}(repo).(indexer.DB); ok {
+		db = rawDB
+	} else if dbProvider, ok := interface{}(repo).(interface{ DB() *sql.DB }); ok {
+		db = dbProvider.DB()
+	}
+
+	if db != nil {
+		if err := mapper.LoadCache(context.Background(), db); err != nil {
+			logger.Warn("Failed to load repo map cache", zap.Error(err))
+		}
+	}
+
 	_, planner, executor, auditor, explainer, twoPass, ctxBuilder, err := NewAgentStack(AgentStackOpts{
 		Config:       cfg,
 		LLMClient:    activeLLM,
@@ -158,7 +173,18 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 
 	slicer := indexer.NewCodeSlicer()
 	indexManager := indexer.NewIndexManager(slicer, repo, embedClient)
-	_ = indexManager.SyncRepoMap(context.Background(), rootDir, mapper)
+
+	// Ensure we don't silently drop sync errors
+	err = indexManager.SyncRepoMap(context.Background(), rootDir, mapper)
+	if err != nil {
+		logger.Warn("Failed to sync repo map, agent context may be incomplete", zap.Error(err))
+	} else if db != nil {
+		go func() {
+			if saveErr := mapper.SaveCache(context.Background(), db); saveErr != nil {
+				logger.Warn("Failed to save repo map cache", zap.Error(saveErr))
+			}
+		}()
+	}
 
 	primer := ctxAdapters.NewProjectPrimer(rootDir, mapper, false)
 	verifierPipeline := verifier.NewPipeline(rootDir)

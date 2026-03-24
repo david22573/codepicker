@@ -2,19 +2,76 @@ package policy
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/david22573/codepicker/infra/pathutil"
 	"github.com/david22573/codepicker/infra/ui"
 	"github.com/david22573/codepicker/runtime"
 )
 
-var sessionAutoApprove bool
+type contextKey string
+
+const TaskIDKey contextKey = "task_id"
+
+var (
+	// CLI-only fallback state
+	sessionAutoApproveCLI bool
+
+	// Daemon state
+	DaemonMode bool
+	mu         sync.Mutex
+	sessions   = make(map[string]*SessionState)
+)
+
+type SessionState struct {
+	AutoApprove bool
+	ReqCh       chan ApprovalRequest
+	RespCh      chan ApprovalResponse
+}
+
+type ApprovalRequest struct {
+	Filename string
+	Blocks   string
+}
+
+type ApprovalResponse struct {
+	Action string
+	Blocks string
+}
+
+func GetOrCreateSession(taskID string) *SessionState {
+	mu.Lock()
+	defer mu.Unlock()
+	if s, exists := sessions[taskID]; exists {
+		return s
+	}
+	s := &SessionState{
+		// Buffered to prevent goroutine leaks if client disconnects
+		ReqCh:  make(chan ApprovalRequest, 1),
+		RespCh: make(chan ApprovalResponse, 1),
+	}
+	sessions[taskID] = s
+	return s
+}
+
+func GetSession(taskID string) *SessionState {
+	mu.Lock()
+	defer mu.Unlock()
+	return sessions[taskID]
+}
+
+func CleanupSession(taskID string) {
+	mu.Lock()
+	defer mu.Unlock()
+	delete(sessions, taskID)
+}
 
 type Enforcer struct {
 	config           PolicySchema
@@ -153,16 +210,48 @@ func (e *Enforcer) validateFileSystemAccess(toolName, args string) (bool, string
 	return true, ""
 }
 
-// --- Phase 3.2: Approval Gate ---
+// --- Phase 3.2 / 5.1: Interactive & Async Approval Gate ---
 
-func AskApproval(filename, blocks string) (string, string) {
-	if sessionAutoApprove {
-		return "y", blocks
-	}
-
+func AskApproval(ctx context.Context, filename, blocks string) (string, string) {
 	if runtime.Global.Mode == runtime.ModeHardenedCI {
 		ui.PrintWarning("ModeHardenedCI active: Auto-rejecting interactive edit prompt.")
 		return "n", blocks
+	}
+
+	taskID, hasTask := ctx.Value(TaskIDKey).(string)
+
+	if DaemonMode {
+		if !hasTask {
+			// Fail safe if daemon mode is improperly wired
+			return "n", blocks
+		}
+
+		session := GetOrCreateSession(taskID)
+		if session.AutoApprove {
+			return "y", blocks
+		}
+
+		select {
+		case session.ReqCh <- ApprovalRequest{Filename: filename, Blocks: blocks}:
+		case <-ctx.Done():
+			return "n", blocks
+		}
+
+		select {
+		case resp := <-session.RespCh:
+			if resp.Action == "s" {
+				session.AutoApprove = true
+				return "y", resp.Blocks
+			}
+			return resp.Action, resp.Blocks
+		case <-ctx.Done():
+			return "n", blocks
+		}
+	}
+
+	// CLI Mode
+	if sessionAutoApproveCLI {
+		return "y", blocks
 	}
 
 	fmt.Println(ui.RenderDiff(filename, blocks))
@@ -179,7 +268,7 @@ func AskApproval(filename, blocks string) (string, string) {
 		case "n":
 			return "n", blocks
 		case "s":
-			sessionAutoApprove = true
+			sessionAutoApproveCLI = true
 			return "y", blocks
 		case "e":
 			edited, err := openEditor(blocks)
@@ -197,7 +286,7 @@ func AskApproval(filename, blocks string) (string, string) {
 func openEditor(content string) (string, error) {
 	editor := os.Getenv("EDITOR")
 	if editor == "" {
-		editor = "nano" // chill default fallback
+		editor = "nano"
 	}
 	tmp, err := os.CreateTemp("", "codepicker-edit-*.txt")
 	if err != nil {
