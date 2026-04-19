@@ -27,9 +27,9 @@ var (
 	packFormat      string // "xml" or "markdown"
 	packTree        bool   // include file tree
 	packSplit       bool   // Split output into multiple files
-	packSplitTokens int    // Max tokens per split file
+	packSplitTokens int    // Max tokens per file
 	packClipboard   bool   // Copy to clipboard
-	packSlim        bool   // LLM-optimized output (minimal noise)
+	packMeta        bool   // Include metadata and headers
 )
 
 const (
@@ -52,7 +52,8 @@ Implements a Dual Pack Strategy:
   - Smart Mode: Budget-aware packing for larger repositories.
   - Auto Mode: Selects based on repository size (< 3MB = Full).
 Respects .codepickerignore patterns.
-You can specify particular files or directories to pack. If none are provided, it packs the entire current directory.`,
+By default, output is optimized for LLM consumption (minimal noise). 
+Use --meta to include additional headers and a manifest.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cwd, err := os.Getwd()
 		if err != nil {
@@ -119,7 +120,7 @@ You can specify particular files or directories to pack. If none are provided, i
 		}
 
 		// 5. Pack Manifest
-		if !packSlim {
+		if packMeta {
 			manifest := PackManifest{
 				TotalBytes:      finalBytes,
 				FileCount:       len(files),
@@ -174,7 +175,7 @@ func init() {
 	packCmd.Flags().BoolVar(&packSplit, "split", false, "Automatically split the output into multiple parts if it exceeds a token limit")
 	packCmd.Flags().IntVar(&packSplitTokens, "split-tokens", 30000, "Maximum tokens per file if --split is enabled")
 	packCmd.Flags().BoolVarP(&packClipboard, "clipboard", "c", false, "Copy output to clipboard")
-	packCmd.Flags().BoolVar(&packSlim, "slim", false, "Remove metadata and headers for LLM optimization")
+	packCmd.Flags().BoolVarP(&packMeta, "meta", "m", false, "Include metadata, headers and manifest in output")
 
 	// Assuming rootCmd is defined elsewhere in your cmd package
 	rootCmd.AddCommand(packCmd)
@@ -342,7 +343,7 @@ func runFullPack(root string, files []FileEntry, outFile string) (int, int64, er
 	var writtenBytes int64 = 0
 
 	// --- Header ---
-	if !packSlim {
+	if packMeta {
 		header := fmt.Sprintf("Project Context Dump (%s)\nFormat: %s\nMode: FULL (No Truncation)\nTotal Files: %d\n\n",
 			time.Now().Format(time.RFC822), packFormat, len(files))
 		w.WriteString(header)
@@ -352,7 +353,7 @@ func runFullPack(root string, files []FileEntry, outFile string) (int, int64, er
 	// --- 1. The Tree ---
 	if packTree {
 		tree := generateTree(files)
-		if !packSlim {
+		if packMeta {
 			if packFormat == "xml" {
 				w.WriteString("# Project Structure\n<file_tree>\n" + tree + "</file_tree>\n\n")
 			} else {
@@ -370,7 +371,7 @@ func runFullPack(root string, files []FileEntry, outFile string) (int, int64, er
 	}
 
 	// --- 2. The Content ---
-	if !packSlim {
+	if packMeta {
 		w.WriteString("# File Contents\n")
 		totalChars += 16
 	}
@@ -418,7 +419,7 @@ func runSmartPack(root string, files []FileEntry, outFile string, budget int) (i
 		return scoreFile(files[i]) > scoreFile(files[j])
 	})
 
-	if !packSlim {
+	if packMeta {
 		header := fmt.Sprintf("Project Context Dump (%s)\nFormat: %s\nMode: SMART (Budget: %d tokens)\n\n",
 			time.Now().Format(time.RFC822), packFormat, budget)
 		w.WriteString(header)
@@ -428,13 +429,13 @@ func runSmartPack(root string, files []FileEntry, outFile string, budget int) (i
 	if packTree {
 		tree := generateTree(files)
 		if packFormat == "xml" {
-			if !packSlim {
+			if packMeta {
 				w.WriteString("# Project Structure\n<file_tree>\n" + tree + "</file_tree>\n\n")
 			} else {
 				w.WriteString("<file_tree>\n" + tree + "</file_tree>\n\n")
 			}
 		} else {
-			if !packSlim {
+			if packMeta {
 				w.WriteString("# Project Structure\n```\n" + tree + "```\n\n")
 			} else {
 				w.WriteString("```\n" + tree + "```\n\n")
@@ -443,7 +444,7 @@ func runSmartPack(root string, files []FileEntry, outFile string, budget int) (i
 		totalChars += len(tree)
 	}
 
-	if !packSlim {
+	if packMeta {
 		w.WriteString("# File Contents\n")
 		totalChars += 16
 	}
