@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/atotto/clipboard"
 	"github.com/david22573/codepicker/infra/llm"
 	"github.com/spf13/cobra"
 )
@@ -27,6 +28,8 @@ var (
 	packTree        bool   // include file tree
 	packSplit       bool   // Split output into multiple files
 	packSplitTokens int    // Max tokens per split file
+	packClipboard   bool   // Copy to clipboard
+	packSlim        bool   // LLM-optimized output (minimal noise)
 )
 
 const (
@@ -116,22 +119,38 @@ You can specify particular files or directories to pack. If none are provided, i
 		}
 
 		// 5. Pack Manifest
-		manifest := PackManifest{
-			TotalBytes:      finalBytes,
-			FileCount:       len(files),
-			EstimatedTokens: tokenEst,
-			Mode:            selectedMode,
-			GeneratedAt:     time.Now(),
-		}
-		if err := appendManifest(packOutput, manifest); err != nil {
-			fmt.Printf("⚠️ Failed to append manifest: %v\n", err)
+		if !packSlim {
+			manifest := PackManifest{
+				TotalBytes:      finalBytes,
+				FileCount:       len(files),
+				EstimatedTokens: tokenEst,
+				Mode:            selectedMode,
+				GeneratedAt:     time.Now(),
+			}
+			if err := appendManifest(packOutput, manifest); err != nil {
+				fmt.Printf("⚠️ Failed to append manifest: %v\n", err)
+			}
 		}
 
 		fmt.Printf("\n✅ Pack Complete!\n")
 		fmt.Printf("   Mode: %s\n", selectedMode)
 		fmt.Printf("   Est. Tokens: ~%d\n", tokenEst)
 
-		// 6. Post-Process Splitting
+		// 6. Copy to Clipboard
+		if packClipboard {
+			content, err := os.ReadFile(packOutput)
+			if err != nil {
+				fmt.Printf("⚠️  Failed to read output for clipboard: %v\n", err)
+			} else {
+				if err := clipboard.WriteAll(string(content)); err != nil {
+					fmt.Printf("⚠️  Failed to copy to clipboard: %v\n", err)
+				} else {
+					fmt.Printf("📋 Output copied to clipboard!\n")
+				}
+			}
+		}
+
+		// 7. Post-Process Splitting
 		if packSplit {
 			fmt.Printf("\n🔪 Splitting output into ~%d token chunks...\n", packSplitTokens)
 			if err := splitPackedFile(packOutput, packSplitTokens); err != nil {
@@ -154,6 +173,8 @@ func init() {
 	packCmd.Flags().BoolVar(&packTree, "tree", true, "Include a directory tree at the top")
 	packCmd.Flags().BoolVar(&packSplit, "split", false, "Automatically split the output into multiple parts if it exceeds a token limit")
 	packCmd.Flags().IntVar(&packSplitTokens, "split-tokens", 30000, "Maximum tokens per file if --split is enabled")
+	packCmd.Flags().BoolVarP(&packClipboard, "clipboard", "c", false, "Copy output to clipboard")
+	packCmd.Flags().BoolVar(&packSlim, "slim", false, "Remove metadata and headers for LLM optimization")
 
 	// Assuming rootCmd is defined elsewhere in your cmd package
 	rootCmd.AddCommand(packCmd)
@@ -321,24 +342,38 @@ func runFullPack(root string, files []FileEntry, outFile string) (int, int64, er
 	var writtenBytes int64 = 0
 
 	// --- Header ---
-	header := fmt.Sprintf("Project Context Dump (%s)\nFormat: %s\nMode: FULL (No Truncation)\nTotal Files: %d\n\n",
-		time.Now().Format(time.RFC822), packFormat, len(files))
-	w.WriteString(header)
-	totalChars += len(header)
+	if !packSlim {
+		header := fmt.Sprintf("Project Context Dump (%s)\nFormat: %s\nMode: FULL (No Truncation)\nTotal Files: %d\n\n",
+			time.Now().Format(time.RFC822), packFormat, len(files))
+		w.WriteString(header)
+		totalChars += len(header)
+	}
 
 	// --- 1. The Tree ---
 	if packTree {
 		tree := generateTree(files)
-		if packFormat == "xml" {
-			w.WriteString("# Project Structure\n<file_tree>\n" + tree + "</file_tree>\n\n")
+		if !packSlim {
+			if packFormat == "xml" {
+				w.WriteString("# Project Structure\n<file_tree>\n" + tree + "</file_tree>\n\n")
+			} else {
+				w.WriteString("# Project Structure\n```\n" + tree + "```\n\n")
+			}
+			totalChars += 20 // Approx for labels
 		} else {
-			w.WriteString("# Project Structure\n```\n" + tree + "```\n\n")
+			if packFormat == "xml" {
+				w.WriteString("<file_tree>\n" + tree + "</file_tree>\n\n")
+			} else {
+				w.WriteString("```\n" + tree + "```\n\n")
+			}
 		}
 		totalChars += len(tree)
 	}
 
 	// --- 2. The Content ---
-	w.WriteString("# File Contents\n")
+	if !packSlim {
+		w.WriteString("# File Contents\n")
+		totalChars += 16
+	}
 
 	for _, file := range files {
 		content, err := os.ReadFile(file.Path)
@@ -383,17 +418,34 @@ func runSmartPack(root string, files []FileEntry, outFile string, budget int) (i
 		return scoreFile(files[i]) > scoreFile(files[j])
 	})
 
-	header := fmt.Sprintf("Project Context Dump (%s)\nFormat: %s\nMode: SMART (Budget: %d tokens)\n\n",
-		time.Now().Format(time.RFC822), packFormat, budget)
-	w.WriteString(header)
-	totalChars += len(header)
+	if !packSlim {
+		header := fmt.Sprintf("Project Context Dump (%s)\nFormat: %s\nMode: SMART (Budget: %d tokens)\n\n",
+			time.Now().Format(time.RFC822), packFormat, budget)
+		w.WriteString(header)
+		totalChars += len(header)
+	}
 
 	if packTree {
 		tree := generateTree(files)
 		if packFormat == "xml" {
-			w.WriteString("<file_tree>\n" + tree + "</file_tree>\n\n")
+			if !packSlim {
+				w.WriteString("# Project Structure\n<file_tree>\n" + tree + "</file_tree>\n\n")
+			} else {
+				w.WriteString("<file_tree>\n" + tree + "</file_tree>\n\n")
+			}
+		} else {
+			if !packSlim {
+				w.WriteString("# Project Structure\n```\n" + tree + "```\n\n")
+			} else {
+				w.WriteString("```\n" + tree + "```\n\n")
+			}
 		}
 		totalChars += len(tree)
+	}
+
+	if !packSlim {
+		w.WriteString("# File Contents\n")
+		totalChars += 16
 	}
 
 	estimator := llm.NewDefaultEstimator()
