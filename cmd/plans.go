@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"text/tabwriter"
@@ -16,16 +17,38 @@ var plansCmd = &cobra.Command{
 	Use:   "plans [plan_id]",
 	Short: "List plans or preview a specific plan",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		apiKey := getAPIKeyOrExit()
 		cwd, _ := os.Getwd()
 
-		container, err := app.NewContainer(apiKey, cwd, "", false, false, GetVerbose())
+		container, err := app.NewContainer("", cwd, "", false, false, GetVerbose())
 		if err != nil {
 			return fmt.Errorf("failed to initialize: %w", err)
 		}
 		defer container.Close()
 
 		ctx := cmd.Context()
+
+		if GetJSON() {
+			if len(args) > 0 {
+				plan, err := container.Repository.GetPlan(ctx, args[0])
+				if err != nil {
+					return fmt.Errorf("plan not found: %s", args[0])
+				}
+				jsonData, _ := json.MarshalIndent(plan, "", "  ")
+				fmt.Println(string(jsonData))
+			} else {
+				summaries, err := container.Repository.ListPlans(ctx, 10)
+				if err != nil {
+					return fmt.Errorf("failed to list plans: %w", err)
+				}
+				var outputSummaries interface{} = summaries
+				if summaries == nil {
+					outputSummaries = []interface{}{}
+				}
+				jsonData, _ := json.MarshalIndent(outputSummaries, "", "  ")
+				fmt.Println(string(jsonData))
+			}
+			return nil
+		}
 
 		if len(args) > 0 {
 			previewPlan(ctx, container, args[0])

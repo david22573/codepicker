@@ -26,17 +26,26 @@ func GetVerbose() bool {
 }
 
 // getAPIKeyOrExit ensures the API key is present before launching LLM-dependent commands
-func getAPIKeyOrExit() string {
+func getAPIKeyOrExit(cmdName string) string {
 	apiKey := os.Getenv("OPENROUTER_API_KEY")
 	if apiKey == "" {
-		fmt.Println("❌ Error: OPENROUTER_API_KEY is not set.")
+		fmt.Printf("error: OPENROUTER_API_KEY is required for `codepicker %s`\n", cmdName)
+		fmt.Println("hint: export OPENROUTER_API_KEY=...")
 		os.Exit(1)
 	}
 	return apiKey
 }
 
+var jsonFlag bool
+
+// GetJSON returns the value of the json flag for use by commands
+func GetJSON() bool {
+	return jsonFlag
+}
+
 func init() {
 	rootCmd.PersistentFlags().BoolVarP(&verboseFlag, "verbose", "v", false, "Enable verbose output")
+	rootCmd.PersistentFlags().BoolVar(&jsonFlag, "json", false, "Output in JSON format")
 }
 
 func Execute() {

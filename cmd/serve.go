@@ -28,7 +28,7 @@ var serveCmd = &cobra.Command{
 	Use:   "serve",
 	Short: "Start the CodePicker background daemon",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		daemonAPIKey = getAPIKeyOrExit()
+		daemonAPIKey = getAPIKeyOrExit("serve")
 		daemonCwd, _ = os.Getwd()
 		daemonVerbose = GetVerbose()
 

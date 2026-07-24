@@ -188,6 +188,10 @@ func NewContainer(apiKey, rootDir, modelOverride string, dryRun, ciMode, verbose
 
 	primer := ctxAdapters.NewProjectPrimer(rootDir, mapper, false)
 	verifierPipeline := verifier.NewPipeline(rootDir)
+	if cfg != nil {
+		verifierPipeline.Commands = cfg.Verify.Commands
+		verifierPipeline.FailClosed = cfg.Verify.FailClosed
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 

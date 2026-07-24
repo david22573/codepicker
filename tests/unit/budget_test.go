@@ -4,7 +4,12 @@ import (
 	"testing"
 
 	"github.com/david22573/codepicker/infra/llm"
+	"github.com/david22573/codepicker/runtime"
 )
+
+func init() {
+	runtime.Global.Mode = runtime.ModeProduction
+}
 
 func TestBudgetGuard_ReserveAndCommit(t *testing.T) {
 	tracker := llm.NewCostTracker(0.14, 0.28)

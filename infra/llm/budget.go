@@ -49,7 +49,7 @@ func (b *BudgetGuard) Reserve(estimatedCost float64) error {
 			return nil
 		}
 
-		return fmt.Errorf(msg)
+		return fmt.Errorf("%s", msg)
 	}
 
 	b.reserved += estimatedCost

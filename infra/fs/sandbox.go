@@ -1,6 +1,7 @@
 package fs
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -9,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/david22573/codepicker/domain/task"
 )
 
 type Sandbox struct {
@@ -66,6 +69,86 @@ func (s *Sandbox) RunGoCommand(ctx context.Context, args ...string) (string, err
 	}
 
 	return string(out), nil
+}
+
+func (s *Sandbox) RunCommand(ctx context.Context, name string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = s.SandboxRoot
+
+	// Restrict to safe environment
+	allowed := []string{"PATH", "HOME", "USER", "GOPATH", "GOROOT", "GOCACHE", "NVM_DIR", "NODE_PATH"}
+	var env []string
+	for _, k := range allowed {
+		if v := os.Getenv(k); v != "" {
+			env = append(env, fmt.Sprintf("%s=%s", k, v))
+		}
+	}
+	cmd.Env = env
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return string(out), err
+	}
+
+	return string(out), nil
+}
+
+func (s *Sandbox) RunCommandCheck(ctx context.Context, label, command string) task.CheckResult {
+	start := time.Now()
+	res := task.CheckResult{
+		Name:    label,
+		Command: command,
+		Status:  task.CheckFail,
+	}
+
+	parts := strings.Fields(command)
+	if len(parts) == 0 {
+		res.Error = "empty command"
+		return res
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, parts[0], parts[1:]...)
+	cmd.Dir = s.SandboxRoot
+
+	// Restrict to safe environment
+	allowed := []string{"PATH", "HOME", "USER", "GOPATH", "GOROOT", "GOCACHE", "NVM_DIR", "NODE_PATH"}
+	var env []string
+	for _, k := range allowed {
+		if v := os.Getenv(k); v != "" {
+			env = append(env, fmt.Sprintf("%s=%s", k, v))
+		}
+	}
+	cmd.Env = env
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	res.DurationMS = time.Since(start).Milliseconds()
+	res.Stdout = stdout.String()
+	res.Stderr = stderr.String()
+
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			res.ExitCode = exitErr.ExitCode()
+		} else {
+			res.ExitCode = -1
+		}
+		res.Error = err.Error()
+		res.Status = task.CheckFail
+	} else {
+		res.Status = task.CheckPass
+		res.ExitCode = 0
+	}
+
+	return res
 }
 
 func (s *Sandbox) syncFiles() error {

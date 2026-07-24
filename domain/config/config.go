@@ -35,12 +35,18 @@ type ServerConfig struct {
 	EnablePprof bool `json:"enable_pprof" yaml:"enable_pprof"`
 }
 
+type VerifyConfig struct {
+	Commands   []string `json:"commands" yaml:"commands"`
+	FailClosed bool     `json:"fail_closed" yaml:"fail_closed"`
+}
+
 type AppConfig struct {
 	Environment string          `json:"environment" yaml:"environment"`
 	LLM         LLMConfig       `json:"llm" yaml:"llm"`
 	Embedding   EmbeddingConfig `json:"embedding" yaml:"embedding"`
 	Agent       AgentConfig     `json:"agent" yaml:"agent"`
 	Server      ServerConfig    `json:"server" yaml:"server"`
+	Verify      VerifyConfig    `json:"verify" yaml:"verify"`
 }
 
 // DefaultConfig provides safe values if config files are missing.
@@ -70,6 +76,10 @@ func DefaultConfig() *AppConfig {
 			Port:        8080,
 			MetricsPort: 9090,
 			EnablePprof: false,
+		},
+		Verify: VerifyConfig{
+			Commands:   []string{},
+			FailClosed: true,
 		},
 	}
 }

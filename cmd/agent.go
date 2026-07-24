@@ -23,7 +23,7 @@ var agentCmd = &cobra.Command{
 	Use:   "agent",
 	Short: "Start an interactive session with the CodePicker agent",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		apiKey := getAPIKeyOrExit()
+		apiKey := getAPIKeyOrExit("agent")
 		cwd, _ := os.Getwd()
 
 		container, err := app.NewContainer(apiKey, cwd, "", agentDryRun, false, GetVerbose())

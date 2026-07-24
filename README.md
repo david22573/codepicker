@@ -1,70 +1,61 @@
 # CodePicker 🤖
 
-CodePicker is an autonomous, security-hardened coding agent designed for local refactoring and feature implementation. Unlike generic AI tools, CodePicker runs safely on your machine with strict guardrails.
+CodePicker is a highly secure, autonomous refactoring CLI and AI agent assistant designed to safely execute codebase refactoring with strict sandboxing and atomic rollbacks.
 
-## 🛡️ Production Features
+## 🚀 Core Workflow
 
-- **Sandboxed Execution**: All file operations are staged in a shadow filesystem (`.codepicker/shadow`) and only applied after verification.
-- **Path Traversal Protection**: Mathematically proven path sanitization preventing escapes to parent directories (e.g., `../../etc/shadow`).
-- **Atomic Rollbacks**: Every execution runs in a transaction. If the agent crashes or fails verification, the repository state is instantly restored.
-- **Cost Tracking**: Real-time token usage and cost estimation for OpenRouter/LLM calls.
-- **Audit Trail**: Full JSON logs of every thought, action, and tool output are saved to `.codepicker/audit/`.
-
-## 🚀 Installation
-
-```bash
-# Clone the repo
-git clone [https://github.com/david22573/codepicker](https://github.com/david22573/codepicker)
-cd codepicker
-
-# Build
-go build -o codepicker main.go
-
-# Verify
-./codepicker --help
-
+```text
+pack ──> plan ──> verify ──> apply ──> undo ──> prove
 ```
 
-## ⚡ Usage
+1. **Pack**: Optimize codebase context into a high-density format for LLMs.
+2. **Plan**: Generate sequential refactoring tasks without file changes.
+3. **Verify**: Execute patches in a sandboxed, isolated shadow filesystem.
+4. **Apply**: Move verified changes atomically to the real project.
+5. **Undo**: Rollback edits instantly using automatic file backups.
+6. **Prove**: Run compilation, tests, vet, and smoke checks to ensure repository health.
 
-### 1. Run a Task
+---
 
-The agent will plan, execute, and verify the task.
+## 🛡️ Key Features
 
-```bash
-export OPENROUTER_API_KEY="sk-..."
-./codepicker run "Refactor infra/fs/manager.go to use a singleton pattern"
+- **Sandboxed Execution**: Proposed patches are validated inside a safe sandbox prior to applying.
+- **Configurable Verification**: Supports custom verifier commands in `codepicker.yaml` and language defaults (Go, Node, Python, pnpm).
+- **Atomic Rollbacks**: Automatic transaction backup copies stored under `.codepicker/runs/<run-id>/backups/` allow complete rollbacks via `codepicker undo`.
+- **Path Sanitization**: Restricts path traversals (`..`), absolute paths (`/`), home directory symbols (`~`), and drive letters (`C:`).
+- **Unified Engine**: Single DRY orchestrator engine powers `run`, `fix`, and `improve` pipelines identically.
+- **Proof Report**: System-wide check via `codepicker prove` and `make prove` with detailed reports.
 
-```
+---
 
-### 2. Dry Run (Safe Mode)
-
-Simulate the run without writing any files to disk.
-
-```bash
-./codepicker run "Delete all unused files" --dry-run
-
-```
-
-### 3. View History
-
-Check past runs and their costs.
+## ⚡ Quickstart
 
 ```bash
-./codepicker history
+# 1. Initialize CodePicker configurations
+codepicker init
 
+# 2. Pack repo context for the LLM
+codepicker pack --output ctx.txt
+
+# 3. Create execution plan (Safe Default)
+codepicker run "refactor database client" --plan-only
+
+# 4. Execute and test in sandbox
+codepicker run "refactor database client" --dry-run
+
+# 5. Apply verified changes on a new branch
+codepicker run "refactor database client" --apply --branch
+
+# 6. Verify overall repository health
+codepicker prove
 ```
 
-## 🔒 Security Policy
+---
 
-CodePicker enforces a `policy.json` whitelist.
+## 📖 Documentation
 
-* **Blocked Commands**: `rm -rf`, `curl | sh`, `chmod`, `sudo`.
-* **Blocked Paths**: `/etc/*`, `.git/*`, absolute paths.
-* **Network**: The agent cannot open arbitrary network connections.
-
-## 🧩 Architecture
-
-* **Planner**: Decomposes tasks into sequential steps.
-* **ReAct Agent**: Executes steps using a Thought-Action-Observation loop.
-* **Verifier**: Runs `go test` and syntax checks in a temporary sandbox before applying changes.
+Detailed guides are available in the [docs/](codepicker/docs/) directory:
+- [Quickstart Guide](codepicker/docs/quickstart.md)
+- [Safety Model](codepicker/docs/safety.md)
+- [Commands Reference](codepicker/docs/commands.md)
+- [Agent Workflow Guide](codepicker/docs/agent-workflow.md)

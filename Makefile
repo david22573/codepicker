@@ -15,6 +15,23 @@ all: build
 build:
 	go build $(LDFLAGS) -o $(BINARY_NAME) main.go
 
+test:
+	go test ./...
+
+vet:
+	go vet ./...
+
+smoke: build
+	./$(BINARY_NAME) --help
+	./$(BINARY_NAME) init --help
+	./$(BINARY_NAME) pack --help
+	./$(BINARY_NAME) run --help
+	./$(BINARY_NAME) plans --help
+	./$(BINARY_NAME) apply --help
+	./$(BINARY_NAME) undo --help
+
+prove: test vet smoke
+
 install:
 	go install $(LDFLAGS)
 
@@ -23,3 +40,4 @@ clean:
 	rm -f $(BINARY_NAME)
 	rm -f codepicker_context.txt *_context.md
 	rm -rf codepicker_out
+

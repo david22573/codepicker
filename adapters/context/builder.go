@@ -170,7 +170,7 @@ func (b *SmartBuilder) BuildContext(ctx context.Context, query string) (string, 
 	}
 
 	if includedCount < len(ranked) {
-		fmt.Fprintf(&builder, "  \n", len(ranked)-includedCount)
+		fmt.Fprintf(&builder, "  <!-- Truncated %d slices due to budget -->\n", len(ranked)-includedCount)
 	}
 
 	builder.WriteString("</relevant_code_context>\n")

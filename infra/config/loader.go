@@ -41,15 +41,15 @@ func (l *Loader) Load() (*config.AppConfig, error) {
 		}
 
 		if cfg.LLM.DeprecatedAPIKey != "" {
-			fmt.Println("⚠️  [SECURITY WARNING] 'api_key' found in codepicker.yaml. Please remove it and use the OPENROUTER_API_KEY environment variable instead.")
+			fmt.Fprintln(os.Stderr, "⚠️  [SECURITY WARNING] 'api_key' found in codepicker.yaml. Please remove it and use the OPENROUTER_API_KEY environment variable instead.")
 			cfg.LLM.DeprecatedAPIKey = "" // Wipe from memory
 		}
 
-		fmt.Printf("📄 [CONFIG] Loaded configuration from %s\n", resolvedPath)
+		fmt.Fprintf(os.Stderr, "📄 [CONFIG] Loaded configuration from %s\n", resolvedPath)
 	} else {
 		// Only warn if the user explicitly provided a path that wasn't found
 		if l.configPath != "" && l.configPath != "codepicker.yaml" {
-			fmt.Printf("⚠️ [CONFIG] Config file not found at %s, using defaults.\n", l.configPath)
+			fmt.Fprintf(os.Stderr, "⚠️ [CONFIG] Config file not found at %s, using defaults.\n", l.configPath)
 		}
 	}
 

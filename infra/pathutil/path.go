@@ -16,6 +16,18 @@ func Clean(relPath string) (string, error) {
 		return "", fmt.Errorf("path traversal (..) detected")
 	}
 
+	if strings.HasPrefix(relPath, "~") {
+		return "", fmt.Errorf("home directory shortcuts are not allowed")
+	}
+
+	if strings.Contains(relPath, ":") {
+		return "", fmt.Errorf("absolute paths or Windows drive letters are not allowed")
+	}
+
+	if strings.Contains(relPath, "\\") {
+		return "", fmt.Errorf("backslash path separators or UNC paths are not allowed")
+	}
+
 	clean := filepath.Clean(relPath)
 
 	if filepath.IsAbs(clean) {

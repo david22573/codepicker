@@ -31,7 +31,7 @@ var contextIndexCmd = &cobra.Command{
 			targetDir = args[0]
 		}
 
-		apiKey := getAPIKeyOrExit()
+		apiKey := getAPIKeyOrExit("context index")
 		cwd, _ := os.Getwd()
 
 		// Initialize container to get the configured IndexManager
@@ -70,8 +70,7 @@ var contextExportCmd = &cobra.Command{
 		}
 
 		cwd, _ := os.Getwd()
-		apiKey := getAPIKeyOrExit()
-		container, err := app.NewContainer(apiKey, cwd, "", false, false, verboseFlag)
+		container, err := app.NewContainer("", cwd, "", false, false, verboseFlag)
 		if err != nil {
 			return err
 		}

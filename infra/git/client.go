@@ -139,6 +139,41 @@ func (c *Client) IsDirty(ctx context.Context) bool {
 	return len(out) > 0
 }
 
+// GetChangedFiles lists modified, added, renamed, or untracked files in the repo
+func (c *Client) GetChangedFiles(ctx context.Context) ([]string, error) {
+	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain")
+	cmd.Dir = c.ProjectRoot
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git status failed: %w", err)
+	}
+
+	var files []string
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	for _, line := range lines {
+		if len(line) < 4 {
+			continue
+		}
+		status := line[:2]
+		path := line[3:]
+
+		// If renamed, extract target path
+		if strings.Contains(status, "R") {
+			parts := strings.Split(path, " -> ")
+			if len(parts) == 2 {
+				path = parts[1]
+			}
+		}
+
+		// Normalize quotes if any
+		path = strings.Trim(path, "\"")
+		if path != "" {
+			files = append(files, path)
+		}
+	}
+	return files, nil
+}
+
 // GetLastCodepickerCommits finds the last N commits made by the agent.
 func (c *Client) GetLastCodepickerCommits(ctx context.Context, n int) ([]string, error) {
 	cmd := exec.CommandContext(ctx, "git", "log", "--grep=\\[codepicker\\]", fmt.Sprintf("-n%d", n), "--format=%H")

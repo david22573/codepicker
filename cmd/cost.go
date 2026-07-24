@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"text/tabwriter"
@@ -26,6 +27,21 @@ var costCmd = &cobra.Command{
 		cost, tokens, err := repo.GetTotalCost(cmd.Context())
 		if err != nil {
 			return fmt.Errorf("failed to fetch cost metrics: %w", err)
+		}
+
+		if GetJSON() {
+			avgCost := 0.0
+			if tokens > 0 {
+				avgCost = (cost / float64(tokens)) * 1000
+			}
+			costJSON := map[string]interface{}{
+				"total_spend":            cost,
+				"total_tokens":           tokens,
+				"avg_cost_per_1k_tokens": avgCost,
+			}
+			jsonData, _ := json.MarshalIndent(costJSON, "", "  ")
+			fmt.Println(string(jsonData))
+			return nil
 		}
 
 		fmt.Println("\n===================================================")

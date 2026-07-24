@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"text/tabwriter"
@@ -24,6 +25,17 @@ var historyCmd = &cobra.Command{
 		list, err := repo.ListExecutions(context.Background(), 20)
 		if err != nil {
 			return fmt.Errorf("failed to fetch history: %w", err)
+		}
+
+		var outputList interface{} = list
+		if list == nil {
+			outputList = []interface{}{}
+		}
+
+		if GetJSON() {
+			jsonData, _ := json.MarshalIndent(outputList, "", "  ")
+			fmt.Println(string(jsonData))
+			return nil
 		}
 
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
